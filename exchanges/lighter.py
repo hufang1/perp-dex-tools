@@ -520,32 +520,46 @@ class LighterClient(BaseExchangeClient):
             self.logger.log("Ticker is empty", "ERROR")
             raise ValueError("Ticker is empty")
 
-        order_api = lighter.OrderApi(self.api_client)
-        # Get all order books to find the market for our ticker
-        order_books = await order_api.order_books()
-
-        # Find the market that matches our ticker
-        market_info = None
-        for market in order_books.order_books:
-            if market.symbol == ticker:
-                market_info = market
-                break
-
-        if market_info is None:
-            self.logger.log("Failed to get markets", "ERROR")
-            raise ValueError("Failed to get markets")
-
-        market_summary = await order_api.order_book_details(market_id=market_info.market_id)
-        order_book_details = market_summary.order_book_details[0]
-        # Set contract_id to market name (Lighter uses market IDs as identifiers)
-        self.config.contract_id = market_info.market_id
-        self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
-        self.price_multiplier = pow(10, market_info.supported_price_decimals)
-
+        # 使用 requests 直接调用 REST API,避免 SDK 的 Pydantic 验证问题
+        # 参考对冲模式的实现 (hedge_mode_ext.py)
+        import requests
+        
+        url = f"{self.base_url}/api/v1/orderBooks"
+        headers = {"accept": "application/json"}
+        
         try:
-            self.config.tick_size = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
-        except Exception:
-            self.logger.log("Failed to get tick size", "ERROR")
-            raise ValueError("Failed to get tick size")
-
-        return self.config.contract_id, self.config.tick_size
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            if not response.text.strip():
+                raise ValueError("Empty response from Lighter API")
+            
+            data = response.json()
+            
+            if "order_books" not in data:
+                raise ValueError("Unexpected response format")
+            
+            # 查找匹配的市场
+            for market in data["order_books"]:
+                if market["symbol"] == ticker:
+                    market_id = market["market_id"]
+                    self.base_amount_multiplier = pow(10, market["supported_size_decimals"])
+                    self.price_multiplier = pow(10, market["supported_price_decimals"])
+                    tick_size = Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
+                    
+                    # 设置配置
+                    self.config.contract_id = market_id
+                    self.config.tick_size = tick_size
+                    
+                    self.logger.log(
+                        f"Contract found: ID={market_id}, tick_size={tick_size}",
+                        "INFO"
+                    )
+                    
+                    return market_id, tick_size
+            
+            raise ValueError(f"Ticker {ticker} not found in available markets")
+            
+        except Exception as e:
+            self.logger.log(f"Error getting contract attributes: {e}", "ERROR")
+            raise

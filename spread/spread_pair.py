@@ -1,0 +1,190 @@
+"""
+套利对 - 表示一个 Extended + Lighter 的套利持仓
+"""
+
+import time
+from decimal import Decimal
+from typing import Optional, Dict, Any
+
+
+class SpreadPair:
+    """套利对 - 记录一个完整的套利持仓"""
+    
+    def __init__(
+        self,
+        pair_id: int,
+        extended_side: str,       # 'buy' or 'sell'
+        extended_price: Decimal,
+        extended_quantity: Decimal,
+        lighter_price: Decimal,
+        lighter_quantity: Decimal,
+        extended_order_id: Optional[str] = None,
+        lighter_order_id: Optional[str] = None
+    ):
+        """
+        初始化套利对
+        
+        Args:
+            pair_id: 套利对 ID
+            extended_side: Extended 方向 ('buy' 或 'sell')
+            extended_price: Extended 成交价格
+            extended_quantity: Extended 成交数量
+            lighter_price: Lighter 成交价格
+            lighter_quantity: Lighter 成交数量 (应该与 extended_quantity 相同)
+            extended_order_id: Extended 订单 ID
+            lighter_order_id: Lighter 订单 ID
+        """
+        self.pair_id = pair_id
+        self.extended_side = extended_side
+        self.extended_price = extended_price
+        self.extended_quantity = extended_quantity
+        self.lighter_price = lighter_price
+        self.lighter_quantity = lighter_quantity
+        self.extended_order_id = extended_order_id
+        self.lighter_order_id = lighter_order_id
+        
+        # 时间戳
+        self.open_time = time.time()
+        self.close_time: Optional[float] = None
+        
+        # 状态
+        self.is_closed = False
+        
+        # 平仓信息
+        self.close_extended_price: Optional[Decimal] = None
+        self.close_lighter_price: Optional[Decimal] = None
+        self.realized_pnl: Optional[Decimal] = None
+    
+    @property
+    def lighter_side(self) -> str:
+        """Lighter 方向 (与 Extended 相反)"""
+        return 'sell' if self.extended_side == 'buy' else 'buy'
+    
+    @property
+    def holding_time(self) -> float:
+        """持仓时间 (秒)"""
+        if self.is_closed:
+            return self.close_time - self.open_time
+        return time.time() - self.open_time
+    
+    @property
+    def open_spread(self) -> Decimal:
+        """开仓时的价差"""
+        if self.extended_side == 'buy':
+            # Extended 买入, Lighter 卖出
+            return self.lighter_price - self.extended_price
+        else:
+            # Extended 卖出, Lighter 买入
+            return self.extended_price - self.lighter_price
+    
+    @property
+    def open_spread_rate(self) -> Decimal:
+        """开仓时的价差率"""
+        if self.extended_side == 'buy':
+            return self.open_spread / self.extended_price
+        else:
+            return self.open_spread / self.lighter_price
+    
+    def should_close(self, opportunity: Dict[str, Any]) -> bool:
+        """
+        判断是否应该平仓此套利对
+        
+        Args:
+            opportunity: 新的套利机会
+                {
+                    'side': 'buy' or 'sell',  # Extended 方向
+                    'extended_price': Decimal,
+                    'lighter_price': Decimal,
+                    ...
+                }
+        
+        Returns:
+            True 如果新机会是反方向 (可以用来平仓)
+        """
+        # 检查方向是否相反
+        return opportunity['side'] != self.extended_side
+    
+    def calculate_unrealized_pnl(
+        self,
+        current_extended_price: Decimal,
+        current_lighter_price: Decimal
+    ) -> Decimal:
+        """
+        计算未实现盈亏 (浮动盈亏)
+        
+        Args:
+            current_extended_price: 当前 Extended 价格 (用于平仓的价格)
+            current_lighter_price: 当前 Lighter 价格 (用于平仓的价格)
+        
+        Returns:
+            未实现盈亏 (USDT)
+        """
+        if self.extended_side == 'buy':
+            # 开仓: Extended 买 @ extended_price, Lighter 卖 @ lighter_price
+            # 平仓: Extended 卖 @ current_extended_price, Lighter 买 @ current_lighter_price
+            extended_pnl = (current_extended_price - self.extended_price) * self.extended_quantity
+            lighter_pnl = (self.lighter_price - current_lighter_price) * self.lighter_quantity
+        else:
+            # 开仓: Extended 卖 @ extended_price, Lighter 买 @ lighter_price
+            # 平仓: Extended 买 @ current_extended_price, Lighter 卖 @ current_lighter_price
+            extended_pnl = (self.extended_price - current_extended_price) * self.extended_quantity
+            lighter_pnl = (current_lighter_price - self.lighter_price) * self.lighter_quantity
+        
+        return extended_pnl + lighter_pnl
+    
+    def close(
+        self,
+        close_extended_price: Decimal,
+        close_lighter_price: Decimal
+    ) -> Decimal:
+        """
+        标记套利对为已平仓并计算实现盈亏
+        
+        Args:
+            close_extended_price: Extended 平仓价格
+            close_lighter_price: Lighter 平仓价格
+        
+        Returns:
+            实现盈亏 (USDT)
+        """
+        self.is_closed = True
+        self.close_time = time.time()
+        self.close_extended_price = close_extended_price
+        self.close_lighter_price = close_lighter_price
+        
+        # 计算实现盈亏
+        self.realized_pnl = self.calculate_unrealized_pnl(
+            close_extended_price,
+            close_lighter_price
+        )
+        
+        return self.realized_pnl
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典 (用于日志记录)"""
+        return {
+            'pair_id': self.pair_id,
+            'extended_side': self.extended_side,
+            'extended_price': float(self.extended_price),
+            'extended_quantity': float(self.extended_quantity),
+            'lighter_price': float(self.lighter_price),
+            'lighter_quantity': float(self.lighter_quantity),
+            'open_spread': float(self.open_spread),
+            'open_spread_rate': float(self.open_spread_rate),
+            'open_time': self.open_time,
+            'close_time': self.close_time,
+            'holding_time': self.holding_time,
+            'is_closed': self.is_closed,
+            'close_extended_price': float(self.close_extended_price) if self.close_extended_price else None,
+            'close_lighter_price': float(self.close_lighter_price) if self.close_lighter_price else None,
+            'realized_pnl': float(self.realized_pnl) if self.realized_pnl else None
+        }
+    
+    def __repr__(self) -> str:
+        """字符串表示"""
+        status = "已平仓" if self.is_closed else "持仓中"
+        return (
+            f"SpreadPair(#{self.pair_id}, {self.extended_side.upper()}, "
+            f"{self.extended_quantity} @ E:{self.extended_price}/L:{self.lighter_price}, "
+            f"{status}, 持仓{self.holding_time:.0f}秒)"
+        )
