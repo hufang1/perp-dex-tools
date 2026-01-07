@@ -7,7 +7,12 @@
       "Bash(.specify/scripts/bash/create-new-feature.sh --json --number 1 --short-name \"fix-spread-arb\" \"读取@docs下的demand和modules，modules是这个项目功能模块的介绍。demand是后续迭代的每个模块的需求文档 设计 和方案，都会放在同一个文件夹下。\n\n现在我最核心的诉求是 我在 spread文件夹下写了一个 lighter 和 extended 两个dex间套利的逻辑。但是后续发现 实际运行会报错，而且实际运行起来的效果不佳。请你通过需求文档了解套利的核心思路，查看代码 优化代码\")",
       "Bash(cat:*)",
       "Bash(.specify/scripts/bash/create-new-feature.sh:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(.specify/scripts/bash/setup-plan.sh:*)",
+      "Bash(.specify/scripts/bash/update-agent-context.sh:*)",
+      "Bash(.specify/scripts/bash/check-prerequisites.sh:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(python -m pytest:*)"
     ]
   }
 }

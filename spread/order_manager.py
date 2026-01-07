@@ -29,12 +29,21 @@ class SpreadOrderManager:
         self.config = config
         self.extended_client = extended_client
         self.logger = logging.getLogger("OrderManager")
-        
+
         # 当前订单状态跟踪
         self.current_order_id: Optional[str] = None
         self.current_order_status: Optional[str] = None
         self.filled_quantity: Decimal = Decimal('0')
         self.filled_price: Decimal = Decimal('0')
+
+        # 订单状态缓存机制（修复竞态条件bug）
+        self._pending_updates: Dict[str, list] = {}  # 待应用的订单更新缓存
+        self._update_lock = asyncio.Lock()  # 保护缓存和订单状态的并发锁
+        self._cache_ttl: int = 300  # 缓存TTL（5分钟）
+        self._max_cache_size: int = 100  # 最大缓存订单数
+        self._max_updates_per_order: int = 10  # 每订单最大更新数
+        self._cache_hits: int = 0  # 缓存命中次数
+        self._cache_misses: int = 0  # 缓存未命中次数
     
     async def place_spread_maker_order(
         self,
@@ -86,7 +95,10 @@ class SpreadOrderManager:
                 }
             
             self.current_order_id = order_result.order_id
-            
+
+            # 【竞态条件修复】设置current_order_id后立即检查并应用缓存更新
+            await self._apply_pending_updates(order_result.order_id)
+
             self.logger.info(
                 f"✅ 订单已提交: {order_result.order_id} "
                 f"@ {order_result.price:.2f}"
@@ -131,8 +143,11 @@ class SpreadOrderManager:
         """
         start_time = time.time()
         check_interval = 0.5  # 检查间隔 500ms
-        
+
         self.logger.info(f"等待订单成交: {order_id} (超时 {timeout}秒)")
+
+        # 【竞态条件修复】在循环开始前检查是否有缓存的更新
+        await self._apply_pending_updates(order_id)
         
         while time.time() - start_time < timeout:
             # 检查订单状态 (通过 WebSocket 回调更新)
@@ -231,14 +246,28 @@ class SpreadOrderManager:
             # 关闭订单不更新maker_order的状态
             return
 
-        # 只处理当前订单
-        if order_id != self.current_order_id:
-            self.logger.debug(
-                f"忽略订单更新: 收到order_id={order_id}, "
-                f"当前current_order_id={self.current_order_id}"
+        # 【竞态条件修复】检查current_order_id是否已设置
+        if self.current_order_id is None:
+            # 订单ID尚未设置，缓存这个更新
+            self.logger.info(
+                f"⚡ 检测到竞态条件: 缓存订单更新, order_id={order_id}, "
+                f"current_order_id=None"
             )
+            self._add_pending_update(order_id, order_data)
             return
 
+        # 检查是否是当前订单
+        if order_id != self.current_order_id:
+            # 不是当前订单，也尝试缓存（可能是其他订单的更新）
+            self.logger.debug(
+                f"[DEBUG] 订单ID不匹配: 缓存更新, "
+                f"收到order_id={order_id}, "
+                f"当前current_order_id={self.current_order_id}"
+            )
+            self._add_pending_update(order_id, order_data)
+            return
+
+        # 是当前订单，直接应用更新
         self.current_order_status = order_data.get('status')
 
         filled_size = Decimal(str(order_data.get('filled_size', 0)))
@@ -250,3 +279,154 @@ class SpreadOrderManager:
             f"✅ 订单状态更新: {order_id} -> {self.current_order_status} "
             f"已成交: {self.filled_quantity:.4f} @ {self.filled_price:.2f}"
         )
+
+    def _add_pending_update(self, order_id: str, order_data: Dict[str, Any]) -> None:
+        """
+        添加订单更新到缓存
+
+        Args:
+            order_id: 订单ID
+            order_data: 订单数据
+        """
+        # 创建缓存条目
+        cache_entry = {
+            "order_data": order_data,
+            "timestamp": time.time()
+        }
+
+        # 初始化该订单的缓存列表（如果不存在）
+        if order_id not in self._pending_updates:
+            self._pending_updates[order_id] = []
+
+        # 限制每个订单的缓存更新数量
+        if len(self._pending_updates[order_id]) >= self._max_updates_per_order:
+            # 删除最旧的更新
+            self._pending_updates[order_id].pop(0)
+            self.logger.debug(
+                f"[DEBUG] 缓存限制: 删除最旧的更新, order_id={order_id}, "
+                f"当前数量={len(self._pending_updates[order_id])}"
+            )
+
+        # 添加新更新
+        self._pending_updates[order_id].append(cache_entry)
+        self.logger.debug(
+            f"[DEBUG] 缓存订单更新: order_id={order_id}, "
+            f"timestamp={cache_entry['timestamp']:.3f}, "
+            f"status={order_data.get('status')}"
+        )
+
+    async def _apply_pending_updates(self, order_id: str) -> None:
+        """
+        应用指定订单的缓存更新
+
+        Args:
+            order_id: 订单ID
+        """
+        async with self._update_lock:
+            # 检查是否有该订单的缓存
+            if order_id not in self._pending_updates:
+                self.logger.debug(
+                    f"[DEBUG] 无缓存更新: order_id={order_id}"
+                )
+                return
+
+            # 获取并删除缓存
+            updates = self._pending_updates.pop(order_id)
+            self.logger.debug(
+                f"[DEBUG] 应用缓存: order_id={order_id}, 更新数量={len(updates)}"
+            )
+
+            # 按时间戳升序排序
+            updates.sort(key=lambda x: x['timestamp'])
+
+            # 依次应用每个更新
+            for update in updates:
+                order_data = update['order_data']
+                status = order_data.get('status')
+
+                # 更新订单状态
+                self.current_order_status = status
+
+                # 更新成交数量和价格
+                filled_size = Decimal(str(order_data.get('filled_size', 0)))
+                if filled_size > 0:
+                    self.filled_quantity = filled_size
+                    self.filled_price = Decimal(str(order_data.get('price', 0)))
+
+                self.logger.info(
+                    f"✅ 应用缓存的订单更新: order_id={order_id}, "
+                    f"status={status}, "
+                    f"filled_size={self.filled_quantity:.4f}, "
+                    f"price={self.filled_price:.2f}"
+                )
+
+            # 更新统计
+            self._cache_hits += 1
+            self.logger.info(
+                f"📊 缓存统计: 命中率={self._get_cache_hit_rate():.1%}, "
+                f"命中={self._cache_hits}, 未命中={self._cache_misses}"
+            )
+
+    async def _cleanup_cache(self) -> None:
+        """
+        清理过期和超限的缓存
+        """
+        async with self._update_lock:
+            now = time.time()
+            orders_to_remove = []
+
+            # 1. 清理超过TTL的缓存
+            for order_id, updates in self._pending_updates.items():
+                if updates and now - updates[0]['timestamp'] > self._cache_ttl:
+                    orders_to_remove.append(order_id)
+                    self.logger.warning(
+                        f"⚠️ TTL过期: 清理缓存, order_id={order_id}, "
+                        f"年龄={now - updates[0]['timestamp']:.1f}秒"
+                    )
+
+            # 2. 清理已完成订单的缓存
+            for order_id, updates in self._pending_updates.items():
+                if updates:
+                    latest_status = updates[-1]['order_data'].get('status')
+                    if latest_status in ['FILLED', 'CANCELLED', 'CANCELED']:
+                        if order_id not in orders_to_remove:
+                            orders_to_remove.append(order_id)
+                            self.logger.debug(
+                                f"[DEBUG] 订单完成: 清理缓存, order_id={order_id}, "
+                                f"status={latest_status}"
+                            )
+
+            # 3. 清理超过最大限制的缓存（最旧的）
+            if len(self._pending_updates) > self._max_cache_size:
+                # 按最早的时间戳排序
+                sorted_orders = sorted(
+                    self._pending_updates.items(),
+                    key=lambda x: x[1][0]['timestamp'] if x[1] else 0
+                )
+                excess = len(self._pending_updates) - self._max_cache_size
+                for order_id, _ in sorted_orders[:excess]:
+                    if order_id not in orders_to_remove:
+                        orders_to_remove.append(order_id)
+
+            # 执行清理
+            for order_id in orders_to_remove:
+                if order_id in self._pending_updates:
+                    del self._pending_updates[order_id]
+
+            if orders_to_remove:
+                self.logger.warning(
+                    f"⚠️ 清理缓存: 清理了{len(orders_to_remove)}个订单, "
+                    f"剩余{len(self._pending_updates)}个"
+                )
+
+    def _get_cache_hit_rate(self) -> float:
+        """
+        计算缓存命中率
+
+        Returns:
+            命中率（0-1之间）
+        """
+        total = self._cache_hits + self._cache_misses
+        if total == 0:
+            return 0.0
+        return self._cache_hits / total
