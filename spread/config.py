@@ -9,13 +9,13 @@ from decimal import Decimal
 @dataclass
 class SpreadArbConfig:
     """价差套利配置"""
-    
+
     # ==================== 基础配置 ====================
     ticker: str = 'ETH'                                    # 交易对符号
-    order_quantity_usdt: Decimal = Decimal('5')          # 单次下单金额 (USDT)
-    
+    order_quantity_usdt: Decimal = Decimal('35')          # 单次下单金额 (USDT)
+
     # ==================== 价差配置 ====================
-    min_spread_rate: Decimal = Decimal('0.0005')           # 最小价差率 (0.05%)
+    min_spread_rate: Decimal = Decimal('0.0012')           # 最小价差率 (0.12%) - 调整为合理值
     latency_buffer: Decimal = Decimal('0.0001')            # 延迟缓冲 (0.01%)
     
     # ==================== 持仓管理 ====================
@@ -25,12 +25,16 @@ class SpreadArbConfig:
     # ==================== 平仓策略 ====================
     enable_time_close: bool = True                         # 启用时间止盈
     max_holding_time: int = 1800                           # 最大持仓时间 (秒, 30分钟)
-    
+
     enable_profit_target: bool = True                      # 启用盈利目标
-    profit_target_rate: Decimal = Decimal('0.002')         # 目标盈利率 (0.2%)
-    
+    profit_target_rate: Decimal = Decimal('0.0008')        # 目标盈利率 (0.08%) - 降低以更容易触发
+
     enable_stop_loss: bool = True                          # 启用止损
     stop_loss_usdt: Decimal = Decimal('5')                 # 止损金额 ($5)
+
+    # ==================== 新增：时间止盈配置 ====================
+    time_close_profit_threshold: Decimal = Decimal('0.0001')  # 时间止盈最小利润率 (0.01%)
+    allow_negative_close: bool = False                     # 是否允许负利润平仓 (False=必须利润>0)
     
     # ==================== 风险控制 ====================
     max_lighter_depth_ratio: Decimal = Decimal('0.5')      # Lighter 深度使用比例 (50%)

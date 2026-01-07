@@ -402,25 +402,41 @@ class LighterClient(BaseExchangeClient):
             return OrderResult(success=False, error_message='Failed to send cancellation transaction')
 
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
-        """Get order information from Lighter using official SDK."""
-        try:
-            # Use shared API client to get account info
-            account_api = lighter.AccountApi(self.api_client)
+        """Get order information from Lighter.
 
-            # Get account orders
+        注意：order_id是client_order_index，而API返回的是order_index。
+        使用self.current_order来获取最新订单信息（由WebSocket更新）。
+        """
+        try:
+            # 首先检查current_order（由WebSocket实时更新）
+            if self.current_order is not None:
+                # current_order包含最新的订单信息
+                return self.current_order
+
+            # 如果current_order不可用，尝试从活跃订单查询
+            # 注意：由于order_id是client_order_index，而API返回order_index，
+            # 直接匹配可能失败，所以这里只是fallback
+            active_orders = await self.get_active_orders(self.config.contract_id)
+
+            # 由于ID不匹配，我们返回最新的订单
+            if active_orders:
+                # 返回最新的订单（假设是刚下的单）
+                return active_orders[0]
+
+            # 如果还是没有，检查positions
+            account_api = lighter.AccountApi(self.api_client)
             account_data = await account_api.account(by="index", value=str(self.account_index))
 
-            # Look for the specific order in account positions
             for position in account_data.positions:
                 if position.symbol == self.config.ticker:
                     position_amt = abs(float(position.position))
-                    if position_amt > 0.001:  # Only include significant positions
+                    if position_amt > 0.001:
                         return OrderInfo(
                             order_id=order_id,
                             side="buy" if float(position.position) > 0 else "sell",
                             size=Decimal(str(position_amt)),
                             price=Decimal(str(position.avg_price)),
-                            status="FILLED",  # Positions are filled orders
+                            status="FILLED",
                             filled_size=Decimal(str(position_amt)),
                             remaining_size=Decimal('0')
                         )

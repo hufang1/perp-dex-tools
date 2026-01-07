@@ -85,6 +85,9 @@ class SpreadArbitrageBot:
             'total_loss': Decimal('0'),
             'max_open_pairs': 0
         }
+
+        # 🔴 未对冲的Extended仓位跟踪（关键修复）
+        self.unhedged_positions = []  # List[Dict] 记录未对冲的Extended订单
     
     async def run(self):
         """主运行循环"""
@@ -163,9 +166,18 @@ class SpreadArbitrageBot:
     async def _strategy_loop(self):
         """策略主循环"""
         self.logger.info("策略循环启动")
-        
+
         while not self.stop_flag:
             try:
+                # 🔴 关键安全检查：如果有未对冲仓位，立即暂停
+                if len(self.unhedged_positions) > 0:
+                    self.logger.error(
+                        f"🚨 检测到 {len(self.unhedged_positions)} 个未对冲仓位! "
+                        f"禁止开新仓! 请手动处理!"
+                    )
+                    await asyncio.sleep(5)
+                    continue
+
                 # 检查断路器
                 if self.is_paused:
                     if time.time() < self.pause_until:
@@ -288,7 +300,7 @@ class SpreadArbitrageBot:
         while not self.stop_flag:
             try:
                 await asyncio.sleep(60)  # 每分钟报告一次
-                
+
                 self.logger.info("="*60)
                 self.logger.info("📊 统计报告")
                 self.logger.info(f"  持仓套利对: {len(self.open_pairs)}")
@@ -301,6 +313,16 @@ class SpreadArbitrageBot:
                 self.logger.info(f"  总亏损: ${self.stats['total_loss']:.2f}")
                 net_pnl = self.stats['total_profit'] - self.stats['total_loss']
                 self.logger.info(f"  净盈亏: ${net_pnl:.2f}")
+
+                # 🔴 显示未对冲仓位警告
+                if len(self.unhedged_positions) > 0:
+                    self.logger.error(f"  ⚠️ 未对冲仓位: {len(self.unhedged_positions)} 个")
+                    for pos in self.unhedged_positions:
+                        self.logger.error(
+                            f"     - {pos['side']} {pos['quantity']:.4f} @ {pos['price']:.2f} "
+                            f"(订单ID: {pos['order_id']})"
+                        )
+
                 self.logger.info("="*60)
                 
             except Exception as e:
@@ -404,12 +426,39 @@ class SpreadArbitrageBot:
                 quantity=fill_result['filled_quantity'],
                 expected_price=opportunity['lighter_price']
             )
-            
+
             if not hedge_result['success']:
                 self.stats['failed_opens'] += 1
                 self.consecutive_failures += 1
-                self.logger.error("❌ 对冲失败!存在未对冲风险!")
-                # TODO: 触发紧急警报
+
+                # 🔴 关键修复：记录未对冲的Extended仓位
+                unhedged_position = {
+                    'order_id': order['order_id'],
+                    'side': opportunity['side'],
+                    'quantity': fill_result['filled_quantity'],
+                    'price': fill_result['filled_price'],
+                    'timestamp': time.time(),
+                    'error': hedge_result.get('error', 'Unknown')
+                }
+                self.unhedged_positions.append(unhedged_position)
+
+                self.logger.error(
+                    f"❌ 对冲失败! Extended单边仓位累积!\n"
+                    f"   订单ID: {order['order_id']}\n"
+                    f"   方向: {opportunity['side']}\n"
+                    f"   数量: {fill_result['filled_quantity']:.4f} @ {fill_result['filled_price']:.2f}\n"
+                    f"   错误: {hedge_result.get('error', 'Unknown')}\n"
+                    f"   未对冲仓位总数: {len(self.unhedged_positions)}"
+                )
+
+                # 🔴 触发紧急熔断：立即暂停，防止继续开仓
+                self.is_paused = True
+                self.pause_until = time.time() + 3600  # 暂停1小时
+                self.logger.error(
+                    f"🚨 触发紧急熔断! 检测到未对冲仓位，暂停交易1小时!\n"
+                    f"   请手动检查并平仓未对冲的Extended仓位!"
+                )
+
                 return False
             
             # 4. 创建套利对
@@ -539,29 +588,50 @@ class SpreadArbitrageBot:
         current_extended_price: Decimal,
         current_lighter_price: Decimal
     ) -> tuple[bool, Optional[str]]:
-        """检查是否需要强制平仓"""
-        # 1. 时间止盈
-        if self.config.enable_time_close:
-            if pair.holding_time > self.config.max_holding_time:
-                return True, f"时间止盈 ({pair.holding_time:.0f}秒)"
-        
-        # 2. 计算浮动盈亏
+        """检查是否需要强制平仓
+
+        平仓优先级：
+        1. 止损（达到止损线立即平仓）
+        2. 盈利止盈（达到目标利润立即平仓）
+        3. 时间止盈（达到最大持仓时间 且 满足利润条件）
+        """
+        # 计算浮动盈亏
         unrealized_pnl = pair.calculate_unrealized_pnl(
             current_extended_price,
             current_lighter_price
         )
-        
-        # 3. 盈利止盈
+
+        # 1. 止损检查（最高优先级）
+        if self.config.enable_stop_loss:
+            if unrealized_pnl < -self.config.stop_loss_usdt:
+                return True, f"止损 (${unrealized_pnl:.2f})"
+
+        # 2. 盈利止盈检查
         if self.config.enable_profit_target:
             target_profit = pair.extended_quantity * current_extended_price * self.config.profit_target_rate
             if unrealized_pnl >= target_profit * Decimal('0.8'):
                 return True, f"盈利止盈 (${unrealized_pnl:.2f})"
-        
-        # 4. 止损
-        if self.config.enable_stop_loss:
-            if unrealized_pnl < -self.config.stop_loss_usdt:
-                return True, f"止损 (${unrealized_pnl:.2f})"
-        
+
+        # 3. 时间止盈检查（修复后的逻辑）
+        if self.config.enable_time_close:
+            if pair.holding_time > self.config.max_holding_time:
+                # 计算最小利润要求
+                min_profit = pair.extended_quantity * current_extended_price * self.config.time_close_profit_threshold
+
+                if self.config.allow_negative_close:
+                    # 允许负利润平仓（不推荐）
+                    return True, f"时间止盈 ({pair.holding_time:.0f}秒, 利润${unrealized_pnl:.2f})"
+                else:
+                    # 必须利润大于阈值才能平仓
+                    if unrealized_pnl >= min_profit:
+                        return True, f"时间止盈 ({pair.holding_time:.0f}秒, 利润${unrealized_pnl:.2f})"
+                    else:
+                        # 利润不足，继续等待
+                        self.logger.debug(
+                            f"套利对 #{pair.pair_id} 已达最大持仓时间但利润不足: "
+                            f"${unrealized_pnl:.4f} < ${min_profit:.4f}, 继续等待"
+                        )
+
         return False, None
     
     def _trigger_circuit_breaker(self):
@@ -596,7 +666,7 @@ class SpreadArbitrageBot:
         """清理资源"""
         self.logger.info("清理资源...")
         self.stop_flag = True
-        
+
         # 打印最终统计
         self.logger.info("="*60)
         self.logger.info("📊 最终统计")
@@ -607,4 +677,19 @@ class SpreadArbitrageBot:
         self.logger.info(f"  成功平仓: {self.stats['successful_closes']}")
         net_pnl = self.stats['total_profit'] - self.stats['total_loss']
         self.logger.info(f"  净盈亏: ${net_pnl:.2f}")
+
+        # 🔴 显示未对冲仓位警告
+        if len(self.unhedged_positions) > 0:
+            self.logger.error("")
+            self.logger.error("🚨🚨🚨 警告：存在未对冲的Extended仓位！ 🚨🚨🚨")
+            self.logger.error(f"   数量：{len(self.unhedged_positions)} 个")
+            self.logger.error("   请立即手动平仓这些仓位，否则面临巨大风险！")
+            self.logger.error("")
+            for pos in self.unhedged_positions:
+                self.logger.error(
+                    f"   ❌ {pos['side'].upper()} {pos['quantity']:.4f} @ ${pos['price']:.2f} "
+                    f"(订单ID: {pos['order_id']}, 错误: {pos['error']})"
+                )
+            self.logger.error("")
+
         self.logger.info("="*60)
