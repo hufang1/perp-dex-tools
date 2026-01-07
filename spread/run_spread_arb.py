@@ -52,10 +52,14 @@ def parse_arguments():
                         help='单次下单金额 USDT (default: 35)')
     
     # 价差参数
-    parser.add_argument('--min-spread', type=float, default=0.0005,
-                        help='最小价差率 (default: 0.0005 = 0.05%%)')
+    parser.add_argument('--min-spread', type=float, default=0.0008,
+                        help='最小价差率 (default: 0.0008 = 0.08%%)')
     parser.add_argument('--latency-buffer', type=float, default=0.0001,
                         help='延迟缓冲 (default: 0.0001 = 0.01%%)')
+    parser.add_argument('--profit-target', type=float, default=0.0005,
+                        help='盈利目标 (default: 0.0005 = 0.05%%)')
+    parser.add_argument('--time-close-threshold', type=float, default=0.0001,
+                        help='时间止盈最小利润 (default: 0.0001 = 0.01%%)')
     
     # 持仓管理
     parser.add_argument('--max-pairs', type=int, default=3,
@@ -127,17 +131,19 @@ async def main():
     # 加载环境变量
     dotenv.load_dotenv(args.env_file)
     logger.info(f"已加载环境变量: {args.env_file}")
-    
+    print(f"args: {args}")
     # 创建配置
     config = SpreadArbConfig(
         ticker=args.ticker.upper(),
         order_quantity_usdt=Decimal(str(args.quantity)),
-        min_spread_rate=Decimal(str(args.min_spread)),
+        min_spread_rate=Decimal(str(args.min_spread)),  # --min-spread 自动转换为 args.min_spread
         latency_buffer=Decimal(str(args.latency_buffer)),
         max_open_pairs=args.max_pairs,
         max_holding_time=args.max_holding_time,
         stop_loss_usdt=Decimal(str(args.stop_loss)),
         slippage_tolerance=Decimal(str(args.slippage_tolerance)),
+        profit_target_rate=Decimal(str(args.profit_target)),  # 新增
+        time_close_profit_threshold=Decimal(str(args.time_close_threshold)),  # 新增
         log_level=args.log_level,
         prioritize_closing=not args.no_prioritize_closing
     )

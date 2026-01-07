@@ -15,7 +15,7 @@ class SpreadArbConfig:
     order_quantity_usdt: Decimal = Decimal('35')          # 单次下单金额 (USDT)
 
     # ==================== 价差配置 ====================
-    min_spread_rate: Decimal = Decimal('0.0012')           # 最小价差率 (0.12%) - 调整为合理值
+    min_spread_rate: Decimal = Decimal('0.0008')           # 最小价差率 (0.08%) - 降低以增加交易机会
     latency_buffer: Decimal = Decimal('0.0001')            # 延迟缓冲 (0.01%)
     
     # ==================== 持仓管理 ====================
@@ -27,7 +27,7 @@ class SpreadArbConfig:
     max_holding_time: int = 1800                           # 最大持仓时间 (秒, 30分钟)
 
     enable_profit_target: bool = True                      # 启用盈利目标
-    profit_target_rate: Decimal = Decimal('0.0008')        # 目标盈利率 (0.08%) - 降低以更容易触发
+    profit_target_rate: Decimal = Decimal('0.0005')        # 目标盈利率 (0.05%) - 更快平仓
 
     enable_stop_loss: bool = True                          # 启用止损
     stop_loss_usdt: Decimal = Decimal('5')                 # 止损金额 ($5)
