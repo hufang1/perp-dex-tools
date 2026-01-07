@@ -15,7 +15,7 @@ class SpreadArbConfig:
     order_quantity_usdt: Decimal = Decimal('5')          # 单次下单金额 (USDT)
     
     # ==================== 价差配置 ====================
-    min_spread_rate: Decimal = Decimal('0.0002')           # 最小价差率 (0.05%)
+    min_spread_rate: Decimal = Decimal('0.0005')           # 最小价差率 (0.05%)
     latency_buffer: Decimal = Decimal('0.0001')            # 延迟缓冲 (0.01%)
     
     # ==================== 持仓管理 ====================

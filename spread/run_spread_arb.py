@@ -52,8 +52,8 @@ def parse_arguments():
                         help='单次下单金额 USDT (default: 35)')
     
     # 价差参数
-    parser.add_argument('--min-spread', type=float, default=0.0002,
-                        help='最小价差率 (default: 0.0002 = 0.02%%)')
+    parser.add_argument('--min-spread', type=float, default=0.0005,
+                        help='最小价差率 (default: 0.0005 = 0.05%%)')
     parser.add_argument('--latency-buffer', type=float, default=0.0001,
                         help='延迟缓冲 (default: 0.0001 = 0.01%%)')
     
