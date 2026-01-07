@@ -181,7 +181,7 @@ class SpreadArbitrageBot:
                 extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
                 lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
                 lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
-                
+                print(f"extended_bid: {extended_bid}, extended_ask: {extended_ask}, lighter_bid: {lighter_bid}, lighter_ask: {lighter_ask}")
                 # 检查价格有效性
                 if extended_bid <= 0 or lighter_bid <= 0:
                     await asyncio.sleep(0.1)
@@ -317,14 +317,62 @@ class SpreadArbitrageBot:
         """开新的套利对"""
         try:
             self.logger.info(f"开仓套利对...")
-            
+            self.logger.info(
+                f"[DEBUG] 机会详情: type={opportunity['type']}, "
+                f"side={opportunity['side']}, "
+                f"extended_price={opportunity['extended_price']}, "
+                f"lighter_price={opportunity['lighter_price']}, "
+                f"quantity={opportunity['quantity']:.6f}"
+            )
+
+            # 🆕 预检查：验证Lighter是否有足够的流动性和条件
+            hedge_side = 'sell' if opportunity['side'] == 'buy' else 'buy'
+
+            self.logger.info(f"[预检查] 检查Lighter对冲条件...")
+
+            # 检查Lighter订单簿深度
+            lighter_depth_value = self.calculator.check_lighter_depth_value(
+                lighter_orderbook=self.lighter_orderbook,
+                side=hedge_side
+            )
+
+            if lighter_depth_value < self.config.min_lighter_depth_usdt:
+                self.logger.warning(
+                    f"❌ 预检查失败: Lighter深度不足 "
+                    f"(${lighter_depth_value:.2f} < ${self.config.min_lighter_depth_usdt})"
+                )
+                self.stats['opportunities_rejected'] += 1
+                return False
+
+            # 检查具体的安全数量
+            is_sufficient, safe_quantity, avg_price = self.calculator.calculate_max_safe_quantity(
+                lighter_orderbook=self.lighter_orderbook,
+                side=hedge_side,
+                target_quantity=opportunity['quantity']
+            )
+
+            if not is_sufficient:
+                self.logger.warning(
+                    f"❌ 预检查失败: Lighter深度不足以执行完整对冲 "
+                    f"(需要{opportunity['quantity']:.4f}, 安全{safe_quantity:.4f})"
+                )
+                self.stats['opportunities_rejected'] += 1
+                return False
+
+            self.logger.info(
+                f"✅ 预检查通过: Lighter深度=${lighter_depth_value:.2f}, "
+                f"可对冲{safe_quantity:.4f} @ ${avg_price:.2f}"
+            )
+
             # 1. Extended 下 Maker 单
             order = await self.order_manager.place_spread_maker_order(
                 side=opportunity['side'],
                 price=opportunity['extended_price'],
                 quantity=opportunity['quantity']
             )
-            
+
+            self.logger.info(f"[DEBUG] 下单返回: success={order['success']}, order_id={order.get('order_id')}")
+
             if not order['success']:
                 self.stats['failed_opens'] += 1
                 self.consecutive_failures += 1
@@ -527,6 +575,10 @@ class SpreadArbitrageBot:
     
     def _handle_extended_order_update(self, order_data: Dict[str, Any]):
         """处理 Extended 订单更新 (WebSocket 回调)"""
+        self.logger.info(
+            f"[DEBUG] bot收到订单更新: order_data={order_data}, "
+            f"current_order_id={self.order_manager.current_order_id}"
+        )
         self.order_manager.update_order_status(order_data)
     
     def update_extended_orderbook(self, orderbook_data: Dict[str, Any]):

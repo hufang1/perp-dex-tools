@@ -211,7 +211,7 @@ class SpreadOrderManager:
     def update_order_status(self, order_data: Dict[str, Any]):
         """
         更新订单状态 (由 WebSocket 回调调用)
-        
+
         Args:
             order_data: 订单数据
                 {
@@ -223,19 +223,30 @@ class SpreadOrderManager:
                 }
         """
         order_id = order_data.get('order_id')
-        
+
+        # 修复：只处理当前订单的OPEN类型订单，忽略CLOSE类型
+        # CLOSE类型订单用于平仓，不应该影响开仓流程
+        order_type = order_data.get('order_type', '')
+        if order_type == 'CLOSE':
+            # 关闭订单不更新maker_order的状态
+            return
+
         # 只处理当前订单
         if order_id != self.current_order_id:
+            self.logger.debug(
+                f"忽略订单更新: 收到order_id={order_id}, "
+                f"当前current_order_id={self.current_order_id}"
+            )
             return
-        
+
         self.current_order_status = order_data.get('status')
-        
+
         filled_size = Decimal(str(order_data.get('filled_size', 0)))
         if filled_size > 0:
             self.filled_quantity = filled_size
             self.filled_price = Decimal(str(order_data.get('price', 0)))
-        
-        self.logger.debug(
-            f"订单状态更新: {order_id} -> {self.current_order_status} "
-            f"已成交: {self.filled_quantity:.4f}"
+
+        self.logger.info(
+            f"✅ 订单状态更新: {order_id} -> {self.current_order_status} "
+            f"已成交: {self.filled_quantity:.4f} @ {self.filled_price:.2f}"
         )

@@ -67,7 +67,7 @@ class SpreadCalculator:
             
             # 扣除延迟缓冲后的预期利润率
             expected_profit_rate = spread_rate - self.config.latency_buffer
-            
+            print(f"expected_profit_rate: {expected_profit_rate}")
             if expected_profit_rate >= self.config.min_spread_rate:
                 # 计算下单数量 (USDT 转币数量)
                 quantity = self.config.order_quantity_usdt / extended_mid_price
@@ -91,7 +91,7 @@ class SpreadCalculator:
             
             # 扣除延迟缓冲后的预期利润率
             expected_profit_rate = spread_rate - self.config.latency_buffer
-            
+            print(f"expected_profit_rate: {expected_profit_rate}")
             if expected_profit_rate >= self.config.min_spread_rate:
                 # 计算下单数量
                 quantity = self.config.order_quantity_usdt / extended_mid_price

@@ -52,8 +52,8 @@ def parse_arguments():
                         help='单次下单金额 USDT (default: 35)')
     
     # 价差参数
-    parser.add_argument('--min-spread', type=float, default=0.0005,
-                        help='最小价差率 (default: 0.0005 = 0.05%%)')
+    parser.add_argument('--min-spread', type=float, default=0.0002,
+                        help='最小价差率 (default: 0.0002 = 0.02%%)')
     parser.add_argument('--latency-buffer', type=float, default=0.0001,
                         help='延迟缓冲 (default: 0.0001 = 0.01%%)')
     
@@ -168,17 +168,55 @@ async def main():
     }
     lighter_config = Config(lighter_config_dict)
     lighter_client = LighterClient(lighter_config)
-    
+
+    # 🔍 DEBUG: 验证客户端创建成功
+    logger.info(f"✅ LighterClient已创建, config.contract_id='{lighter_client.config.contract_id}'")
+
     # 获取合约信息 (必须在连接 WebSocket 之前获取，因为订阅需要 Contract ID)
     logger.info("获取合约信息...")
-    extended_contract_id, extended_tick_size = await extended_client.get_contract_attributes()
-    lighter_contract_id, lighter_tick_size = await lighter_client.get_contract_attributes()
+
+    # 🔍 DEBUG: 开始获取Extended合约信息
+    logger.info("📍 [1/4] 开始获取Extended合约属性...")
+    try:
+        extended_contract_id, extended_tick_size = await extended_client.get_contract_attributes()
+        logger.info(f"✅ Extended合约属性: contract_id={extended_contract_id}")
+    except Exception as e:
+        logger.error(f"❌ 获取Extended合约信息失败: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
+        raise
+
+    # 🔍 DEBUG: 开始获取Lighter合约信息
+    logger.info("📍 [2/4] 开始获取Lighter合约属性...")
+    try:
+        lighter_contract_id, lighter_tick_size = await lighter_client.get_contract_attributes()
+        logger.info(f"✅ Lighter合约属性: contract_id={lighter_contract_id}")
+    except Exception as e:
+        logger.error(f"❌ 获取Lighter合约信息失败: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
+        raise
     
     extended_client.contract_id = extended_contract_id
     extended_client.config.tick_size = extended_tick_size
+    extended_client.config.contract_id = extended_contract_id
     lighter_client.contract_id = lighter_contract_id
     lighter_client.config.tick_size = lighter_tick_size
-    
+    lighter_client.config.contract_id = lighter_contract_id
+
+    # 🔍 DEBUG: 验证设置是否成功
+    logger.info(f"📍 [3/4] 验证config设置:")
+    logger.info(f"  Extended: contract_id={extended_client.config.contract_id}")
+    logger.info(f"  Lighter: contract_id={lighter_client.config.contract_id}")
+    logger.info(f"  lighter_client.contract_id={lighter_client.contract_id}")
+
+    # 再次验证（确保不是空字符串，注意 0 是合法的 market_id）
+    if lighter_client.config.contract_id == '' or lighter_client.config.contract_id is None:
+        logger.error("❌ 错误: lighter_client.config.contract_id 仍为空!")
+        raise ValueError("lighter_client.config.contract_id 未被正确设置")
+
+    logger.info(f"✅ contract_id 验证通过: {lighter_client.config.contract_id}")
+
     logger.info(f"Extended 合约: {extended_contract_id}, Tick Size: {extended_tick_size}")
     logger.info(f"Lighter 合约: {lighter_contract_id}, Tick Size: {lighter_tick_size}")
 
@@ -188,9 +226,16 @@ async def main():
         logger.info(f"已更新 Lighter WS Manager Market Index: {lighter_contract_id}")
 
     # 连接交易所
-    logger.info("连接到交易所...")
+    logger.info("📍 [4/4] 连接到交易所...")
+    logger.info(f"  连接前 lighter_client.config.contract_id={lighter_client.config.contract_id}")
+
+    logger.info("  连接Extended...")
     await extended_client.connect()
+    logger.info("  Extended连接完成")
+
+    logger.info("  连接Lighter...")
     await lighter_client.connect()
+    logger.info("  Lighter连接完成")
     
     # 等待 WebSocket 连接稳定
     logger.info("等待 WebSocket 连接稳定...")

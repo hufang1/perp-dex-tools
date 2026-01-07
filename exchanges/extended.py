@@ -217,41 +217,79 @@ class ExtendedClient(BaseExchangeClient):
                 if best_bid <= 0 or best_ask <= 0:
                     return OrderResult(success=False, error_message='Invalid bid/ask prices')
 
+                # Calculate spread
+                spread = best_ask - best_bid
+
+                # For arbitrage, we need orders to get filled quickly
+                # For small spreads (2 ticks or less), use aggressive pricing
                 if direction == 'buy':
-                    # For buy orders, place slightly below best ask to ensure execution
-                    order_price = best_ask - self.config.tick_size
+                    if spread <= self.config.tick_size * Decimal('2'):
+                        # Small spread - use best_ask for quick fill (will be taker)
+                        order_price = best_ask
+                    else:
+                        # Larger spread - use price between bid and ask
+                        order_price = (best_bid + best_ask) / 2
                     side = OrderSide.BUY
                 else:
-                    # For sell orders, place slightly above best bid to ensure execution
-                    order_price = best_bid + self.config.tick_size
+                    if spread <= self.config.tick_size * Decimal('2'):
+                        # Small spread - use best_bid for quick fill (will be taker)
+                        order_price = best_bid
+                    else:
+                        # Larger spread - use price between bid and ask
+                        order_price = (best_bid + best_ask) / 2
                     side = OrderSide.SELL
 
                 # Round price to appropriate precision
                 rounded_price = self.round_to_tick(order_price)
 
+                # Round quantity to appropriate precision
+                quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
+
+                # 打印下单参数（用于调试）
+                self.logger.log(
+                    f"[DEBUG] 下单参数: direction={direction}, "
+                    f"best_bid={best_bid}, best_ask={best_ask}, "
+                    f"tick_size={self.config.tick_size}, order_price={order_price}, rounded_price={rounded_price}, "
+                    f"quantity={quantity}, retry_count={retry_count}",
+                    level="INFO"
+                )
+
+                # For arbitrage, we need fast execution. Always use regular limit orders (not post-only)
+                # This ensures immediate execution - arbitrage profits should cover taker fees
+                post_only = False
+
+                self.logger.log(f"[DEBUG] spread={spread}, post_only={post_only}", level="INFO")
+
                 # set timeout to 9 seconds for open orders to avoid orders being filled right when trading_bot hit 10s timeout and call cancel_order
-                # Place the order using official SDK (post-only to ensure maker order)
+                # Place the order using official SDK
                 order_result = await self.perpetual_trading_client.place_order(
                     market_name=contract_id,
                     amount_of_synthetic=quantity,
                     price=rounded_price,
                     side=side,
                     time_in_force=TimeInForce.GTT,
-                    post_only=True,  # Ensure MAKER orders
+                    post_only=post_only,
                     expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
                 )
 
+                self.logger.log(f"[DEBUG] SDK返回: status={order_result.status if order_result else 'None'}", level="INFO")
+
                 if not order_result or not order_result.data or order_result.status != 'OK':
+                    self.logger.log(f"[DEBUG] 下单失败: order_result={order_result}", level="ERROR")
                     return OrderResult(success=False, error_message='Failed to place order')
 
                 # Extract order ID from response
                 order_id = order_result.data.id
                 if not order_id:
+                    self.logger.log(f"[DEBUG] 无order_id", level="ERROR")
                     return OrderResult(success=False, error_message='No order ID in response')
+
+                self.logger.log(f"[DEBUG] 订单已提交: order_id={order_id}", level="INFO")
 
                 # Check order status after a short delay to see if it was rejected
                 await asyncio.sleep(0.01)
                 order_info = await self.get_order_info(order_id)
+                self.logger.log(f"[DEBUG] 订单状态查询结果: order_info.status={order_info.status if order_info else 'None'}", level="INFO")
 
                 if order_info:
                     if order_info.status in ['CANCELED', 'REJECTED']:
@@ -614,25 +652,37 @@ class ExtendedClient(BaseExchangeClient):
         """Handle order updates from WebSocket using correct pattern."""
         try:
             # self.logger.log("Received account update", "INFO")
-            
+
             # Parse the message structure
             if isinstance(message, str):
                 message = json.loads(message)
 
+            # 打印所有收到的消息类型（用于调试）
+            msg_type = message.get("type", "")
+            self.logger.log(f"[DEBUG] 收到WebSocket消息: type={msg_type}", level="INFO")
+
             # Check if this is a order update
-            event = message.get("type", "")
-            if event == "ORDER":
+            if msg_type == "ORDER":
                 # Extract order data from the nested structure
                 data = message.get('data', {})
                 orders = data.get('orders', [])
-                
+
+                self.logger.log(f"[DEBUG] ORDER消息: orders数量={len(orders) if orders else 0}", level="INFO")
+
                 if orders and len(orders) > 0:
                     # Loop over all the order updates, extended websocket may send multiple order updates in one message
                     for order in orders:
-                        if order.get('market') != self.config.contract_id:
-                            continue
                         order_id = order.get('id')
                         status = order.get('status')
+                        market = order.get('market')
+
+                        self.logger.log(
+                            f"[DEBUG] 订单更新: order_id={order_id}, status={status}, market={market}, contract_id={self.config.contract_id}",
+                            level="INFO"
+                        )
+
+                        if order.get('market') != self.config.contract_id:
+                            continue
                         side = order.get('side', '').lower()
                         filled_size = order.get('filledQty')
 
@@ -645,23 +695,29 @@ class ExtendedClient(BaseExchangeClient):
                         # edgex returns TWO filled events for the same order; take the first one
                         # if status == "FILLED" and len(data.get('collateral', [])):
                         #     return
-                        
+
                         # extended return status of open orders as "NEW", change this to match with the original script logic
                         if status == "NEW":
                             status = "OPEN"
-                            
+
                         # extended spells canceled as "CANCELLED", change this to match with the original script logic
                         if status == "CANCELLED":
                             status = "CANCELED"
-                            
+
+                        self.logger.log(
+                            f"[DEBUG] 准备调用回调: status={status}, handler存在={self._order_update_handler is not None}",
+                            level="INFO"
+                        )
+
                         # (for extended only) maintain open orders dict
                         if status == "OPEN" or status == "PARTIALLY_FILLED":
                             self.open_orders[order_id] = order
                         elif status == "CANCELED" or status == "FILLED":
                             self.open_orders.pop(order_id, None)
-                        
+
                         if status in ['OPEN', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED']:
                             if self._order_update_handler:
+                                self.logger.log(f"[DEBUG] 调用_order_update_handler", level="INFO")
                                 self._order_update_handler({
                                     'order_id': order_id,
                                     'side': side,

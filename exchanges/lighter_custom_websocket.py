@@ -246,12 +246,24 @@ class LighterCustomWebSocketManager:
                 # Reset order book state before connecting
                 await self.reset_order_book()
 
+                print(f"[LIGHTER WS] 🔍 尝试连接 WebSocket...")
+                print(f"[LIGHTER WS] 📡 URL: {self.ws_url}")
+                print(f"[LIGHTER WS] 📌 market_index: {self.market_index}")
+                print(f"[LIGHTER WS] 📌 account_index: {self.account_index}")
+
+                # 使用最简单的连接方式（与 hedge_mode_ext.py 完全相同）
                 async with websockets.connect(self.ws_url) as self.ws:
+                    print(f"[LIGHTER WS] ✅ WebSocket连接成功")
+
                     # Subscribe to order book updates
-                    await self.ws.send(json.dumps({
+                    order_book_channel = f"order_book/{self.market_index}"
+                    subscribe_msg = {
                         "type": "subscribe",
-                        "channel": f"order_book/{self.market_index}"
-                    }))
+                        "channel": order_book_channel
+                    }
+                    print(f"[LIGHTER WS] 📤 订阅订单簿: {subscribe_msg}")
+                    await self.ws.send(json.dumps(subscribe_msg))
+                    print(f"[LIGHTER WS] ✅ 订阅订单簿请求已发送")
 
                     # Subscribe to account orders updates
                     account_orders_channel = f"account_orders/{self.market_index}/{self.account_index}"
@@ -408,10 +420,42 @@ class LighterCustomWebSocketManager:
                             break  # Break inner loop to reconnect
 
             except Exception as e:
+                error_str = str(e)
+                print(f"[LIGHTER WS] ❌ 连接异常: {error_str}")
+                import traceback
+                traceback.print_exc()
+
+                # 详细的错误诊断
+                if "400" in error_str:
+                    print(f"[LIGHTER WS] 🔍 HTTP 400 错误诊断:")
+                    print(f"[LIGHTER WS]   可能原因:")
+                    print(f"[LIGHTER WS]   1. WebSocket协议版本不匹配")
+                    print(f"[LIGHTER WS]   2. 请求头格式不正确")
+                    print(f"[LIGHTER WS]   3. 服务器暂时不可用或维护中")
+                    print(f"[LIGHTER WS]   4. 订阅的频道格式不正确")
+                    print(f"[LIGHTER WS]   当前订阅频道: order_book/{self.market_index}")
+                elif "429" in error_str:
+                    print(f"[LIGHTER WS] ⚠️ HTTP 429 速率限制")
+                elif "timeout" in error_str.lower():
+                    print(f"[LIGHTER WS] ⏱️ 连接超时")
+
                 self._log(f"Failed to connect to Lighter websocket: {e}", "ERROR")
 
             # Wait before reconnecting with exponential backoff
             if self.running:
+                # 检查是否是速率限制错误 (HTTP 429)
+                error_str = str(e) if e else ""
+                if "429" in error_str:
+                    # 速率限制：等待更长时间（60秒）
+                    reconnect_delay = 60
+                    print(f"[LIGHTER WS] ⚠️ 触发速率限制，等待 {reconnect_delay} 秒后重试...")
+                    self._log(f"Rate limit detected, waiting {reconnect_delay}s before retry", "WARNING")
+                elif "400" in error_str:
+                    # HTTP 400：可能是协议问题，等待 30 秒
+                    reconnect_delay = 30
+                    print(f"[LIGHTER WS] ⚠️ 协议错误，等待 {reconnect_delay} 秒后重试...")
+                    self._log(f"Protocol error, waiting {reconnect_delay}s before retry", "WARNING")
+
                 self._log(f"Waiting {reconnect_delay} seconds before reconnecting...", "INFO")
                 await asyncio.sleep(reconnect_delay)
                 # Exponential backoff: double the delay, but cap at max_reconnect_delay

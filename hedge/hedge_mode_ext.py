@@ -789,6 +789,16 @@ class HedgeBot:
 
         best_bid, best_ask = self.get_lighter_best_levels()
 
+        # 🔍 检查订单簿数据是否可用
+        if best_bid is None or best_ask is None:
+            self.logger.error(f"❌ Lighter订单簿数据不可用: best_bid={best_bid}, best_ask={best_ask}")
+            self.logger.error(f"   订单簿状态: bids={len(self.lighter_order_book['bids'])}, asks={len(self.lighter_order_book['asks'])}")
+            self.logger.error(f"   snapshot_loaded={self.lighter_snapshot_loaded}")
+
+            # 如果订单簿未就绪，不能下单
+            raise Exception(f"Lighter order book not ready. Cannot place hedge order on {lighter_side} side. "
+                          f"best_bid={best_bid}, best_ask={best_ask}")
+
         # Determine order parameters
         if lighter_side.lower() == 'buy':
             is_ask = False
