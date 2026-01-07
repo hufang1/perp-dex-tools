@@ -92,6 +92,9 @@ class SpreadArbitrageBot:
 
         # 🔴 未对冲的Extended仓位跟踪（关键修复）
         self.unhedged_positions = []  # List[Dict] 记录未对冲的Extended订单
+
+        # 🆕 对冲失败率统计
+        self.hedge_attempts = []  # List[bool] 记录最近的对冲尝试 (True=成功, False=失败)
     
     async def run(self):
         """主运行循环"""
@@ -107,7 +110,8 @@ class SpreadArbitrageBot:
             tasks = [
                 asyncio.create_task(self._strategy_loop(), name="strategy"),
                 asyncio.create_task(self._monitor_pairs(), name="monitor"),
-                asyncio.create_task(self._stats_reporter(), name="stats")
+                asyncio.create_task(self._stats_reporter(), name="stats"),
+                asyncio.create_task(self._reconciliation_loop(), name="reconciliation")  # 🆕 持仓对账
             ]
             
             # 3. 运行
@@ -174,9 +178,10 @@ class SpreadArbitrageBot:
         while not self.stop_flag:
             try:
                 # 🔴 关键安全检查：如果有未对冲仓位，立即暂停
-                if len(self.unhedged_positions) > 0:
+                if len(self.unhedged_positions) > self.config.max_unhedged_positions:
                     self.logger.error(
                         f"🚨 检测到 {len(self.unhedged_positions)} 个未对冲仓位! "
+                        f"超过最大限制 {self.config.max_unhedged_positions}! "
                         f"禁止开新仓! 请手动处理!"
                     )
                     await asyncio.sleep(5)
@@ -323,6 +328,11 @@ class SpreadArbitrageBot:
                 net_pnl = self.stats['total_profit'] - self.stats['total_loss']
                 self.logger.info(f"  净盈亏: ${net_pnl:.2f}")
 
+                # 🆕 显示对冲失败率
+                if len(self.hedge_attempts) >= 5:
+                    _, failure_rate = self._check_hedge_failure_rate()
+                    self.logger.info(f"  对冲失败率: {failure_rate:.2%} ({len(self.hedge_attempts)} 次尝试)")
+
                 # 🔴 显示未对冲仓位警告
                 if len(self.unhedged_positions) > 0:
                     self.logger.error(f"  ⚠️ 未对冲仓位: {len(self.unhedged_positions)} 个")
@@ -435,6 +445,9 @@ class SpreadArbitrageBot:
                 quantity=fill_result['filled_quantity'],
                 expected_price=opportunity['lighter_price']
             )
+
+            # 🆕 记录对冲尝试结果
+            self._record_hedge_attempt(hedge_result['success'])
 
             if not hedge_result['success']:
                 self.stats['failed_opens'] += 1
@@ -702,3 +715,82 @@ class SpreadArbitrageBot:
             self.logger.error("")
 
         self.logger.info("="*60)
+
+    def _record_hedge_attempt(self, success: bool):
+        """记录对冲尝试结果"""
+        self.hedge_attempts.append(success)
+        # 只保留最近的N次记录
+        if len(self.hedge_attempts) > self.config.hedge_failure_window:
+            self.hedge_attempts.pop(0)
+
+    def _check_hedge_failure_rate(self) -> tuple[bool, Decimal]:
+        """检查对冲失败率
+
+        Returns:
+            (是否超过阈值, 当前失败率)
+        """
+        if len(self.hedge_attempts) < 5:  # 至少5次尝试才统计
+            return False, Decimal('0')
+
+        failures = sum(1 for attempt in self.hedge_attempts if not attempt)
+        failure_rate = Decimal(failures) / Decimal(len(self.hedge_attempts))
+
+        is_exceeded = failure_rate > self.config.hedge_failure_threshold
+
+        if is_exceeded:
+            self.logger.error(
+                f"🚨 对冲失败率过高: {failure_rate:.2%} > {self.config.hedge_failure_threshold:.2%} "
+                f"({failures}/{len(self.hedge_attempts)} 次失败)"
+            )
+
+        return is_exceeded, failure_rate
+
+    async def _reconciliation_loop(self):
+        """持仓对账循环 - 定期验证持仓状态"""
+        self.logger.info("持仓对账循环启动")
+
+        while not self.stop_flag:
+            try:
+                await asyncio.sleep(self.config.reconciliation_interval)
+
+                if not self.config.enable_reconciliation:
+                    continue
+
+                # 1. 检查未对冲持仓是否超时
+                current_time = time.time()
+                timeout_positions = [
+                    pos for pos in self.unhedged_positions
+                    if current_time - pos['timestamp'] > self.config.unhedged_position_timeout
+                ]
+
+                if timeout_positions:
+                    self.logger.error(
+                        f"🚨 检测到 {len(timeout_positions)} 个超时的未对冲持仓! "
+                        f"超时阈值: {self.config.unhedged_position_timeout}秒"
+                    )
+                    for pos in timeout_positions:
+                        age = int(current_time - pos['timestamp'])
+                        self.logger.error(
+                            f"   ❌ {pos['side'].upper()} {pos['quantity']:.4f} @ ${pos['price']:.2f} "
+                            f"(已存在 {age}秒)"
+                        )
+
+                    # 如果启用了自动平仓，警告用户
+                    if self.config.auto_close_unhedged:
+                        self.logger.error("⚠️ 自动平仓已启用，请手动检查!")
+                    else:
+                        self.logger.error("请手动检查并处理这些持仓!")
+
+                # 2. 验证open_pairs与实际持仓是否匹配
+                # 这里可以添加与交易所API的持仓对账逻辑
+                # 例如: 调用 get_account_positions() 并与 self.open_pairs 比较
+
+                # 3. 检查对冲失败率
+                is_exceeded, failure_rate = self._check_hedge_failure_rate()
+                if is_exceeded:
+                    self.logger.error("⚠️ 对冲失败率过高，建议检查Lighter连接状态!")
+
+            except Exception as e:
+                self.logger.error(f"对账循环错误: {e}")
+                self.logger.error(traceback.format_exc())
+

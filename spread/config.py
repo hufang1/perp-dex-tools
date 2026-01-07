@@ -41,6 +41,19 @@ class SpreadArbConfig:
     min_lighter_depth_usdt: Decimal = Decimal('200')       # Lighter 最小深度 (USDT)
     check_depth_layers: int = 3                            # 检查深度层数
     slippage_tolerance: Decimal = Decimal('0.001')         # 最大可接受滑点 (0.1%)
+
+    # ==================== 未对冲持仓保护 ====================
+    max_unhedged_positions: int = 0                        # 最大允许未对冲持仓数量 (0=严格禁止, >0=容忍数量)
+    auto_close_unhedged: bool = False                      # 自动平仓未对冲持仓 (谨慎使用!)
+    unhedged_position_timeout: int = 300                   # 未对冲持仓超时自动处理 (秒, 默认5分钟)
+
+    # ==================== 对冲失败监控 ====================
+    hedge_failure_threshold: Decimal = Decimal('0.3')      # 对冲失败率阈值 (30% 触发警告)
+    hedge_failure_window: int = 10                         # 对冲失败率统计窗口 (最近N次尝试)
+
+    # ==================== 持仓对账 ====================
+    enable_reconciliation: bool = True                     # 启用持仓对账
+    reconciliation_interval: int = 60                      # 对账间隔 (秒, 默认1分钟)
     
     # ==================== 超时配置 ====================
     extended_fill_timeout: int = 10                        # Extended 成交超时 (秒)

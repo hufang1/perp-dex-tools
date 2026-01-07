@@ -410,20 +410,30 @@ class LighterClient(BaseExchangeClient):
         try:
             # 首先检查current_order（由WebSocket实时更新）
             if self.current_order is not None:
-                # current_order包含最新的订单信息
-                return self.current_order
+                # 验证订单ID是否匹配
+                if self.current_order.order_id == order_id:
+                    # current_order包含最新的订单信息
+                    return self.current_order
+                else:
+                    self.logger.log(
+                        f"⚠️ current_order ID不匹配: 期望={order_id}, 实际={self.current_order.order_id}",
+                        "WARNING"
+                    )
 
             # 如果current_order不可用，尝试从活跃订单查询
             # 注意：由于order_id是client_order_index，而API返回order_index，
             # 直接匹配可能失败，所以这里只是fallback
+            self.logger.log(f"🔍 current_order为None或ID不匹配，尝试查询活跃订单", "DEBUG")
             active_orders = await self.get_active_orders(self.config.contract_id)
 
             # 由于ID不匹配，我们返回最新的订单
             if active_orders:
                 # 返回最新的订单（假设是刚下的单）
+                self.logger.log(f"📋 返回最新的活跃订单: {active_orders[0].order_id}", "DEBUG")
                 return active_orders[0]
 
             # 如果还是没有，检查positions
+            self.logger.log(f"🔍 活跃订单为空，检查持仓", "DEBUG")
             account_api = lighter.AccountApi(self.api_client)
             account_data = await account_api.account(by="index", value=str(self.account_index))
 
@@ -431,6 +441,7 @@ class LighterClient(BaseExchangeClient):
                 if position.symbol == self.config.ticker:
                     position_amt = abs(float(position.position))
                     if position_amt > 0.001:
+                        self.logger.log(f"📊 从持仓推断订单信息: {position_amt:.4f} @ {position.avg_price:.2f}", "DEBUG")
                         return OrderInfo(
                             order_id=order_id,
                             side="buy" if float(position.position) > 0 else "sell",
@@ -441,6 +452,7 @@ class LighterClient(BaseExchangeClient):
                             remaining_size=Decimal('0')
                         )
 
+            self.logger.log(f"❌ 无法获取订单信息: order_id={order_id}, client_order_id={self.current_order_client_id}", "ERROR")
             return None
 
         except Exception as e:

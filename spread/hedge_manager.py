@@ -89,16 +89,38 @@ class HedgeManager:
                 
                 if not order_result.success:
                     raise Exception(f"下单失败: {order_result.error_message}")
-                
-                # 等待成交确认
-                await asyncio.sleep(0.5)
-                
+
+                # 等待WebSocket订单更新 (最多等待5秒)
+                # current_order 由WebSocket回调设置，需要等待足够时间
+                max_wait_time = 5  # 秒
+                check_interval = 0.1  # 秒
+                total_waited = 0
+
+                while total_waited < max_wait_time:
+                    await asyncio.sleep(check_interval)
+                    total_waited += check_interval
+
+                    # 检查current_order是否已被WebSocket更新
+                    if self.lighter_client.current_order is not None:
+                        # 验证订单ID匹配
+                        if self.lighter_client.current_order.order_id == order_result.order_id:
+                            break
+                        # 或者验证client_order_id匹配
+                        if (hasattr(self.lighter_client, 'current_order_client_id') and
+                            self.lighter_client.current_order_client_id is not None):
+                            # client_order_index匹配（存储在order_result中可能是不同的格式）
+                            pass
+
                 # 获取订单信息
                 order_info = await self.lighter_client.get_order_info(
                     order_result.order_id
                 )
-                
+
                 if order_info is None:
+                    self.logger.error(
+                        f"❌ 订单信息为None. current_order状态: {self.lighter_client.current_order is not None}, "
+                        f"client_order_id: {getattr(self.lighter_client, 'current_order_client_id', 'N/A')}"
+                    )
                     raise Exception("无法获取订单信息")
                 
                 if order_info.status != 'FILLED':
