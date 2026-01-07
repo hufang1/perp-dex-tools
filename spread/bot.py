@@ -71,6 +71,10 @@ class SpreadArbitrageBot:
         
         # 运行控制
         self.stop_flag = False
+
+        # 启动预热期（防止启动时立即开仓）
+        self.startup_time = time.time()
+        self.startup_warmup_seconds = 5  # 预热期5秒
         
         # 统计
         self.stats = {
@@ -187,6 +191,11 @@ class SpreadArbitrageBot:
                         self.is_paused = False
                         self.consecutive_failures = 0
                         self.logger.info("🔄 断路器恢复")
+
+                # 🔴 启动预热期检查（防止启动时立即开仓）
+                if time.time() - self.startup_time < self.startup_warmup_seconds:
+                    await asyncio.sleep(0.5)
+                    continue
                 
                 # 获取最佳价格
                 extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
