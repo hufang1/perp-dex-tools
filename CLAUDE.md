@@ -3,6 +3,8 @@
 Auto-generated from all feature plans. Last updated: 2026-01-07
 
 ## Active Technologies
+- Python 3.10+ (001-fix-lighter-api)
+- N/A (状态在内存中，日志写入文件) (001-fix-lighter-api)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -49,6 +51,7 @@ python hedge/hedge_mode.py --exchange extended --ticker ETH --size 0.01 --iter 2
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-fix-lighter-api: Added Python 3.10+
 
 - **003-fix-order-status-race**: 添加订单状态缓存机制，修复竞态条件bug
   - 修改文件: `spread/order_manager.py`

@@ -476,7 +476,8 @@ class LighterClient(BaseExchangeClient):
         order_api = lighter.OrderApi(self.api_client)
 
         # Get active orders for the specific market
-        orders_response = await order_api.account_active_orders(
+        # 注意：使用 account_inactive_orders (已成交/已取消订单) 而非 account_active_orders (不存在)
+        orders_response = await order_api.account_inactive_orders(
             account_index=self.account_index,
             market_id=self.config.contract_id,
             auth=auth_token
