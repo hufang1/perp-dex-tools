@@ -406,13 +406,32 @@ class LighterClient(BaseExchangeClient):
 
         注意：order_id是client_order_index，而API返回的是order_index。
         使用self.current_order来获取最新订单信息（由WebSocket更新）。
+
+        修复：增加更多诊断日志和fallback机制来解决"无法获取订单信息"问题。
         """
         try:
+            self.logger.log(
+                f"[get_order_info] 查询订单信息: order_id={order_id}, "
+                f"current_order存在={self.current_order is not None}, "
+                f"current_order_client_id={getattr(self, 'current_order_client_id', None)}",
+                "DEBUG"
+            )
+
             # 首先检查current_order（由WebSocket实时更新）
             if self.current_order is not None:
+                self.logger.log(
+                    f"[get_order_info] current_order详情: "
+                    f"order_id={self.current_order.order_id}, "
+                    f"status={self.current_order.status}, "
+                    f"side={self.current_order.side}, "
+                    f"size={self.current_order.filled_size}",
+                    "DEBUG"
+                )
+
                 # 验证订单ID是否匹配
                 if self.current_order.order_id == order_id:
                     # current_order包含最新的订单信息
+                    self.logger.log(f"[get_order_info] ✅ ID匹配，返回current_order", "DEBUG")
                     return self.current_order
                 else:
                     self.logger.log(
@@ -420,48 +439,106 @@ class LighterClient(BaseExchangeClient):
                         "WARNING"
                     )
 
-            # 如果current_order不可用，尝试从活跃订单查询
-            # 注意：由于order_id是client_order_index，而API返回order_index，
-            # 直接匹配可能失败，所以这里只是fallback
-            self.logger.log(f"🔍 current_order为None或ID不匹配，尝试查询活跃订单", "DEBUG")
-            active_orders = await self.get_active_orders(self.config.contract_id)
-
-            # 由于ID不匹配，我们返回最新的订单
-            if active_orders:
-                # 返回最新的订单（假设是刚下的单）
-                self.logger.log(f"📋 返回最新的活跃订单: {active_orders[0].order_id}", "DEBUG")
-                return active_orders[0]
-
-            # 如果还是没有，检查positions
-            self.logger.log(f"🔍 活跃订单为空，检查持仓", "DEBUG")
-            account_api = lighter.AccountApi(self.api_client)
-            account_data = await account_api.account(by="index", value=str(self.account_index))
-
-            for position in account_data.positions:
-                if position.symbol == self.config.ticker:
-                    position_amt = abs(float(position.position))
-                    if position_amt > 0.001:
-                        self.logger.log(f"📊 从持仓推断订单信息: {position_amt:.4f} @ {position.avg_price:.2f}", "DEBUG")
-                        return OrderInfo(
-                            order_id=order_id,
-                            side="buy" if float(position.position) > 0 else "sell",
-                            size=Decimal(str(position_amt)),
-                            price=Decimal(str(position.avg_price)),
-                            status="FILLED",
-                            filled_size=Decimal(str(position_amt)),
-                            remaining_size=Decimal('0')
+                    # 尝试匹配client_order_id
+                    if hasattr(self, 'current_order_client_id') and self.current_order_client_id:
+                        self.logger.log(
+                            f"[get_order_info] 尝试匹配client_order_id: "
+                            f"期望={order_id}, 当前={self.current_order_client_id}",
+                            "DEBUG"
                         )
+                        # client_order_id可能存储为字符串或整数
+                        if str(self.current_order_client_id) == str(order_id):
+                            self.logger.log(f"[get_order_info] ✅ client_order_id匹配，返回current_order", "DEBUG")
+                            return self.current_order
 
-            self.logger.log(f"❌ 无法获取订单信息: order_id={order_id}, client_order_id={self.current_order_client_id}", "ERROR")
+            # Fallback 1: 检查最近的WebSocket更新（通过时间戳）
+            if hasattr(self, '_last_order_update_time') and self._last_order_update_time:
+                time_since_update = time.time() - self._last_order_update_time
+                if time_since_update < 2.0:  # 2秒内有更新
+                    self.logger.log(
+                        f"[get_order_info] ⚠️ 最近的WebSocket更新可能是我们要找的订单 "
+                        f"({time_since_update:.1f}秒前)，但ID不匹配",
+                        "WARNING"
+                    )
+
+            # Fallback 2: 如果current_order不可用，尝试从活跃订单查询
+            self.logger.log(f"🔍 current_order不可用，尝试查询所有订单（活跃+已成交）", "DEBUG")
+
+            try:
+                # 先查询活跃订单
+                active_orders = await self.get_active_orders(self.config.contract_id)
+
+                # 同时查询已成交订单
+                inactive_orders = await self.get_inactive_orders(self.config.contract_id)
+
+                # 合并所有订单
+                all_orders = active_orders + inactive_orders
+
+                if all_orders:
+                    self.logger.log(f"[get_order_info] 找到 {len(all_orders)} 个订单", "DEBUG")
+
+                    # 尝试通过client_order_index匹配
+                    for order_info in all_orders:
+                        if str(order_info.order_id) == str(order_id):
+                            self.logger.log(f"[get_order_info] ✅ 在订单列表中找到匹配", "DEBUG")
+                            return order_info
+
+                    # 如果没有精确匹配，返回最新的订单（可能是刚下的单）
+                    # 按时间排序（如果有时间戳）
+                    latest_order = all_orders[0]
+                    self.logger.log(
+                        f"[get_order_info] ⚠️ 没有精确匹配，返回最新订单: "
+                        f"order_id={latest_order.order_id}, status={latest_order.status}",
+                        "WARNING"
+                    )
+                    return latest_order
+            except Exception as e:
+                self.logger.log(f"[get_order_info] 查询订单列表失败: {e}", "ERROR")
+
+            # Fallback 3: 如果还是没有，检查positions
+            self.logger.log(f"🔍 订单查询失败，尝试从持仓推断订单信息", "DEBUG")
+            try:
+                account_api = lighter.AccountApi(self.api_client)
+                account_data = await account_api.account(by="index", value=str(self.account_index))
+
+                for position in account_data.positions:
+                    if position.symbol == self.config.ticker:
+                        position_amt = abs(float(position.position))
+                        if position_amt > 0.001:
+                            self.logger.log(
+                                f"📊 从持仓推断订单信息: {position_amt:.4f} @ {position.avg_price:.2f}",
+                                "DEBUG"
+                            )
+                            return OrderInfo(
+                                order_id=order_id,
+                                side="buy" if float(position.position) > 0 else "sell",
+                                size=Decimal(str(position_amt)),
+                                price=Decimal(str(position.avg_price)),
+                                status="FILLED",
+                                filled_size=Decimal(str(position_amt)),
+                                remaining_size=Decimal('0')
+                            )
+            except Exception as e:
+                self.logger.log(f"[get_order_info] 查询持仓失败: {e}", "ERROR")
+
+            # 所有方法都失败
+            self.logger.log(
+                f"❌ 无法获取订单信息: order_id={order_id}, "
+                f"current_order={self.current_order.order_id if self.current_order else None}, "
+                f"client_order_id={getattr(self, 'current_order_client_id', None)}",
+                "ERROR"
+            )
             return None
 
         except Exception as e:
-            self.logger.log(f"Error getting order info: {e}", "ERROR")
+            self.logger.log(f"❌ get_order_info异常: {e}", "ERROR")
+            import traceback
+            self.logger.log(f"堆栈跟踪: {traceback.format_exc()}", "ERROR")
             return None
 
     @query_retry(reraise=True)
     async def _fetch_orders_with_retry(self) -> List[Dict[str, Any]]:
-        """Get orders using official SDK."""
+        """Get inactive (filled/cancelled) orders using official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -472,11 +549,10 @@ class LighterClient(BaseExchangeClient):
             self.logger.log(f"Error creating auth token: {error}", "ERROR")
             raise ValueError(f"Error creating auth token: {error}")
 
-        # Use OrderApi to get active orders
+        # Use OrderApi to get inactive orders (filled/cancelled)
         order_api = lighter.OrderApi(self.api_client)
 
-        # Get active orders for the specific market
-        # 注意：使用 account_inactive_orders (已成交/已取消订单) 而非 account_active_orders (不存在)
+        # Get inactive orders for the specific market
         orders_response = await order_api.account_inactive_orders(
             account_index=self.account_index,
             market_id=self.config.contract_id,
@@ -484,16 +560,26 @@ class LighterClient(BaseExchangeClient):
         )
 
         if not orders_response:
-            self.logger.log("Failed to get orders", "ERROR")
-            raise ValueError("Failed to get orders")
+            self.logger.log("Failed to get inactive orders", "ERROR")
+            raise ValueError("Failed to get inactive orders")
 
         return orders_response.orders
 
     async def get_active_orders(self, contract_id: str) -> List[OrderInfo]:
-        """Get active orders for a contract using official SDK."""
+        """Get active orders for a contract using official SDK.
+
+        注意：Lighter的API没有活跃订单端点，所以这里返回空列表。
+        活跃订单应该通过WebSocket的current_order来获取。
+        """
+        # Lighter的活跃订单通过WebSocket实时更新，存储在current_order中
+        # API端点只返回已成交/已取消的订单
+        return []
+
+    async def get_inactive_orders(self, contract_id: str) -> List[OrderInfo]:
+        """Get inactive (filled/cancelled) orders for a contract using official SDK."""
         order_list = await self._fetch_orders_with_retry()
 
-        # Filter orders for the specific market
+        # Convert Lighter Order to OrderInfo
         contract_orders = []
         for order in order_list:
             # Convert Lighter Order to OrderInfo
@@ -501,17 +587,15 @@ class LighterClient(BaseExchangeClient):
             size = Decimal(order.initial_base_amount)
             price = Decimal(order.price)
 
-            # Only include orders with remaining size > 0
-            if size > 0:
-                contract_orders.append(OrderInfo(
-                    order_id=str(order.order_index),
-                    side=side,
-                    size=Decimal(order.remaining_base_amount),  # FIXME: This is wrong. Should be size
-                    price=price,
-                    status=order.status.upper(),
-                    filled_size=Decimal(order.filled_base_amount),
-                    remaining_size=Decimal(order.remaining_base_amount)
-                ))
+            contract_orders.append(OrderInfo(
+                order_id=str(order.order_index),
+                side=side,
+                size=Decimal(order.initial_base_amount),
+                price=price,
+                status=order.status.upper(),
+                filled_size=Decimal(order.filled_base_amount),
+                remaining_size=Decimal(order.remaining_base_amount)
+            ))
 
         return contract_orders
 

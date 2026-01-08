@@ -41,17 +41,19 @@ class HedgeManager:
     ) -> Dict[str, Any]:
         """
         执行 Lighter 对冲
-        
+
         策略:
         1. 使用市价单快速成交
         2. 检查滑点是否在容忍范围内
-        3. 最多重试 3 次
-        
+        3. 最多重试 3 次（但防止重复下单）
+
+        修复：防止重试时重复下单导致仓位不对等
+
         Args:
             side: 'buy' 或 'sell'
             quantity: 对冲数量
             expected_price: 预期成交价格 (用于计算滑点)
-        
+
         Returns:
             {
                 'success': bool,
@@ -62,6 +64,10 @@ class HedgeManager:
                 'error': str (如果失败)
             }
         """
+        # 记录第一次尝试的订单ID，防止重复下单
+        first_order_id = None
+        first_order_result = None
+
         for attempt in range(self.max_retries):
             try:
                 self.logger.info(
@@ -69,26 +75,77 @@ class HedgeManager:
                     f"{quantity:.4f} @ ~{expected_price:.2f} "
                     f"(尝试 {attempt + 1}/{self.max_retries})"
                 )
-                
-                # 下市价单 (使用 Lighter 客户端的限价单功能)
-                # 设置一个极端价格确保成交
-                if side == 'buy':
-                    # 买单: 价格设置为预期价格的 1.01 倍
-                    limit_price = expected_price * Decimal('1.01')
-                else:
-                    # 卖单: 价格设置为预期价格的 0.99 倍
-                    limit_price = expected_price * Decimal('0.99')
-                
-                # 下单
-                order_result = await self.lighter_client.place_limit_order(
-                    contract_id=self.lighter_client.contract_id,
-                    quantity=quantity,
-                    price=limit_price,
-                    side=side
-                )
-                
-                if not order_result.success:
-                    raise Exception(f"下单失败: {order_result.error_message}")
+
+                # 🔴 关键修复：如果不是第一次尝试，先检查是否已有订单在处理中
+                if attempt > 0 and first_order_id is not None:
+                    self.logger.warning(
+                        f"⚠️ 重试对冲 (第{attempt + 1}次)，检查第一次下单的订单: {first_order_id}"
+                    )
+
+                    # 尝试获取第一次下单的订单信息
+                    order_info = await self.lighter_client.get_order_info(first_order_id)
+
+                    if order_info is not None:
+                        self.logger.info(
+                            f"✅ 找到第一次下单的订单信息: "
+                            f"status={order_info.status}, "
+                            f"filled_size={order_info.filled_size}"
+                        )
+
+                        # 如果订单已成交，直接返回
+                        if order_info.status == 'FILLED':
+                            self.logger.info(f"✅ 第一次下单已成交，无需重复下单")
+
+                            # 计算滑点
+                            filled_price = order_info.price
+                            if side == 'buy':
+                                slippage = (filled_price - expected_price) / expected_price
+                            else:
+                                slippage = (expected_price - filled_price) / expected_price
+
+                            return {
+                                'success': True,
+                                'order_id': first_order_id,
+                                'filled_price': filled_price,
+                                'filled_quantity': order_info.filled_size,
+                                'slippage': slippage
+                            }
+                        # 如果订单还在处理中，继续等待
+                        elif order_info.status in ['OPEN', 'PENDING']:
+                            self.logger.info(f"⏳ 第一次下单还在处理中，继续等待...")
+                            # 继续循环，不重新下单
+                            await asyncio.sleep(1)
+                            continue
+                    else:
+                        self.logger.warning(f"⚠️ 无法获取第一次下单的订单信息")
+
+                # 如果是第一次尝试，或者之前的订单失败了，则下单
+                if attempt == 0 or first_order_result is None:
+                    # 下市价单 (使用 Lighter 客户端的限价单功能)
+                    # 设置一个极端价格确保成交
+                    if side == 'buy':
+                        # 买单: 价格设置为预期价格的 1.01 倍
+                        limit_price = expected_price * Decimal('1.01')
+                    else:
+                        # 卖单: 价格设置为预期价格的 0.99 倍
+                        limit_price = expected_price * Decimal('0.99')
+
+                    # 下单
+                    order_result = await self.lighter_client.place_limit_order(
+                        contract_id=self.lighter_client.contract_id,
+                        quantity=quantity,
+                        price=limit_price,
+                        side=side
+                    )
+
+                    if not order_result.success:
+                        raise Exception(f"下单失败: {order_result.error_message}")
+
+                    # 记录第一次下单的订单ID
+                    if first_order_id is None:
+                        first_order_id = order_result.order_id
+                        first_order_result = order_result
+                        self.logger.info(f"📝 记录第一次下单ID: {first_order_id}")
 
                 # 等待WebSocket订单更新 (最多等待5秒)
                 # current_order 由WebSocket回调设置，需要等待足够时间
