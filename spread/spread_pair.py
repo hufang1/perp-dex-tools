@@ -23,7 +23,7 @@ class SpreadPair:
     ):
         """
         初始化套利对
-        
+
         Args:
             pair_id: 套利对 ID
             extended_side: Extended 方向 ('buy' 或 'sell')
@@ -31,8 +31,8 @@ class SpreadPair:
             extended_quantity: Extended 成交数量
             lighter_price: Lighter 成交价格
             lighter_quantity: Lighter 成交数量 (应该与 extended_quantity 相同)
-            extended_order_id: Extended 订单 ID
-            lighter_order_id: Lighter 订单 ID
+            extended_order_id: Extended 开仓订单 ID
+            lighter_order_id: Lighter 开仓订单 ID
         """
         self.pair_id = pair_id
         self.extended_side = extended_side
@@ -40,16 +40,26 @@ class SpreadPair:
         self.extended_quantity = extended_quantity
         self.lighter_price = lighter_price
         self.lighter_quantity = lighter_quantity
+
+        # 开仓订单ID
+        self.open_extended_order_id = extended_order_id
+        self.open_lighter_order_id = lighter_order_id
+
+        # 兼容旧代码 (保留现有属性)
         self.extended_order_id = extended_order_id
         self.lighter_order_id = lighter_order_id
-        
+
+        # 平仓订单ID (新增)
+        self.close_extended_order_id: Optional[str] = None
+        self.close_lighter_order_id: Optional[str] = None
+
         # 时间戳
         self.open_time = time.time()
         self.close_time: Optional[float] = None
-        
+
         # 状态
         self.is_closed = False
-        
+
         # 平仓信息
         self.close_extended_price: Optional[Decimal] = None
         self.close_lighter_price: Optional[Decimal] = None
@@ -177,7 +187,12 @@ class SpreadPair:
             'is_closed': self.is_closed,
             'close_extended_price': float(self.close_extended_price) if self.close_extended_price else None,
             'close_lighter_price': float(self.close_lighter_price) if self.close_lighter_price else None,
-            'realized_pnl': float(self.realized_pnl) if self.realized_pnl else None
+            'realized_pnl': float(self.realized_pnl) if self.realized_pnl else None,
+            # 新增订单ID字段
+            'open_extended_order_id': self.open_extended_order_id,
+            'open_lighter_order_id': self.open_lighter_order_id,
+            'close_extended_order_id': self.close_extended_order_id,
+            'close_lighter_order_id': self.close_lighter_order_id
         }
     
     def __repr__(self) -> str:
