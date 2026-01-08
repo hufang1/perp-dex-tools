@@ -95,6 +95,10 @@ class SpreadArbitrageBot:
 
         # 🆕 对冲失败率统计
         self.hedge_attempts = []  # List[bool] 记录最近的对冲尝试 (True=成功, False=失败)
+
+        # 🔴 关键修复：防止并发开仓的标志
+        self.is_opening = False  # 是否正在执行开仓操作
+        self.opening_lock = asyncio.Lock()  # 开仓操作的锁
     
     async def run(self):
         """主运行循环"""
@@ -262,7 +266,29 @@ class SpreadArbitrageBot:
                                     f"价差率: {opportunity['spread_rate']:.4%} "
                                     f"预期利润: {opportunity['expected_profit_rate']:.4%}"
                                 )
-                                await self._open_new_pair(opportunity)
+
+                                # 🔴 关键修复：检查是否正在开仓，防止并发
+                                if self.is_opening:
+                                    self.logger.warning(
+                                        f"⚠️ 正在执行开仓操作，跳过此机会 "
+                                        f"(防止Ext和Lighter仓位不对等)"
+                                    )
+                                    self.stats['opportunities_rejected'] += 1
+                                    await asyncio.sleep(0.5)
+                                    continue
+
+                                # 使用锁确保同时只有一个开仓操作
+                                async with self.opening_lock:
+                                    if self.is_opening:
+                                        # 双重检查
+                                        self.logger.warning("⚠️ 开仓锁已获取，跳过")
+                                        continue
+
+                                    self.is_opening = True
+                                    try:
+                                        await self._open_new_pair(opportunity)
+                                    finally:
+                                        self.is_opening = False
                             else:
                                 self.stats['opportunities_rejected'] += 1
                                 self.logger.debug(
