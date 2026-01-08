@@ -156,17 +156,41 @@ class HedgeManager:
                 }
                 
             except Exception as e:
-                self.logger.error(f"对冲尝试 {attempt + 1} 失败: {e}")
-                
+                # 增强错误日志记录,包含更多上下文信息
+                error_type = type(e).__name__
+                error_msg = str(e)
+
+                # 提取关键错误信息
+                if "连接" in error_msg or "connection" in error_msg.lower():
+                    error_category = "连接错误"
+                elif "流动性" in error_msg or "liquidity" in error_msg.lower():
+                    error_category = "流动性不足"
+                elif "超时" in error_msg or "timeout" in error_msg.lower():
+                    error_category = "请求超时"
+                else:
+                    error_category = "未知错误"
+
+                self.logger.error(
+                    f"❌ 对冲尝试 {attempt + 1}/{self.max_retries} 失败 "
+                    f"({error_category}): {error_msg}"
+                )
+                self.logger.debug(
+                    f"对冲失败详情 - Side: {side}, Quantity: {quantity}, "
+                    f"Expected Price: {expected_price}, Error Type: {error_type}"
+                )
+
                 if attempt < self.max_retries - 1:
                     self.logger.info(f"等待 {self.retry_delay} 秒后重试...")
                     await asyncio.sleep(self.retry_delay)
                 else:
-                    self.logger.error("❌ 对冲失败,已达最大重试次数")
+                    self.logger.error(
+                        f"❌ 对冲失败,已达最大重试次数 ({self.max_retries}). "
+                        f"最终错误: {error_category} - {error_msg}"
+                    )
                     return {
                         'success': False,
                         'filled_quantity': Decimal('0'),
-                        'error': str(e)
+                        'error': f"{error_category}: {error_msg}"
                     }
         
         # 不应该到达这里

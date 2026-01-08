@@ -52,8 +52,8 @@ def parse_arguments():
                         help='单次下单金额 USDT (default: 35)')
     
     # 价差参数
-    parser.add_argument('--min-spread', type=float, default=0.0008,
-                        help='最小价差率 (default: 0.0008 = 0.08%%)')
+    parser.add_argument('--min-spread', type=float, default=0.0005,
+                        help='最小价差率 (default: 0.0005 = 0.05%%)')
     parser.add_argument('--latency-buffer', type=float, default=0.0001,
                         help='延迟缓冲 (default: 0.0001 = 0.01%%)')
     parser.add_argument('--profit-target', type=float, default=0.0005,
@@ -131,7 +131,7 @@ async def main():
     # 加载环境变量
     dotenv.load_dotenv(args.env_file)
     logger.info(f"已加载环境变量: {args.env_file}")
-    print(f"args: {args}")
+    logger.debug(f"命令行参数: {args}")
     # 创建配置
     config = SpreadArbConfig(
         ticker=args.ticker.upper(),

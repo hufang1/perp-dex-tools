@@ -165,10 +165,16 @@ class SpreadArbitrageBot:
         self.logger.info("配置参数:")
         self.logger.info(f"  交易对: {self.config.ticker}")
         self.logger.info(f"  单次下单金额: ${self.config.order_quantity_usdt}")
-        self.logger.info(f"  最小价差率: {self.config.min_spread_rate:.4%}")
+        self.logger.info(
+            f"  最小价差率: {self.config.min_spread_rate:.4%} "
+            f"(有效阈值: {self.config.effective_min_spread:.4%} 含延迟缓冲)"
+        )
         self.logger.info(f"  延迟缓冲: {self.config.latency_buffer:.4%}")
         self.logger.info(f"  最大套利对数: {self.config.max_open_pairs}")
         self.logger.info(f"  最大持仓时间: {self.config.max_holding_time}秒")
+        self.logger.info(f"  时间平仓阈值: {self.config.time_close_threshold}秒")
+        self.logger.info(f"  盈利目标: {self.config.profit_target_rate:.4%}")
+        self.logger.info(f"  未对冲持仓超时: {self.config.unhedged_position_timeout}秒")
         self.logger.info(f"  优先平仓: {self.config.prioritize_closing}")
     
     async def _strategy_loop(self):
@@ -207,7 +213,10 @@ class SpreadArbitrageBot:
                 extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
                 lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
                 lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
-                print(f"extended_bid: {extended_bid}, extended_ask: {extended_ask}, lighter_bid: {lighter_bid}, lighter_ask: {lighter_ask}")
+                self.logger.debug(
+                    f"价格更新: Extended bid={extended_bid:.2f} ask={extended_ask:.2f}, "
+                    f"Lighter bid={lighter_bid:.2f} ask={lighter_ask:.2f}"
+                )
                 # 检查价格有效性
                 if extended_bid <= 0 or lighter_bid <= 0:
                     await asyncio.sleep(0.1)
@@ -483,7 +492,7 @@ class SpreadArbitrageBot:
 
                 return False
             
-            # 4. 创建套利对
+            # 4. 创建套利对 (新增订单ID记录)
             pair = SpreadPair(
                 pair_id=self.next_pair_id,
                 extended_side=opportunity['side'],
@@ -491,23 +500,28 @@ class SpreadArbitrageBot:
                 extended_quantity=fill_result['filled_quantity'],
                 lighter_price=hedge_result['filled_price'],
                 lighter_quantity=hedge_result['filled_quantity'],
-                extended_order_id=order['order_id']
+                extended_order_id=order['order_id'],
+                lighter_order_id=hedge_result.get('order_id')  # T040: 记录 Lighter 开仓订单ID
             )
-            
+
             self.next_pair_id += 1
             self.open_pairs.append(pair)
-            
+
             # 更新统计
             self.stats['successful_opens'] += 1
             self.stats['opportunities_taken'] += 1
             self.stats['max_open_pairs'] = max(self.stats['max_open_pairs'], len(self.open_pairs))
             self.consecutive_failures = 0
-            
+
+            # T041: 增强开仓日志 (包含交易所、方向、价格、数量、时间戳、订单ID)
             self.logger.info(
-                f"✅ 开仓成功! 套利对 #{pair.pair_id}: "
-                f"{pair.extended_side.upper()} {pair.extended_quantity:.4f} "
-                f"Extended@{pair.extended_price:.2f} Lighter@{pair.lighter_price:.2f} "
-                f"开仓价差: ${pair.open_spread:.2f} ({pair.open_spread_rate:.4%})"
+                f"✅ 开仓成功! 套利对 #{pair.pair_id}\n"
+                f"   方向: {pair.extended_side.upper()}\n"
+                f"   数量: {pair.extended_quantity:.4f}\n"
+                f"   Extended: 价格@${pair.extended_price:.2f} (订单ID: {pair.open_extended_order_id})\n"
+                f"   Lighter: 价格@${pair.lighter_price:.2f} (订单ID: {pair.open_lighter_order_id})\n"
+                f"   开仓价差: ${pair.open_spread:.2f} ({pair.open_spread_rate:.4%})\n"
+                f"   时间戳: {pair.open_time:.2f}"
             )
             
             return True
@@ -561,34 +575,49 @@ class SpreadArbitrageBot:
                 quantity=pair.lighter_quantity,
                 expected_price=opportunity['lighter_price']
             )
-            
+
             if not hedge_result['success']:
                 self.stats['failed_closes'] += 1
                 self.logger.error("❌ 平仓对冲失败!存在未平仓风险!")
                 return False
-            
+
+            # T042-T043: 记录平仓订单ID
+            pair.close_extended_order_id = close_order['order_id']
+            pair.close_lighter_order_id = hedge_result.get('order_id')
+
             # 4. 计算盈亏
             profit = pair.close(
                 close_extended_price=fill_result['filled_price'],
                 close_lighter_price=hedge_result['filled_price']
             )
-            
+
+            # T044-T045: 增强平仓日志和平仓总结
+            self.logger.info(
+                f"💰 平仓成功! 套利对 #{pair.pair_id}\n"
+                f"   盈亏: ${profit:.2f} ({(profit/(pair.extended_quantity*pair.extended_price))*100:.2f}%)\n"
+                f"   持仓时间: {pair.holding_time:.0f}秒\n"
+                f"   Extended平仓: 价格@${pair.close_extended_price:.2f} (订单ID: {pair.close_extended_order_id})\n"
+                f"   Lighter平仓: 价格@${pair.close_lighter_price:.2f} (订单ID: {pair.close_lighter_order_id})"
+            )
+
+            # T045: 输出交易对总结
+            self.logger.info(
+                f"📊 交易对 #{pair.pair_id} 总结:\n"
+                f"   开仓: Extended@${pair.extended_price:.2f} → Lighter@${pair.lighter_price:.2f}\n"
+                f"   平仓: Extended@${pair.close_extended_price:.2f} → Lighter@${pair.close_lighter_price:.2f}\n"
+                f"   收益率: {(profit/(pair.extended_quantity*pair.extended_price))*100:.2f}%"
+            )
+
             # 5. 更新统计
             self.stats['successful_closes'] += 1
             if profit > 0:
                 self.stats['total_profit'] += profit
             else:
                 self.stats['total_loss'] += abs(profit)
-            
+
             # 6. 从持仓列表移除
             self.open_pairs.remove(pair)
             self.closed_pairs.append(pair)
-            
-            self.logger.info(
-                f"💰 平仓成功! 套利对 #{pair.pair_id}: "
-                f"盈亏 ${profit:.2f} "
-                f"持仓 {pair.holding_time:.0f}秒"
-            )
             
             return True
             
@@ -610,49 +639,78 @@ class SpreadArbitrageBot:
         current_extended_price: Decimal,
         current_lighter_price: Decimal
     ) -> tuple[bool, Optional[str]]:
-        """检查是否需要强制平仓
-
-        平仓优先级：
-        1. 止损（达到止损线立即平仓）
-        2. 盈利止盈（达到目标利润立即平仓）
-        3. 时间止盈（达到最大持仓时间 且 满足利润条件）
         """
-        # 计算浮动盈亏
+        检查是否需要强制平仓
+
+        新的多层平仓策略 (按优先级):
+        1. 盈利目标平仓 (Priority 1): PnL >= profit_target_rate, 立即平仓锁定利润
+        2. 时间小额平仓 (Priority 2): 持仓 > time_close_threshold 且 PnL > 0, 平仓获取小额利润
+        3. 回本止损 (Priority 3): 持仓 > time_close_threshold 且 PnL < 0, 等待 PnL >= 0 时平仓
+        4. 强制平仓 (Priority 4): 持仓 > max_holding_time, 无论盈亏强制平仓
+
+        Args:
+            pair: 套利对
+            current_extended_price: 当前 Extended 价格
+            current_lighter_price: 当前 Lighter 价格
+
+        Returns:
+            (should_close, reason): 是否应该平仓及原因
+        """
+        # 计算未实现盈亏
         unrealized_pnl = pair.calculate_unrealized_pnl(
             current_extended_price,
             current_lighter_price
         )
 
-        # 1. 止损检查（最高优先级）
+        # 计算持仓时间
+        holding_time = pair.holding_time
+
+        # ===== Priority 1: 盈利目标平仓 (最高优先级) =====
+        if self.config.enable_profit_target:
+            # 计算盈利目标 (基于 Extended 平仓价格)
+            profit_target = pair.extended_quantity * current_extended_price * self.config.profit_target_rate
+
+            if unrealized_pnl >= profit_target:
+                return True, (
+                    f"盈利目标达标 (${unrealized_pnl:.2f} >= ${profit_target:.2f}), "
+                    f"持仓{holding_time:.0f}秒"
+                )
+
+        # ===== Priority 2: 时间小额平仓 =====
+        if holding_time > self.config.time_close_threshold:
+            # 超过时间阈值后,如果有小额利润则平仓
+            if unrealized_pnl > 0:
+                return True, (
+                    f"时间小额平仓 (持仓{holding_time:.0f}秒, PnL=${unrealized_pnl:.2f})"
+                )
+
+        # ===== Priority 3: 回本止损 =====
+        if holding_time > self.config.time_close_threshold:
+            # 超过时间阈值后,如果亏损则等待回本
+            if unrealized_pnl < 0:
+                # 检查是否接近回本 (PnL >= 0)
+                if unrealized_pnl >= 0:
+                    return True, (
+                        f"回本止损 (持仓{holding_time:.0f}秒, PnL=${unrealized_pnl:.2f})"
+                    )
+                else:
+                    # 仍在亏损,继续等待
+                    self.logger.debug(
+                        f"套利对 #{pair.pair_id} 持仓{holding_time:.0f}秒, "
+                        f"PnL=${unrealized_pnl:.2f}, 等待回本"
+                    )
+
+        # ===== Priority 4: 强制平仓 (避免长期风险) =====
+        if holding_time > self.config.max_holding_time:
+            return True, (
+                f"强制平仓 (持仓{holding_time:.0f}秒 > 最大{self.config.max_holding_time}秒, "
+                f"PnL=${unrealized_pnl:.2f})"
+            )
+
+        # ===== 传统止损检查 (可选,如果启用) =====
         if self.config.enable_stop_loss:
             if unrealized_pnl < -self.config.stop_loss_usdt:
-                return True, f"止损 (${unrealized_pnl:.2f})"
-
-        # 2. 盈利止盈检查
-        if self.config.enable_profit_target:
-            target_profit = pair.extended_quantity * current_extended_price * self.config.profit_target_rate
-            if unrealized_pnl >= target_profit * Decimal('0.8'):
-                return True, f"盈利止盈 (${unrealized_pnl:.2f})"
-
-        # 3. 时间止盈检查（修复后的逻辑）
-        if self.config.enable_time_close:
-            if pair.holding_time > self.config.max_holding_time:
-                # 计算最小利润要求
-                min_profit = pair.extended_quantity * current_extended_price * self.config.time_close_profit_threshold
-
-                if self.config.allow_negative_close:
-                    # 允许负利润平仓（不推荐）
-                    return True, f"时间止盈 ({pair.holding_time:.0f}秒, 利润${unrealized_pnl:.2f})"
-                else:
-                    # 必须利润大于阈值才能平仓
-                    if unrealized_pnl >= min_profit:
-                        return True, f"时间止盈 ({pair.holding_time:.0f}秒, 利润${unrealized_pnl:.2f})"
-                    else:
-                        # 利润不足，继续等待
-                        self.logger.debug(
-                            f"套利对 #{pair.pair_id} 已达最大持仓时间但利润不足: "
-                            f"${unrealized_pnl:.4f} < ${min_profit:.4f}, 继续等待"
-                        )
+                return True, f"止损触发 (PnL=${unrealized_pnl:.2f} < -${self.config.stop_loss_usdt})"
 
         return False, None
     

@@ -64,10 +64,17 @@ class SpreadCalculator:
         if lighter_bid > extended_bid:
             spread = lighter_bid - extended_bid
             spread_rate = spread / extended_bid
-            
+
             # 扣除延迟缓冲后的预期利润率
             expected_profit_rate = spread_rate - self.config.latency_buffer
-            print(f"expected_profit_rate: {expected_profit_rate}")
+
+            # 新增: 价差阈值调试日志
+            self.logger.debug(
+                f"[价差检查] 买入机会 - Spread: {spread:.2f} ({spread_rate:.4%}), "
+                f"预期利润: {expected_profit_rate:.4%}, "
+                f"阈值: {self.config.min_spread_rate:.4%} (有效: {self.config.effective_min_spread:.4%})"
+            )
+
             if expected_profit_rate >= self.config.min_spread_rate:
                 # 计算下单数量 (USDT 转币数量)
                 quantity = self.config.order_quantity_usdt / extended_mid_price
@@ -88,10 +95,17 @@ class SpreadCalculator:
         if extended_ask > lighter_ask:
             spread = extended_ask - lighter_ask
             spread_rate = spread / lighter_ask
-            
+
             # 扣除延迟缓冲后的预期利润率
             expected_profit_rate = spread_rate - self.config.latency_buffer
-            print(f"expected_profit_rate: {expected_profit_rate}")
+
+            # 新增: 价差阈值调试日志
+            self.logger.debug(
+                f"[价差检查] 卖出机会 - Spread: {spread:.2f} ({spread_rate:.4%}), "
+                f"预期利润: {expected_profit_rate:.4%}, "
+                f"阈值: {self.config.min_spread_rate:.4%} (有效: {self.config.effective_min_spread:.4%})"
+            )
+
             if expected_profit_rate >= self.config.min_spread_rate:
                 # 计算下单数量
                 quantity = self.config.order_quantity_usdt / extended_mid_price
