@@ -233,7 +233,30 @@ class SpreadPair:
         )
         
         return self.realized_pnl
-    
+
+    def calculate_opening_fees(
+        self,
+        extended_fee_rate: Decimal,
+        lighter_fee_rate: Decimal
+    ) -> Decimal:
+        """
+        计算开仓手续费
+
+        Args:
+            extended_fee_rate: Extended手续费率
+            lighter_fee_rate: Lighter手续费率
+
+        Returns:
+            总开仓手续费
+        """
+        # Extended开仓手续费
+        extended_fee = self.extended_quantity * self.extended_price * extended_fee_rate
+
+        # Lighter开仓手续费
+        lighter_fee = self.lighter_quantity * self.lighter_price * lighter_fee_rate
+
+        return extended_fee + lighter_fee
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典 (用于日志记录)"""
         return {
