@@ -806,6 +806,139 @@ class SpreadArbitrageBot:
         except Exception as e:
             self.logger.debug(f"持仓状态输出错误: {e}")
 
+    def _log_all_positions(
+        self,
+        pairs: list,
+        extended_bid: Optional[Decimal] = None,
+        extended_ask: Optional[Decimal] = None,
+        lighter_bid: Optional[Decimal] = None,
+        lighter_ask: Optional[Decimal] = None
+    ) -> None:
+        """
+        整合输出所有持仓的监控信息
+
+        Args:
+            pairs: 持仓列表
+            extended_bid: Extended bid价格（用于计算已实现收益）
+            extended_ask: Extended ask价格（用于计算已实现收益）
+            lighter_bid: Lighter bid价格（用于计算已实现收益）
+            lighter_ask: Lighter ask价格（用于计算已实现收益）
+
+        Output Format (简体中文):
+            📊 持仓监控汇总
+               持仓 #1 (做多):
+                  ...
+               ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+               持仓 #2 (做空):
+                  ...
+               总持仓: 2 | 总未实现盈亏: $12.34
+        """
+        try:
+            # 空持仓列表
+            if not pairs:
+                self.logger.info("📊 持仓监控汇总\n   无活跃持仓")
+                return
+
+            # 检查订单簿数据是否可用
+            has_prices = extended_bid is not None and extended_ask is not None and lighter_bid is not None and lighter_ask is not None
+
+            # 构建输出行
+            output_lines = ["📊 持仓监控汇总"]
+
+            # 如果没有价格数据，添加警告
+            if not has_prices:
+                output_lines.append("   ⚠️ 订单簿数据不可用")
+
+            total_unrealized_pnl = Decimal('0')
+
+            # 遍历所有持仓
+            for i, pair in enumerate(pairs):
+                # 添加分隔符（除了第一个持仓）
+                if i > 0:
+                    output_lines.append("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                try:
+                    # 计算持仓时间和剩余时间
+                    holding_time = pair.holding_time
+                    remaining_time = max(0, self.config.max_holding_time - holding_time)
+
+                    # 确定方向
+                    direction = "做多" if pair.extended_side == 'buy' else "做空"
+                    closing_mark = " [平仓中]" if pair.is_closing else ""
+
+                    # 获取当前价格
+                    if extended_bid is not None and lighter_ask is not None:
+                        current_extended = extended_bid
+                        current_lighter = lighter_ask
+
+                        # 计算未实现盈亏
+                        unrealized_pnl = pair.calculate_unrealized_pnl(
+                            current_extended, current_lighter
+                        )
+                        total_unrealized_pnl += unrealized_pnl
+
+                        # 计算已实现收益（使用对手价）
+                        # 做多: extended用bid平仓, lighter用ask平仓
+                        # 做空: extended用ask平仓, lighter用bid平仓
+                        if pair.extended_side == 'buy':
+                            # 做多
+                            realized_pnl = pair.calculate_realized_pnl(
+                                extended_close_price=extended_bid,
+                                lighter_close_price=lighter_ask
+                            )
+                        else:
+                            # 做空
+                            realized_pnl = pair.calculate_realized_pnl(
+                                extended_close_price=extended_ask,
+                                lighter_close_price=lighter_bid
+                            )
+
+                        # 计算盈利目标差距
+                        profit_target = (pair.extended_quantity * current_extended *
+                                        self.config.profit_target_rate)
+                        profit_gap = profit_target - unrealized_pnl
+
+                        # 格式化持仓信息
+                        output_lines.append(f"   持仓 #{pair.pair_id} ({direction}){closing_mark}:")
+                        output_lines.append(f"      持仓时间: {holding_time:.0f}秒 (剩余 {remaining_time:.0f}秒)")
+                        output_lines.append(f"      Extended仓位: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}")
+                        output_lines.append(f"      当前价格: ${current_extended:.2f}")
+                        output_lines.append(f"      Lighter仓位: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}")
+                        output_lines.append(f"      当前价格: ${current_lighter:.2f}")
+                        # 显示已实现收益
+                        if realized_pnl is not None:
+                            output_lines.append(f"      当前已实现收益: ${realized_pnl:.2f}")
+                        else:
+                            output_lines.append(f"      当前已实现收益: N/A")
+                        output_lines.append(f"      未实现盈亏: ${unrealized_pnl:.2f}")
+                        output_lines.append(f"      距离盈利目标: ${profit_gap:.2f}")
+                    else:
+                        # 价格缺失时的输出
+                        output_lines.append(f"   持仓 #{pair.pair_id} ({direction}){closing_mark}:")
+                        output_lines.append(f"      持仓时间: {holding_time:.0f}秒 (剩余 {remaining_time:.0f}秒)")
+                        output_lines.append(f"      Extended仓位: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}")
+                        output_lines.append(f"      当前价格: N/A")
+                        output_lines.append(f"      Lighter仓位: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}")
+                        output_lines.append(f"      当前价格: N/A")
+                        output_lines.append(f"      未实现盈亏: N/A")
+                        output_lines.append(f"      距离盈利目标: N/A")
+
+                except Exception as e:
+                    # 单个持仓计算失败，记录debug日志但不中断
+                    self.logger.debug(f"持仓 #{pair.pair_id} 状态计算错误: {e}")
+                    output_lines.append(f"   持仓 #{pair.pair_id}: 状态计算错误")
+
+            # 添加摘要行（多个持仓时）
+            if len(pairs) > 1:
+                output_lines.append("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                output_lines.append(f"   总持仓: {len(pairs)} | 总未实现盈亏: ${total_unrealized_pnl:.2f}")
+
+            # 单次输出所有信息
+            self.logger.info("\n".join(output_lines))
+
+        except Exception as e:
+            self.logger.debug(f"持仓监控汇总输出错误: {e}")
+
     def _check_force_close(
         self,
         pair: SpreadPair,

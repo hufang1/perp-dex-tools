@@ -142,7 +142,70 @@ class SpreadPair:
             lighter_pnl = (current_lighter_price - self.lighter_price) * self.lighter_quantity
         
         return extended_pnl + lighter_pnl
-    
+
+    def calculate_realized_pnl(
+        self,
+        extended_close_price: Optional[Decimal],
+        lighter_close_price: Optional[Decimal]
+    ) -> Optional[Decimal]:
+        """
+        计算使用对手价立即平仓的理论收益
+
+        Args:
+            extended_close_price: Extended平仓价格
+                - 做多持仓: 使用bid价格（卖出）
+                - 做空持仓: 使用ask价格（买入平仓）
+            lighter_close_price: Lighter平仓价格
+                - 做多持仓时Lighter为做空: 使用ask价格（买入平仓）
+                - 做空持仓时Lighter为做多: 使用bid价格（卖出）
+
+        Returns:
+            已实现盈亏 (Decimal) 或 None (当价格为None时)
+            - 正数: 盈利
+            - 负数: 亏损
+            - 零: 不盈不亏
+            - None: 价格缺失无法计算
+
+        Calculation:
+            Extended盈亏 + Lighter盈亏
+
+        做多示例:
+            Extended买入 @ $3000, 当前bid $3005 → 盈 $5
+            Lighter卖出 @ $2980, 当前ask $3010 → 亏 $20
+            已实现收益 = $5 - $20 = -$15
+
+        做空示例:
+            Extended卖出 @ $3000, 当前ask $2995 → 盈 $5
+            Lighter买入 @ $2980, 当前bid $2975 → 盈 $5
+            已实现收益 = $5 + $5 = $10
+        """
+        # 价格为None时无法计算
+        if extended_close_price is None or lighter_close_price is None:
+            return None
+
+        # 验证价格和数量有效性
+        if extended_close_price <= 0 or lighter_close_price <= 0:
+            return None
+        if self.extended_quantity <= 0 or self.lighter_quantity <= 0:
+            return None
+
+        try:
+            if self.extended_side == 'buy':
+                # 做多: Extended买入，现在用bid卖出
+                extended_pnl = (extended_close_price - self.extended_price) * self.extended_quantity
+                # 做多时Lighter为做空，现在用ask买入平仓
+                lighter_pnl = (self.lighter_price - lighter_close_price) * self.lighter_quantity
+            else:
+                # 做空: Extended卖出，现在用ask买入平仓
+                extended_pnl = (self.extended_price - extended_close_price) * self.extended_quantity
+                # 做空时Lighter为做多，现在用bid卖出
+                lighter_pnl = (lighter_close_price - self.lighter_price) * self.lighter_quantity
+
+            return extended_pnl + lighter_pnl
+        except Exception:
+            # 计算异常时返回None
+            return None
+
     def close(
         self,
         close_extended_price: Decimal,

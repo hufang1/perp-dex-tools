@@ -8,6 +8,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-09
 - Python 3.11+ (asyncio) + websockets, decimal.Decimal, logging, pytes (002-optimize-spread-arb)
 - 状态在内存中,日志写入文件 (N/A数据库) (002-optimize-spread-arb)
 - Python 3.11+ logging, decimal.Decimal, pathlib, datetime (001-trade-log)
+- Python 3.11+ (asyncio) + websockets, decimal.Decimal, logging (Python标准库) (001-optimize-monitor)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -68,6 +69,7 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-optimize-monitor: Added Python 3.11+ (asyncio) + websockets, decimal.Decimal, logging (Python标准库)
 
 ### 003-close-position-debug: 平仓逻辑修复与持仓监控调试（2026-01-09）
 **修复核心Bug**: 实现强制平仓逻辑，修复持仓无法平仓的问题
@@ -90,9 +92,7 @@ cat logs/trade.log
     - 距离盈利目标差距
     - 简体中文格式化输出
 
-- **监控集成**: 在 `_monitor_pairs` 循环中每5秒输出持仓状态
 
-- **日志输出示例**:
   ```
   📊 持仓监控 #1 (做多):
      持仓时间: 123秒 (剩余 1677秒)
@@ -107,13 +107,11 @@ cat logs/trade.log
 ### 001-trade-log: 交易日志功能（2026-01-09）
 **新增功能**: 详细的交易日志记录，用于验证计算收益与实际交易所仓位的一致性
 
-- **新增文件**:
   - `spread/trade_logger.py`: TradeLogger交易日志记录器
   - `tests/test_trade_logger.py`: 交易日志单元测试（15个测试用例）
   - `tests/integration/test_trade_logging.py`: 交易日志集成测试
   - `logs/trade.log`: 交易日志文件（自动创建）
 
-- **修改文件**:
   - `spread/bot.py`: 集成TradeLogger到开仓和平仓流程
 
   - 自动记录所有开仓交易（时间戳、套利对ID、方向、交易所详情、价差）
