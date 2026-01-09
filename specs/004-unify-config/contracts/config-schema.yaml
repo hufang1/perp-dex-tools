@@ -1,0 +1,440 @@
+# Configuration Validation Schema
+
+**Feature**: 004-unify-config | **Date**: 2026-01-09
+
+This document defines the validation rules and schema for all configuration classes.
+
+---
+
+## SpreadArbConfig Schema
+
+```yaml
+SpreadArbConfig:
+  type: dataclass
+  description: Configuration for spread arbitrage bot
+
+  fields:
+    # Basic Configuration
+    ticker:
+      type: str
+      default: "ETH"
+      description: Trading pair symbol
+      example: "ETH", "BTC"
+
+    order_quantity_usdt:
+      type: Decimal
+      default: 35
+      description: Order size in USDT
+      validation:
+        - condition: "> 0"
+          error_message: "order_quantity_usdt must be greater than 0"
+
+    env_file:
+      type: str
+      default: ".env"
+      description: Path to environment variables file
+      example: ".env", ".env.account1", ".env.production"
+
+    # Spread Parameters
+    min_spread_rate:
+      type: Decimal
+      default: 0.0005
+      description: Minimum spread rate to open position (0.05%)
+      validation:
+        - condition: "> 0"
+          error_message: "min_spread_rate must be greater than 0"
+        - condition: "> latency_buffer"
+          error_message: "min_spread_rate must be greater than latency_buffer"
+
+    latency_buffer:
+      type: Decimal
+      default: 0.0001
+      description: Buffer for execution latency (0.01%)
+
+    # Position Management
+    max_open_pairs:
+      type: int
+      default: 3
+      description: Maximum concurrent spread pairs
+      validation:
+        - condition: "> 0"
+          error_message: "max_open_pairs must be greater than 0"
+
+    max_total_position_usdt:
+      type: Decimal
+      default: 25
+      description: Maximum total position value in USDT
+
+    # Time-Based Closing
+    enable_time_close:
+      type: bool
+      default: true
+      description: Enable time-based position closing
+
+    max_holding_time:
+      type: int
+      default: 300
+      description: Maximum position holding time in seconds
+      validation:
+        - condition: "> time_close_threshold"
+          error_message: "max_holding_time must be greater than time_close_threshold"
+
+    time_close_threshold:
+      type: int
+      default: 60
+      description: Time threshold for forced closing in seconds
+      validation:
+        - condition: "> 0"
+          error_message: "time_close_threshold must be greater than 0"
+
+    # Profit-Based Closing
+    enable_profit_target:
+      type: bool
+      default: true
+      description: Enable profit target closing
+
+    profit_target_rate:
+      type: Decimal
+      default: 0.0005
+      description: Target profit rate (0.05%)
+      validation:
+        - condition: "> 0"
+          error_message: "profit_target_rate must be greater than 0"
+
+    # Stop Loss
+    enable_stop_loss:
+      type: bool
+      default: true
+      description: Enable stop-loss
+
+    stop_loss_usdt:
+      type: Decimal
+      default: 5
+      description: Stop-loss amount in USDT
+
+    # Time Close Profit Threshold
+    time_close_profit_threshold:
+      type: Decimal
+      default: 0.0001
+      description: Minimum profit for time-based close (0.01%)
+
+    allow_negative_close:
+      type: bool
+      default: false
+      description: Allow closing with negative profit
+
+    # Risk Control
+    max_lighter_depth_ratio:
+      type: Decimal
+      default: 0.5
+      description: Maximum ratio of Lighter depth to use
+      validation:
+        - condition: "> 0 and <= 1"
+          error_message: "max_lighter_depth_ratio must be in (0, 1] range"
+
+    min_lighter_depth_usdt:
+      type: Decimal
+      default: 200
+      description: Minimum Lighter depth required in USDT
+
+    check_depth_layers:
+      type: int
+      default: 3
+      description: Number of orderbook layers to check
+
+    slippage_tolerance:
+      type: Decimal
+      default: 0.001
+      description: Maximum acceptable slippage (0.1%)
+
+    # Unhedged Position Protection
+    max_unhedged_positions:
+      type: int
+      default: 0
+      description: Maximum allowed unhedged positions (0 = forbidden)
+
+    auto_close_unhedged:
+      type: bool
+      default: false
+      description: Auto-close unhedged positions
+
+    unhedged_position_timeout:
+      type: int
+      default: 60
+      description: Timeout for unhedged positions in seconds
+
+    # Hedge Failure Monitoring
+    hedge_failure_threshold:
+      type: Decimal
+      default: 0.3
+      description: Hedge failure rate threshold (30%)
+
+    hedge_failure_window:
+      type: int
+      default: 10
+      description: Hedge failure rate statistical window
+
+    # Position Reconciliation
+    enable_reconciliation:
+      type: bool
+      default: true
+      description: Enable position reconciliation
+
+    reconciliation_interval:
+      type: int
+      default: 60
+      description: Reconciliation interval in seconds
+
+    # Timeouts
+    extended_fill_timeout:
+      type: int
+      default: 10
+      description: Extended order fill timeout in seconds
+
+    lighter_hedge_timeout:
+      type: int
+      default: 3
+      description: Lighter hedge timeout in seconds
+
+    # Circuit Breaker
+    max_consecutive_failures:
+      type: int
+      default: 3
+      description: Maximum consecutive failures before cooldown
+
+    cooldown_period:
+      type: int
+      default: 60
+      description: Cooldown period in seconds
+
+    # Priority
+    prioritize_closing:
+      type: bool
+      default: true
+      description: Prioritize closing over opening
+
+    # Other
+    enable_partial_fill:
+      type: bool
+      default: true
+      description: Allow partial order fills
+
+    log_level:
+      type: str
+      default: "INFO"
+      description: Logging level
+      allowed_values: ["DEBUG", "INFO", "WARNING", "ERROR"]
+
+  methods:
+    from_env:
+      return_type: SpreadArbConfig
+      description: Create instance from environment variables
+
+    effective_min_spread:
+      return_type: Decimal
+      description: Returns min_spread_rate + latency_buffer
+```
+
+---
+
+## HedgeConfig Schema
+
+```yaml
+HedgeConfig:
+  type: dataclass
+  description: Configuration for hedge mode bots
+
+  fields:
+    exchange:
+      type: str
+      default: "edgex"
+      description: Primary exchange name
+      allowed_values: ["backpack", "extended", "apex", "grvt", "edgex", "nado"]
+      validation:
+        - condition: "in supported list"
+          error_message: "exchange must be one of ['backpack', 'extended', 'apex', 'grvt', 'edgex', 'nado']"
+
+    ticker:
+      type: str
+      default: "BTC"
+      description: Trading pair symbol
+      example: "BTC", "ETH"
+
+    order_quantity:
+      type: Decimal
+      default: 0.01
+      description: Order size in tokens
+      validation:
+        - condition: "> 0"
+          error_message: "order_quantity must be greater than 0"
+
+    iterations:
+      type: int
+      default: 20
+      description: Number of trading iterations
+      validation:
+        - condition: "> 0"
+          error_message: "iterations must be greater than 0"
+
+    fill_timeout:
+      type: int
+      default: 5
+      description: Order fill timeout in seconds
+      validation:
+        - condition: "> 0"
+          error_message: "fill_timeout must be greater than 0"
+
+    sleep_time:
+      type: int
+      default: 0
+      description: Sleep time between iterations in seconds
+      validation:
+        - condition: ">= 0"
+          error_message: "sleep_time must be non-negative"
+
+    max_position:
+      type: Decimal
+      default: 0
+      description: Maximum position size (0 = unlimited)
+      validation:
+        - condition: ">= 0"
+          error_message: "max_position must be non-negative"
+
+    env_file:
+      type: str
+      default: ".env"
+      description: Path to environment variables file
+      example: ".env", ".env.account1"
+
+  methods:
+    from_env:
+      return_type: HedgeConfig
+      description: Create instance from environment variables
+```
+
+---
+
+## TradingConfig Schema
+
+```yaml
+TradingConfig:
+  type: dataclass
+  description: Configuration for modular trading bot
+
+  fields:
+    exchange:
+      type: str
+      default: "edgex"
+      description: Exchange name
+      validation:
+        - condition: "in supported exchanges"
+          error_message: "Unsupported exchange"
+
+    ticker:
+      type: str
+      default: "ETH"
+      description: Trading pair symbol
+      example: "ETH", "BTC"
+
+    contract_id:
+      type: str
+      default: ""
+      description: Contract ID (set at runtime)
+
+    tick_size:
+      type: Decimal
+      default: 0
+      description: Minimum price increment (set at runtime)
+
+    quantity:
+      type: Decimal
+      default: 0.1
+      description: Order quantity
+      validation:
+        - condition: "> 0"
+          error_message: "quantity must be greater than 0"
+
+    take_profit:
+      type: Decimal
+      default: 0.02
+      description: Take profit amount in USDT
+      validation:
+        - condition: "> 0"
+          error_message: "take_profit must be greater than 0"
+
+    direction:
+      type: str
+      default: "buy"
+      description: Trading direction
+      allowed_values: ["buy", "sell"]
+      validation:
+        - condition: "in ['buy', 'sell']"
+          error_message: "direction must be 'buy' or 'sell'"
+
+    max_orders:
+      type: int
+      default: 40
+      description: Maximum active orders
+      validation:
+        - condition: "> 0"
+          error_message: "max_orders must be greater than 0"
+
+    wait_time:
+      type: int
+      default: 450
+      description: Wait time between orders in seconds
+      validation:
+        - condition: "> 0"
+          error_message: "wait_time must be greater than 0"
+
+    grid_step:
+      type: Decimal
+      default: -100
+      description: Grid step percentage
+
+    stop_price:
+      type: Decimal
+      default: -1
+      description: Stop trading price (-1 = disabled)
+
+    pause_price:
+      type: Decimal
+      default: -1
+      description: Pause trading price (-1 = disabled)
+
+    boost_mode:
+      type: bool
+      default: false
+      description: Enable boost mode (aster/backpack only)
+      validation:
+        - condition: "only with aster or backpack exchange"
+          error_message: "boost_mode is only supported for aster and backpack exchanges"
+
+    env_file:
+      type: str
+      default: ".env"
+      description: Path to environment variables file
+      example: ".env", ".env.production"
+
+  methods:
+    from_env:
+      return_type: TradingConfig
+      description: Create instance from environment variables
+```
+
+---
+
+## Validation Error Format
+
+All validation errors should follow this format:
+
+```python
+raise ValueError("<parameter_name> <validation_description>")
+```
+
+**Examples**:
+- `"min_spread_rate must be greater than 0"`
+- `"max_holding_time must be greater than time_close_threshold"`
+- `"exchange must be one of ['backpack', 'extended', 'apex', 'grvt', 'edgex', 'nado']"`
+- `"quantity must be greater than 0"`
+- `"boost_mode is only supported for aster and backpack exchanges"`

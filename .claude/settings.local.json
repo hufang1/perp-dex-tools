@@ -19,7 +19,10 @@
       "Bash(grep:*)",
       "Skill(speckit.specify)",
       "Skill(speckit.plan)",
-      "Skill(speckit.tasks)"
+      "Skill(speckit.tasks)",
+      "Bash(git add:*)",
+      "Bash(test:*)",
+      "Bash(pytest:*)"
     ]
   }
 }

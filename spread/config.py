@@ -71,7 +71,8 @@ class SpreadArbConfig:
     # ==================== 其他 ====================
     enable_partial_fill: bool = True                       # 允许部分成交
     log_level: str = "INFO"                                # 日志级别
-    
+    env_file: str = ".env"                                 # 环境变量文件路径
+
     def __post_init__(self):
         """验证配置"""
         # 验证价差率
@@ -174,5 +175,10 @@ class SpreadArbConfig:
 
             # 其他
             enable_partial_fill=os.getenv('ENABLE_PARTIAL_FILL', 'True').lower() == 'true',
-            log_level=os.getenv('LOG_LEVEL', 'INFO')
+            log_level=os.getenv('LOG_LEVEL', 'INFO'),
+            env_file=os.getenv('ENV_FILE', '.env')
         )
+
+
+# Default configuration instance
+config = SpreadArbConfig()

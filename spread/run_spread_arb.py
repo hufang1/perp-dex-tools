@@ -3,10 +3,10 @@
 价差套利策略运行入口
 
 Extended-Lighter 跨交易所价差套利
+Configuration is loaded from spread/config.py - no command-line arguments needed
 """
 
 import asyncio
-import argparse
 import logging
 import sys
 import os
@@ -17,93 +17,10 @@ import dotenv
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from spread.config import SpreadArbConfig
+from spread.config import config
 from spread.bot import SpreadArbitrageBot
 from exchanges.extended import ExtendedClient
 from exchanges.lighter import LighterClient
-
-
-def parse_arguments():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(
-        description='Extended-Lighter 价差套利策略',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-    # 使用默认参数运行 ETH
-    python run_spread_arb.py --ticker ETH
-    
-    # 自定义参数
-    python run_spread_arb.py --ticker ETH --quantity 200 --min-spread 0.0008
-    
-    # 使用自定义环境变量文件
-    python run_spread_arb.py --ticker BTC --env-file .env.account1
-        """
-    )
-    
-    # 基础参数
-    parser.add_argument('--ticker', type=str, default='ETH',
-                        help='交易对符号 (default: ETH)')
-    parser.add_argument('--env-file', type=str, default='.env',
-                        help='环境变量文件 (default: .env)')
-    
-    # 下单参数
-    parser.add_argument('--quantity', type=float, default=35,
-                        help='单次下单金额 USDT (default: 35)')
-    
-    # 价差参数
-    parser.add_argument('--min-spread', type=float, default=0.0005,
-                        help='最小价差率 (default: 0.0005 = 0.05%%)')
-    parser.add_argument('--latency-buffer', type=float, default=0.0001,
-                        help='延迟缓冲 (default: 0.0001 = 0.01%%)')
-    parser.add_argument('--profit-target', type=float, default=0.0005,
-                        help='盈利目标 (default: 0.0005 = 0.05%%)')
-    parser.add_argument('--time-close-threshold', type=float, default=0.0001,
-                        help='时间止盈最小利润 (default: 0.0001 = 0.01%%)')
-    
-    # 持仓管理
-    parser.add_argument('--max-pairs', type=int, default=3,
-                        help='最大同时持有套利对数 (default: 3)')
-    parser.add_argument('--max-holding-time', type=int, default=1800,
-                        help='最大持仓时间秒数 (default: 1800 = 30分钟)')
-    
-    # 风险控制
-    parser.add_argument('--stop-loss', type=float, default=5,
-                        help='止损金额 USDT (default: 5)')
-    parser.add_argument('--slippage-tolerance', type=float, default=0.001,
-                        help='最大可接受滑点 (default: 0.001 = 0.1%%)')
-    
-    # 其他
-    parser.add_argument('--log-level', type=str, default='INFO',
-                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                        help='日志级别 (default: INFO)')
-    parser.add_argument('--no-prioritize-closing', action='store_true',
-                        help='不优先平仓 (default: 优先平仓)')
-    
-    return parser.parse_args()
-
-
-def setup_logging(log_level: str):
-    """配置日志系统"""
-    # 创建日志目录
-    log_dir = Path("logs/spread")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 配置根日志
-    logging.basicConfig(
-        level=getattr(logging, log_level),
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.FileHandler(log_dir / f"spread_arb_{args.ticker.lower()}.log"),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-    
-    # 抑制第三方库日志
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logging.getLogger('websockets').setLevel(logging.WARNING)
 
 
 class Config:
@@ -113,44 +30,50 @@ class Config:
             setattr(self, key, value)
 
 
+def setup_logging(log_level: str, ticker: str):
+    """配置日志系统"""
+    # 创建日志目录
+    log_dir = Path("logs/spread")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 配置根日志
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_dir / f"spread_arb_{ticker.lower()}.log"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+    # 抑制第三方库日志
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('websockets').setLevel(logging.WARNING)
+
+
 async def main():
     """主函数"""
-    global args
-    args = parse_arguments()
-    
     # 设置日志
-    setup_logging(args.log_level)
+    setup_logging(config.log_level, config.ticker)
     logger = logging.getLogger("Main")
-    
+
     # 检查环境变量文件
-    env_path = Path(args.env_file)
+    env_path = Path(config.env_file)
     if not env_path.exists():
         logger.error(f"环境变量文件不存在: {env_path.resolve()}")
         sys.exit(1)
-    
+
     # 加载环境变量
-    dotenv.load_dotenv(args.env_file)
-    logger.info(f"已加载环境变量: {args.env_file}")
-    logger.debug(f"命令行参数: {args}")
-    # 创建配置
-    config = SpreadArbConfig(
-        ticker=args.ticker.upper(),
-        order_quantity_usdt=Decimal(str(args.quantity)),
-        min_spread_rate=Decimal(str(args.min_spread)),  # --min-spread 自动转换为 args.min_spread
-        latency_buffer=Decimal(str(args.latency_buffer)),
-        max_open_pairs=args.max_pairs,
-        max_holding_time=args.max_holding_time,
-        stop_loss_usdt=Decimal(str(args.stop_loss)),
-        slippage_tolerance=Decimal(str(args.slippage_tolerance)),
-        profit_target_rate=Decimal(str(args.profit_target)),  # 新增
-        time_close_profit_threshold=Decimal(str(args.time_close_threshold)),  # 新增
-        log_level=args.log_level,
-        prioritize_closing=not args.no_prioritize_closing
-    )
-    
+    dotenv.load_dotenv(config.env_file)
+    logger.info(f"已加载环境变量: {config.env_file}")
+    logger.info(f"配置参数: ticker={config.ticker}, quantity={config.order_quantity_usdt}, "
+                f"min_spread={config.min_spread_rate}, max_pairs={config.max_open_pairs}")
+
     logger.info("="*60)
     logger.info("初始化 Extended 客户端...")
-    
+
     # 初始化 Extended 客户端
     extended_config_dict = {
         'ticker': config.ticker,
@@ -161,9 +84,9 @@ async def main():
     }
     extended_config = Config(extended_config_dict)
     extended_client = ExtendedClient(extended_config)
-    
+
     logger.info("初始化 Lighter 客户端...")
-    
+
     # 初始化 Lighter 客户端
     lighter_config_dict = {
         'ticker': config.ticker,
@@ -202,7 +125,7 @@ async def main():
         import traceback
         logger.error(f"详细错误: {traceback.format_exc()}")
         raise
-    
+
     extended_client.contract_id = extended_contract_id
     extended_client.config.tick_size = extended_tick_size
     extended_client.config.contract_id = extended_contract_id
@@ -242,11 +165,11 @@ async def main():
     logger.info("  连接Lighter...")
     await lighter_client.connect()
     logger.info("  Lighter连接完成")
-    
+
     # 等待 WebSocket 连接稳定
     logger.info("等待 WebSocket 连接稳定...")
     await asyncio.sleep(3)
-    
+
     # 创建并运行套利机器人
     logger.info("创建套利机器人...")
     bot = SpreadArbitrageBot(
@@ -254,7 +177,7 @@ async def main():
         extended_client=extended_client,
         lighter_client=lighter_client
     )
-    
+
     # 启动订单簿同步任务
     async def sync_orderbooks():
         """持续同步订单簿数据"""
@@ -265,10 +188,10 @@ async def main():
                 # ExtendedClient 的属性是 'orderbook'，不是 'extended_order_book'
                 if hasattr(extended_client, 'orderbook') and extended_client.orderbook:
                     ex_raw = extended_client.orderbook
-                    
+
                     # 转换 Extended 数据格式: {'bid': [{'p': '...', 'q': '...'}], ...} -> {'bids': {price: size}, ...}
                     formatted_book = {'bids': {}, 'asks': {}}
-                    
+
                     # 处理买单
                     if ex_raw.get('bid'):
                         for item in ex_raw['bid']:
@@ -279,7 +202,7 @@ async def main():
                                     formatted_book['bids'][p] = q
                             except:
                                 pass
-                                
+
                     # 处理卖单
                     if ex_raw.get('ask'):
                         for item in ex_raw['ask']:
@@ -290,21 +213,21 @@ async def main():
                                     formatted_book['asks'][p] = q
                             except:
                                 pass
-                    
+
                     # 只有当有数据时才更新
                     if formatted_book['bids'] or formatted_book['asks']:
                          bot.update_extended_orderbook(formatted_book)
                 else:
                     # 某些时刻可能还没准备好，不属于错误，但可以记录 debug 日志
                     pass
-                
+
                 # 同步 Lighter 订单簿
                 if hasattr(lighter_client, 'ws_manager') and hasattr(lighter_client.ws_manager, 'order_book'):
                     li_book = lighter_client.ws_manager.order_book
                     if li_book:
                         # 转换 Lighter 数据格式 (float -> Decimal)
                         formatted_li_book = {'bids': {}, 'asks': {}}
-                        
+
                         # 处理买单
                         if li_book.get('bids'):
                             for p, q in li_book['bids'].items():
@@ -312,7 +235,7 @@ async def main():
                                     formatted_li_book['bids'][Decimal(str(p))] = Decimal(str(q))
                                 except:
                                     pass
-                        
+
                         # 处理卖单
                         if li_book.get('asks'):
                             for p, q in li_book['asks'].items():
@@ -322,21 +245,21 @@ async def main():
                                     pass
 
                         bot.update_lighter_orderbook(formatted_li_book)
-                
+
                 await asyncio.sleep(0.1)  # 每 100ms 同步一次
             except Exception as e:
                 logger.error(f"订单簿同步错误: {e}")
                 # import traceback
                 # logger.error(traceback.format_exc())
                 await asyncio.sleep(1)
-    
+
     # 启动同步任务
     sync_task = asyncio.create_task(sync_orderbooks())
-    
+
     logger.info("="*60)
     logger.info("启动套利机器人...")
     logger.info("="*60)
-    
+
     try:
         await bot.run()
     except KeyboardInterrupt:
