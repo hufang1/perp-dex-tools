@@ -15,6 +15,8 @@ from .calculator import SpreadCalculator
 from .order_manager import SpreadOrderManager
 from .hedge_manager import HedgeManager
 from .trade_logger import TradeLogger
+from .position_aggregator import PositionAggregator, UnifiedPosition
+from .profit_calculator import ProfitCalculator, ProfitBreakdown
 
 
 class SpreadArbitrageBot:
@@ -49,6 +51,16 @@ class SpreadArbitrageBot:
 
         # 初始化交易日志记录器
         self.trade_logger = TradeLogger(log_file_path="logs/trade.log")
+
+        # 初始化持仓聚合器和收益计算器
+        self.position_aggregator = PositionAggregator(
+            extended_fee_rate=config.extended_fee_rate,
+            lighter_fee_rate=config.lighter_fee_rate
+        )
+        self.profit_calculator = ProfitCalculator(
+            extended_fee_rate=config.extended_fee_rate,
+            lighter_fee_rate=config.lighter_fee_rate
+        )
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -316,13 +328,20 @@ class SpreadArbitrageBot:
         """监控套利对,检查强制平仓条件"""
         while not self.stop_flag:
             try:
-                for pair in self.open_pairs[:]:  # 复制列表
-                    # 获取当前价格
-                    extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
-                    extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
-                    lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
-                    lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
+                # 获取当前价格
+                extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
+                extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
+                lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
+                lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
 
+                # 🆕 新的聚合显示逻辑
+                if self.open_pairs:
+                    self._log_unified_positions(extended_bid, extended_ask, lighter_bid, lighter_ask)
+                else:
+                    self.logger.info("📊 当前无持仓")
+
+                # 检查强制平仓条件（保留原有逻辑）
+                for pair in self.open_pairs[:]:  # 复制列表
                     # 确定当前平仓价格
                     if pair.extended_side == 'buy':
                         current_extended = extended_ask
@@ -330,9 +349,6 @@ class SpreadArbitrageBot:
                     else:
                         current_extended = extended_bid
                         current_lighter = lighter_ask
-
-                    # 🆕 新增：输出持仓状态（在检查平仓条件之前）
-                    self._log_position_status(pair, current_extended, current_lighter)
 
                     # 检查强制平仓条件
                     should_close, reason = self._check_force_close(
@@ -756,55 +772,136 @@ class SpreadArbitrageBot:
         current_lighter_price: Decimal
     ) -> None:
         """
-        输出持仓状态信息到控制台
+        输出单个持仓状态信息（保留用于兼容性，但不再使用）
 
         Args:
             pair: 套利对
             current_extended_price: 当前 Extended 价格
             current_lighter_price: 当前 Lighter 价格
+        """
+        # 此方法已弃用，使用 _log_unified_positions 替代
+        pass
+
+    def _log_unified_positions(
+        self,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> None:
+        """
+        输出统一持仓监控信息
+
+        Args:
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
 
         Output Format (简体中文):
-            📊 持仓监控 #1:
-               持仓时间: 123秒 (剩余 1677秒)
-               Extended仓位: 0.35 @ $2450.00
-               当前价格: $2448.50
-               Lighter仓位: 0.35 @ $2460.00
-               当前价格: $2461.20
-               未实现盈亏: $1.23
-               距离盈利目标: $8.77
+            📊 持仓监控汇总
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            做多仓位 (共3个套利对):
+               总数量: 0.0300 ETH
+               Extended平均价格: $3087.10
+               Lighter平均价格: $3058.93
+               持仓时间: 37-49秒 (剩余 1751秒)
+               当前价格: Extended $3087.00 / Lighter $3089.42
+               未实现盈亏: -$0.92
+               距离盈利目标: $0.96
+               平仓后收益: -$1.22 (含手续费 $0.30)
         """
         try:
-            # 计算指标
-            holding_time = pair.holding_time
-            remaining_time = max(0, self.config.max_holding_time - holding_time)
+            # 聚合持仓
+            unified_positions = self.position_aggregator.aggregate_positions(self.open_pairs)
 
-            # 计算未实现盈亏
-            unrealized_pnl = pair.calculate_unrealized_pnl(
-                current_extended_price,
-                current_lighter_price
-            )
+            if not unified_positions:
+                return
 
-            # 计算盈利目标差距
-            profit_target = pair.extended_quantity * current_extended_price * self.config.profit_target_rate
-            profit_gap = profit_target - unrealized_pnl
+            # 输出标题
+            self.logger.info("📊 持仓监控汇总")
+            self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            # 确定方向显示
-            extended_direction = "做多" if pair.extended_side == 'buy' else "做空"
+            # 按方向输出
+            for direction, position in unified_positions.items():
+                direction_label = "做多" if direction == 'long' else "做空"
+                pair_count = len(position.pair_ids)
 
-            # 输出格式化的状态信息（中文）
-            self.logger.info(
-                f"📊 持仓监控 #{pair.pair_id} ({extended_direction}):\n"
-                f"   持仓时间: {holding_time:.0f}秒 (剩余 {remaining_time:.0f}秒)\n"
-                f"   Extended仓位: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}\n"
-                f"   当前价格: ${current_extended_price:.2f}\n"
-                f"   Lighter仓位: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}\n"
-                f"   当前价格: ${current_lighter_price:.2f}\n"
-                f"   未实现盈亏: ${unrealized_pnl:.2f}\n"
-                f"   距离盈利目标: ${profit_gap:.2f}"
-            )
+                self.logger.info(f"{direction_label}仓位 (共{pair_count}个套利对):")
+
+                # 计算持仓时间范围
+                earliest_holding, latest_holding = position.calculate_holding_time_range()
+                remaining_time = max(0, self.config.max_holding_time - latest_holding)
+
+                # 确定当前价格（根据方向）
+                if direction == 'long':
+                    current_extended = extended_ask
+                    current_lighter = lighter_bid
+                else:
+                    current_extended = extended_bid
+                    current_lighter = lighter_ask
+
+                # 计算未实现盈亏
+                unrealized_pnl = self._calculate_unified_pnl(position, current_extended, current_lighter)
+
+                # 计算盈利目标差距
+                profit_target = position.total_quantity * current_extended * self.config.profit_target_rate
+                profit_gap = profit_target - unrealized_pnl
+
+                # 计算平仓后收益
+                profit_breakdown = self.profit_calculator.calculate_profit(
+                    position, extended_bid, extended_ask, lighter_bid, lighter_ask
+                )
+
+                # 格式化输出
+                self.logger.info(f"   总数量: {position.total_quantity:.4f} ETH")
+                self.logger.info(f"   Extended平均价格: ${position.extended_avg_price:.2f}")
+                self.logger.info(f"   Lighter平均价格: ${position.lighter_avg_price:.2f}")
+                self.logger.info(f"   持仓时间: {earliest_holding:.0f}-{latest_holding:.0f}秒 (剩余 {remaining_time:.0f}秒)")
+                self.logger.info(f"   当前价格: Extended ${current_extended:.2f} / Lighter ${current_lighter:.2f}")
+                self.logger.info(f"   未实现盈亏: ${unrealized_pnl:.2f}")
+                self.logger.info(f"   距离盈利目标: ${profit_gap:.2f}")
+
+                # 输出平仓后收益（如果计算成功）
+                if profit_breakdown is not None:
+                    total_fees = position.total_opening_fees + profit_breakdown.estimated_closing_fees
+                    profit_sign = "+" if profit_breakdown.net_profit >= 0 else ""
+                    self.logger.info(f"   平仓后收益: {profit_sign}${profit_breakdown.net_profit:.2f} (含手续费 ${total_fees:.2f})")
+                else:
+                    self.logger.info("   平仓后收益: 价格数据异常，无法计算")
+
+                self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         except Exception as e:
-            self.logger.debug(f"持仓状态输出错误: {e}")
+            self.logger.debug(f"统一持仓状态输出错误: {e}")
+
+    def _calculate_unified_pnl(
+        self,
+        position: UnifiedPosition,
+        current_extended_price: Decimal,
+        current_lighter_price: Decimal
+    ) -> Decimal:
+        """
+        计算统一持仓的未实现盈亏
+
+        Args:
+            position: 统一持仓
+            current_extended_price: 当前 Extended 价格
+            current_lighter_price: 当前 Lighter 价格
+
+        Returns:
+            未实现盈亏
+        """
+        if position.direction == 'long':
+            # 做多：Extended买入价，Lighter卖出价
+            extended_pnl = (current_extended_price - position.extended_avg_price) * position.total_quantity
+            lighter_pnl = (position.lighter_avg_price - current_lighter_price) * position.total_quantity
+        else:
+            # 做空：Extended卖出价，Lighter买入价
+            extended_pnl = (position.extended_avg_price - current_extended_price) * position.total_quantity
+            lighter_pnl = (current_lighter_price - position.lighter_avg_price) * position.total_quantity
+
+        return extended_pnl + lighter_pnl
 
     def _log_all_positions(
         self,

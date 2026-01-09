@@ -31,15 +31,17 @@ Profit = Price_Spread - Slippage - Gas_Cost
 
 ```
 spread/
-├── __init__.py           # 模块初始化
-├── config.py             # 配置类
-├── spread_pair.py        # 套利对类
-├── calculator.py         # 价差计算器
-├── order_manager.py      # Extended 订单管理
-├── hedge_manager.py      # Lighter 对冲管理
-├── bot.py                # 主引擎
-├── run_spread_arb.py     # 运行入口
-└── README.md             # 本文档
+├── __init__.py              # 模块初始化
+├── config.py                # 配置类
+├── spread_pair.py           # 套利对类
+├── calculator.py            # 价差计算器
+├── order_manager.py         # Extended 订单管理
+├── hedge_manager.py         # Lighter 对冲管理
+├── bot.py                   # 主引擎
+├── position_aggregator.py   # 持仓聚合器（统一持仓监控）
+├── profit_calculator.py     # 收益计算器（平仓后收益计算）
+├── trade_logger.py          # 交易日志记录器
+└── README.md                # 本文档
 ```
 
 ##⚙️ 配置参数

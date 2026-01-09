@@ -68,6 +68,10 @@ class SpreadArbConfig:
     # ==================== 优先级 ====================
     prioritize_closing: bool = True                        # 优先平仓而非开仓
     
+    # ==================== 手续费配置 ====================
+    extended_fee_rate: Decimal = Decimal('0.000225')      # Extended taker手续费率 (0.0225%)
+    lighter_fee_rate: Decimal = Decimal('0.0')             # Lighter手续费率 (0%)
+
     # ==================== 其他 ====================
     enable_partial_fill: bool = True                       # 允许部分成交
     log_level: str = "INFO"                                # 日志级别
@@ -102,6 +106,13 @@ class SpreadArbConfig:
 
         if self.max_holding_time <= self.time_close_threshold:
             raise ValueError("max_holding_time 必须大于 time_close_threshold")
+
+        # 验证手续费率
+        if self.extended_fee_rate < 0:
+            raise ValueError("extended_fee_rate 不能为负数")
+
+        if self.lighter_fee_rate < 0:
+            raise ValueError("lighter_fee_rate 不能为负数")
 
     @property
     def effective_min_spread(self) -> Decimal:
