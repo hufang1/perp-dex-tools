@@ -25,7 +25,7 @@ class SpreadArbConfig:
     
     # ==================== 平仓策略 ====================
     enable_time_close: bool = True                         # 启用时间止盈
-    max_holding_time: int = 60                            # 最大持仓时间 (秒, 1分钟)
+    max_holding_time: int = 70                            # 最大持仓时间 (秒, 1分钟)
     time_close_threshold: int = 60                         # 时间平仓阈值 (秒, 1分钟) - 新增
 
     enable_profit_target: bool = True                      # 启用盈利目标
