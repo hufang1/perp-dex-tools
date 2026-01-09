@@ -1128,10 +1128,26 @@ class SpreadArbitrageBot:
     
     def _handle_extended_order_update(self, order_data: Dict[str, Any]):
         """处理 Extended 订单更新 (WebSocket 回调)"""
-        self.logger.info(
-            f"[DEBUG] bot收到订单更新: order_data={order_data}, "
-            f"current_order_id={self.order_manager.current_order_id}"
-        )
+        order_id = order_data.get('order_id')
+        current_order_id = self.order_manager.current_order_id
+
+        # T013: 区分"直接处理"和"缓存处理"两种路径
+        if current_order_id is None:
+            self.logger.info(
+                f"🔄 [缓存处理路径] bot收到订单更新: order_id={order_id}, "
+                f"current_order_id=None → 订单将被缓存"
+            )
+        elif order_id == current_order_id:
+            self.logger.info(
+                f"✅ [直接处理路径] bot收到订单更新: order_id={order_id}, "
+                f"status={order_data.get('status')} → 直接应用更新"
+            )
+        else:
+            self.logger.info(
+                f"📦 [缓存处理路径] bot收到订单更新: 收到order_id={order_id}, "
+                f"当前current_order_id={current_order_id} → 订单将被缓存"
+            )
+
         self.order_manager.update_order_status(order_data)
     
     def update_extended_orderbook(self, orderbook_data: Dict[str, Any]):

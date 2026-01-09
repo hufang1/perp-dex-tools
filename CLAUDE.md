@@ -74,9 +74,9 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-fix-order-match: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 - 006-fix-lighter-close: Added Python 3.11+
 - 005-unify-position-monitor: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging (Python标准库)
-- 004-unify-config: Added Python 3.10+ + asyncio, websockets, decimal.Decimal, logging, python-dotenv, pydantic, pytes
 
 ### 003-close-position-debug: 平仓逻辑修复与持仓监控调试（2026-01-09）
 **修复核心Bug**: 实现强制平仓逻辑，修复持仓无法平仓的问题

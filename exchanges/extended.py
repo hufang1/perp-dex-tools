@@ -717,7 +717,14 @@ class ExtendedClient(BaseExchangeClient):
 
                         if status in ['OPEN', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED']:
                             if self._order_update_handler:
-                                self.logger.log(f"[DEBUG] 调用_order_update_handler", level="INFO")
+                                # T015: 添加订单更新到达时间戳日志
+                                arrival_timestamp = datetime.now(timezone.utc).isoformat()
+                                self.logger.log(
+                                    f"[DEBUG] 调用_order_update_handler: "
+                                    f"order_id={order_id}, status={status}, "
+                                    f"arrival_time={arrival_timestamp}",
+                                    level="INFO"
+                                )
                                 self._order_update_handler({
                                     'order_id': order_id,
                                     'side': side,

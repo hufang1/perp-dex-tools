@@ -325,19 +325,21 @@ class SpreadOrderManager:
         Args:
             order_id: 订单ID
         """
+        # T009: 添加详细日志 - 缓存检查开始
+        self.logger.info(f"🔍 检查缓存: order_id={order_id}")
+
         async with self._update_lock:
             # 检查是否有该订单的缓存
             if order_id not in self._pending_updates:
-                self.logger.debug(
-                    f"[DEBUG] 无缓存更新: order_id={order_id}"
-                )
+                # T009: 添加详细日志 - 未找到缓存
+                self.logger.info(f"❌ 无缓存更新: order_id={order_id}")
+                self._cache_misses += 1
                 return
 
             # 获取并删除缓存
             updates = self._pending_updates.pop(order_id)
-            self.logger.debug(
-                f"[DEBUG] 应用缓存: order_id={order_id}, 更新数量={len(updates)}"
-            )
+            # T009: 添加详细日志 - 找到缓存
+            self.logger.info(f"✅ 找到缓存: order_id={order_id}, 数量={len(updates)}")
 
             # 按时间戳升序排序
             updates.sort(key=lambda x: x['timestamp'])
