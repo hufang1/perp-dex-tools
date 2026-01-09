@@ -59,6 +59,7 @@ class SpreadPair:
 
         # 状态
         self.is_closed = False
+        self.is_closing = False  # 是否正在平仓中（防止重复平仓）
 
         # 平仓信息
         self.close_extended_price: Optional[Decimal] = None

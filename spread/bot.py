@@ -322,7 +322,7 @@ class SpreadArbitrageBot:
                     extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
                     lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
                     lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
-                    
+
                     # 确定当前平仓价格
                     if pair.extended_side == 'buy':
                         current_extended = extended_ask
@@ -330,24 +330,27 @@ class SpreadArbitrageBot:
                     else:
                         current_extended = extended_bid
                         current_lighter = lighter_ask
-                    
+
+                    # 🆕 新增：输出持仓状态（在检查平仓条件之前）
+                    self._log_position_status(pair, current_extended, current_lighter)
+
                     # 检查强制平仓条件
                     should_close, reason = self._check_force_close(
                         pair, current_extended, current_lighter
                     )
-                    
+
                     if should_close:
                         self.logger.warning(
                             f"⚠️ 套利对 #{pair.pair_id} 触发强制平仓: {reason}"
                         )
                         await self._force_close_pair(pair)
-                
+
                 await asyncio.sleep(5)  # 每 5 秒检查一次
-                
+
             except Exception as e:
                 self.logger.error(f"监控循环错误: {e}")
                 await asyncio.sleep(5)
-    
+
     async def _stats_reporter(self):
         """定期报告统计信息"""
         while not self.stop_flag:
@@ -671,12 +674,138 @@ class SpreadArbitrageBot:
             self.stats['failed_closes'] += 1
             return False
     
-    async def _force_close_pair(self, pair: SpreadPair):
-        """强制市价平仓"""
-        self.logger.warning(f"强制平仓套利对 #{pair.pair_id}")
-        # TODO: 实现市价平仓逻辑
-        pass
-    
+    async def _force_close_pair(self, pair: SpreadPair) -> bool:
+        """
+        强制平仓套利对
+
+        使用对手价模拟市价单，快速平仓以避免进一步损失。
+
+        Args:
+            pair: 需要平仓的套利对
+
+        Returns:
+            bool: 平仓是否成功
+
+        Flow:
+            1. 检查 is_closing 标志，防止重复平仓
+            2. 获取当前订单簿的对手价
+            3. 构造 opportunity 字典
+            4. 调用 _close_pair 执行平仓
+            5. 记录结果到统计和日志
+        """
+        try:
+            self.logger.info(f"[强制平仓] 开始平仓套利对 #{pair.pair_id}")
+
+            # 1. 防止重复平仓
+            if getattr(pair, 'is_closing', False):
+                self.logger.warning(f"套利对 #{pair.pair_id} 正在平仓中，跳过")
+                return False
+
+            # 设置标志
+            pair.is_closing = True
+
+            # 2. 获取当前对手价（模拟市价单）
+            if not self.extended_orderbook['bids'] or not self.extended_orderbook['asks']:
+                self.logger.error("订单簿数据不足，无法平仓")
+                pair.is_closing = False
+                return False
+
+            extended_bid = max(self.extended_orderbook['bids'].keys())
+            extended_ask = min(self.extended_orderbook['asks'].keys())
+            lighter_bid = max(self.lighter_orderbook['bids'].keys())
+            lighter_ask = min(self.lighter_orderbook['asks'].keys())
+
+            # 确定平仓价格（使用对手价）
+            if pair.extended_side == 'buy':
+                # 做多平仓：卖出Extended（对手价bid），买入Lighter（对手价ask）
+                close_extended_price = extended_bid
+                close_lighter_price = lighter_ask
+            else:
+                # 做空平仓：买入Extended（对手价ask），卖出Lighter（对手价bid）
+                close_extended_price = extended_ask
+                close_lighter_price = lighter_bid
+
+            # 3. 构造 opportunity 字典（复用 _close_pair 的接口）
+            opportunity = {
+                'side': 'sell' if pair.extended_side == 'buy' else 'buy',
+                'extended_price': close_extended_price,
+                'lighter_price': close_lighter_price
+            }
+
+            # 4. 调用现有的平仓逻辑
+            success = await self._close_pair(pair, opportunity)
+
+            if not success:
+                self.logger.error(f"强制平仓失败！套利对 #{pair.pair_id} 仍持仓")
+                pair.is_closing = False  # 重置标志，允许重试
+                return False
+
+            # 5. 平仓成功
+            self.logger.info(f"✅ 强制平仓成功！套利对 #{pair.pair_id}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"强制平仓异常: {e}")
+            pair.is_closing = False
+            return False
+
+    def _log_position_status(
+        self,
+        pair: SpreadPair,
+        current_extended_price: Decimal,
+        current_lighter_price: Decimal
+    ) -> None:
+        """
+        输出持仓状态信息到控制台
+
+        Args:
+            pair: 套利对
+            current_extended_price: 当前 Extended 价格
+            current_lighter_price: 当前 Lighter 价格
+
+        Output Format (简体中文):
+            📊 持仓监控 #1:
+               持仓时间: 123秒 (剩余 1677秒)
+               Extended仓位: 0.35 @ $2450.00
+               当前价格: $2448.50
+               Lighter仓位: 0.35 @ $2460.00
+               当前价格: $2461.20
+               未实现盈亏: $1.23
+               距离盈利目标: $8.77
+        """
+        try:
+            # 计算指标
+            holding_time = pair.holding_time
+            remaining_time = max(0, self.config.max_holding_time - holding_time)
+
+            # 计算未实现盈亏
+            unrealized_pnl = pair.calculate_unrealized_pnl(
+                current_extended_price,
+                current_lighter_price
+            )
+
+            # 计算盈利目标差距
+            profit_target = pair.extended_quantity * current_extended_price * self.config.profit_target_rate
+            profit_gap = profit_target - unrealized_pnl
+
+            # 确定方向显示
+            extended_direction = "做多" if pair.extended_side == 'buy' else "做空"
+
+            # 输出格式化的状态信息（中文）
+            self.logger.info(
+                f"📊 持仓监控 #{pair.pair_id} ({extended_direction}):\n"
+                f"   持仓时间: {holding_time:.0f}秒 (剩余 {remaining_time:.0f}秒)\n"
+                f"   Extended仓位: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}\n"
+                f"   当前价格: ${current_extended_price:.2f}\n"
+                f"   Lighter仓位: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}\n"
+                f"   当前价格: ${current_lighter_price:.2f}\n"
+                f"   未实现盈亏: ${unrealized_pnl:.2f}\n"
+                f"   距离盈利目标: ${profit_gap:.2f}"
+            )
+
+        except Exception as e:
+            self.logger.debug(f"持仓状态输出错误: {e}")
+
     def _check_force_close(
         self,
         pair: SpreadPair,

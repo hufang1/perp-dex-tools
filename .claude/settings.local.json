@@ -17,7 +17,9 @@
       "Bash(git checkout:*)",
       "Bash(pip install:*)",
       "Bash(grep:*)",
-      "Skill(speckit.specify)"
+      "Skill(speckit.specify)",
+      "Skill(speckit.plan)",
+      "Skill(speckit.tasks)"
     ]
   }
 }
