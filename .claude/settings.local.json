@@ -22,7 +22,8 @@
       "Skill(speckit.tasks)",
       "Bash(git add:*)",
       "Bash(test:*)",
-      "Bash(pytest:*)"
+      "Bash(pytest:*)",
+      "Bash(pip show:*)"
     ]
   }
 }
