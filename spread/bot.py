@@ -14,6 +14,7 @@ from .spread_pair import SpreadPair
 from .calculator import SpreadCalculator
 from .order_manager import SpreadOrderManager
 from .hedge_manager import HedgeManager
+from .trade_logger import TradeLogger
 
 
 class SpreadArbitrageBot:
@@ -45,6 +46,9 @@ class SpreadArbitrageBot:
         self.calculator = SpreadCalculator(config)
         self.order_manager = SpreadOrderManager(config, extended_client)
         self.hedge_manager = HedgeManager(config, lighter_client)
+
+        # 初始化交易日志记录器
+        self.trade_logger = TradeLogger(log_file_path="logs/trade.log")
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -490,14 +494,20 @@ class SpreadArbitrageBot:
 
                 # 🔴 关键修复：记录未对冲的Extended仓位
                 unhedged_position = {
+                    'pair_id': self.next_pair_id,
                     'order_id': order['order_id'],
                     'side': opportunity['side'],
                     'quantity': fill_result['filled_quantity'],
                     'price': fill_result['filled_price'],
+                    'expected_price': opportunity['lighter']['price'],  # 预期的对冲价格
                     'timestamp': time.time(),
                     'error': hedge_result.get('error', 'Unknown')
                 }
                 self.unhedged_positions.append(unhedged_position)
+
+                # 记录未对冲仓位到交易日志文件
+                if not self.trade_logger.log_unhedged_position(unhedged_position):
+                    self.logger.warning(f"交易日志记录失败 (未对冲仓位)，但交易继续")
 
                 self.logger.error(
                     f"❌ 对冲失败! Extended单边仓位累积!\n"
@@ -549,7 +559,11 @@ class SpreadArbitrageBot:
                 f"   开仓价差: ${pair.open_spread:.2f} ({pair.open_spread_rate:.4%})\n"
                 f"   时间戳: {pair.open_time:.2f}"
             )
-            
+
+            # 记录到交易日志文件
+            if not self.trade_logger.log_opening_trade(pair):
+                self.logger.warning(f"交易日志记录失败 (开仓) - 套利对 #{pair.pair_id}，但交易继续")
+
             return True
             
         except Exception as e:
@@ -633,6 +647,10 @@ class SpreadArbitrageBot:
                 f"   平仓: Extended@${pair.close_extended_price:.2f} → Lighter@${pair.close_lighter_price:.2f}\n"
                 f"   收益率: {(profit/(pair.extended_quantity*pair.extended_price))*100:.2f}%"
             )
+
+            # 记录到交易日志文件
+            if not self.trade_logger.log_closing_trade(pair):
+                self.logger.warning(f"交易日志记录失败 (平仓) - 套利对 #{pair.pair_id}，但交易继续")
 
             # 5. 更新统计
             self.stats['successful_closes'] += 1
