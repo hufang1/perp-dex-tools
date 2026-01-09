@@ -234,17 +234,18 @@ class SpreadOrderManager:
                     'status': str,
                     'filled_size': Decimal,
                     'price': Decimal,
+                    'order_type': str,  # 'OPEN' or 'CLOSE'
                     ...
                 }
         """
         order_id = order_data.get('order_id')
 
-        # 修复：只处理当前订单的OPEN类型订单，忽略CLOSE类型
-        # CLOSE类型订单用于平仓，不应该影响开仓流程
-        order_type = order_data.get('order_type', '')
-        if order_type == 'CLOSE':
-            # 关闭订单不更新maker_order的状态
-            return
+        # 006-fix-lighter-close: 移除CLOSE订单忽略逻辑
+        # CLOSE订单现在与OPEN订单同样处理，以便平仓流程能正确识别成交状态
+        # 原代码假设CLOSE订单不应影响开仓流程，但这是错误的：
+        # - 每次下单前状态都会重置（place_spread_maker_order第78-80行）
+        # - 订单ID匹配机制确保只有当前订单的更新才会被应用
+        # - 开仓和平仓是串行执行的，不会同时进行
 
         # 【竞态条件修复】检查current_order_id是否已设置
         if self.current_order_id is None:
@@ -275,8 +276,10 @@ class SpreadOrderManager:
             self.filled_quantity = filled_size
             self.filled_price = Decimal(str(order_data.get('price', 0)))
 
+        # 006-fix-lighter-close: 增强日志，区分OPEN/CLOSE订单
+        order_type = order_data.get('order_type', 'UNKNOWN')
         self.logger.info(
-            f"✅ 订单状态更新: {order_id} -> {self.current_order_status} "
+            f"✅ 订单状态更新 [{order_type}]: {order_id} -> {self.current_order_status} "
             f"已成交: {self.filled_quantity:.4f} @ {self.filled_price:.2f}"
         )
 

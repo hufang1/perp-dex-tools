@@ -44,6 +44,114 @@ def order_manager(config, mock_extended_client):
     return SpreadOrderManager(config, mock_extended_client)
 
 
+class TestCloseOrderHandling:
+    """测试CLOSE订单处理（用户故事1 - 006-fix-lighter-close）"""
+
+    def test_close_order_updates_are_processed(self, order_manager):
+        """
+        测试：CLOSE类型订单更新应该被处理，而不是被忽略
+
+        场景：
+        1. CLOSE订单WebSocket更新到达
+        2. 验证更新没有被忽略
+        3. 验证订单状态被正确更新
+        4. 验证filled_quantity和filled_price被正确设置
+
+        这是006-fix-lighter-close的核心修复：CLOSE订单不再被忽略
+        """
+        order_id = "2009608496505368576"
+        order_data = {
+            'order_id': order_id,
+            'status': 'FILLED',
+            'side': 'sell',
+            'order_type': 'CLOSE',  # 关键：CLOSE类型订单
+            'size': '0.01',
+            'price': '3082.8',
+            'contract_id': 'ETH-USD',
+            'filled_size': '0.010'
+        }
+
+        # 设置current_order_id
+        order_manager.current_order_id = order_id
+
+        # 发送CLOSE订单更新
+        order_manager.update_order_status(order_data)
+
+        # 验证CLOSE订单被处理（没有在旧代码中被忽略）
+        assert order_manager.current_order_status == 'FILLED'
+        assert order_manager.filled_quantity == Decimal('0.010')
+        assert order_manager.filled_price == Decimal('3082.8')
+
+    def test_close_order_cached_when_order_id_not_set(self, order_manager):
+        """
+        测试：CLOSE订单更新在current_order_id设置前到达时应该被缓存
+
+        场景：
+        1. CLOSE订单更新到达时current_order_id为None
+        2. 验证更新被缓存
+        3. 验证设置order_id后缓存被应用
+        """
+        order_id = "2009608496505368576"
+        order_data = {
+            'order_id': order_id,
+            'status': 'FILLED',
+            'order_type': 'CLOSE',
+            'filled_size': '0.010',
+            'price': '3082.8'
+        }
+
+        # current_order_id未设置时发送CLOSE订单更新
+        assert order_manager.current_order_id is None
+        order_manager.update_order_status(order_data)
+
+        # 验证更新被缓存
+        assert order_id in order_manager._pending_updates
+        assert len(order_manager._pending_updates[order_id]) == 1
+
+        # 设置order_id并应用缓存
+        order_manager.current_order_id = order_id
+
+        # 需要异步应用
+        async def apply_cache():
+            await order_manager._apply_pending_updates(order_id)
+            assert order_manager.current_order_status == 'FILLED'
+            assert order_manager.filled_quantity == Decimal('0.010')
+
+        # 运行异步函数
+        asyncio.run(apply_cache())
+
+    def test_close_order_with_zero_filled_size(self, order_manager):
+        """
+        测试：CLOSE订单更新时filled_size为0的处理
+
+        场景：
+        1. CLOSE订单更新到达但filled_size为"0"
+        2. 验证filled_quantity不会被0覆盖
+        """
+        order_id = "2009608496505368576"
+
+        # 先设置一个成交数量
+        order_manager.current_order_id = order_id
+        order_manager.current_order_status = 'PARTIALLY_FILLED'
+        order_manager.filled_quantity = Decimal('0.005')
+        order_manager.filled_price = Decimal('3082.5')
+
+        # 发送filled_size为0的更新
+        order_data = {
+            'order_id': order_id,
+            'status': 'FILLED',
+            'order_type': 'CLOSE',
+            'filled_size': '0',  # 关键：filled_size为0
+            'price': '3082.8'
+        }
+        order_manager.update_order_status(order_data)
+
+        # 验证filled_quantity没有被0覆盖
+        assert order_manager.filled_quantity == Decimal('0.005')
+        # 验证状态被更新
+        assert order_manager.current_order_status == 'FILLED'
+
+
 class TestRaceConditionFix:
     """测试竞态条件修复（用户故事1）"""
 
