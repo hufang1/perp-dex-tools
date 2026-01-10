@@ -76,34 +76,6 @@ class HedgeManager:
                     f"(尝试 {attempt + 1}/{self.max_retries})"
                 )
 
-                # 检查Lighter订单簿深度
-                orderbook = self.lighter_client.order_book
-                if orderbook:
-                    book_side = 'asks' if side == 'buy' else 'bids'
-                    depth = orderbook.get(book_side, {})
-
-                    # 计算深度价值
-                    total_depth_value = Decimal('0')
-                    for price, size in depth.items():
-                        total_depth_value += price * size
-
-                    # 检查深度是否足够
-                    if total_depth_value < self.config.min_lighter_depth_usdt:
-                        error_msg = (
-                            f"Lighter深度不足: {book_side}深度=${total_depth_value:.2f} "
-                            f"< 最小要求${self.config.min_lighter_depth_usdt:.2f}"
-                        )
-                        self.logger.error(f"❌ {error_msg}")
-                        return {
-                            'success': False,
-                            'error': error_msg,
-                            'filled_quantity': Decimal('0'),
-                            'filled_price': Decimal('0'),
-                            'slippage': Decimal('0')
-                        }
-
-                    self.logger.info(f"✅ Lighter深度检查通过: {book_side}=${total_depth_value:.2f}")
-
                 # 🔴 关键修复：如果不是第一次尝试，先检查是否已有订单在处理中
                 if attempt > 0 and first_order_id is not None:
                     self.logger.warning(
