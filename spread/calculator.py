@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Optional, Dict, Any, Tuple
 
 from .config import SpreadArbConfig
+from .real_spread_calculator import RealSpreadCalculator
 
 
 class SpreadCalculator:
@@ -15,12 +16,14 @@ class SpreadCalculator:
     def __init__(self, config: SpreadArbConfig):
         """
         初始化价差计算器
-        
+
         Args:
             config: 配置对象
         """
         self.config = config
         self.logger = logging.getLogger("SpreadCalculator")
+        # 009-fix-spread-loss-fees: 初始化真实价差计算器
+        self.real_spread_calc = RealSpreadCalculator(config)
     
     def calculate_spread_opportunity_mid(
         self,
@@ -257,5 +260,180 @@ class SpreadCalculator:
         
         # 计算总价值
         total_value = sum(price * size for price, size in sorted_levels)
-        
+
         return total_value
+
+    def calculate_real_spread_opportunity(
+        self,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal,
+        min_spread_rate: Optional[Decimal] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        009-fix-spread-loss-fees: 使用对手价计算真实价差机会
+
+        算法:
+        - 做多价差: spread = lighter_bid - extended_ask (使用对手价)
+        - 做空价差: spread = extended_bid - lighter_ask (使用对手价)
+        - 考虑点差成本和手续费成本
+
+        Args:
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+            min_spread_rate: 最小价差率阈值（默认使用config.effective_min_spread）
+
+        Returns:
+            {
+                'spread': Decimal,                  # 真实价差
+                'spread_rate': Decimal,             # 真实价差率
+                'direction': str,                   # 'long_spread' | 'short_spread'
+                'extended_side': str,               # 'buy' | 'sell'
+                'extended_price': Decimal,          # Extended开仓价格（对手价）
+                'lighter_price': Decimal,           # Lighter开仓价格（对手价）
+                'expected_profit_rate': Decimal,    # 期望收益率（扣除成本）
+                'real_spread': bool,                # 标记为真实价差计算
+                'costs': SpreadCosts                # 成本分解
+            }
+            或 None (如果没有机会)
+        """
+        if min_spread_rate is None:
+            min_spread_rate = self.config.effective_min_spread
+
+        # 使用RealSpreadCalculator计算最佳机会
+        result = self.real_spread_calc.calculate_best_opportunity(
+            extended_bid=extended_bid,
+            extended_ask=extended_ask,
+            lighter_bid=lighter_bid,
+            lighter_ask=lighter_ask,
+            min_spread_rate=min_spread_rate
+        )
+
+        # 如果没有有效机会，返回None
+        if not result.is_valid:
+            self.logger.debug(
+                f"[真实价差检查] 无有效机会: {result.failure_reason}"
+            )
+            return None
+
+        # 确定extended_side（用于兼容现有代码）
+        if result.direction == 'long_spread':
+            extended_side = 'buy'  # Extended买入
+        else:  # short_spread
+            extended_side = 'sell'  # Extended卖出
+
+        # 计算下单数量（使用Extended开仓价格）
+        quantity = self.config.order_quantity_usdt / result.extended_entry_price
+
+        # 生成type字符串（向后兼容）
+        opportunity_type = 'buy_extended_sell_lighter' if extended_side == 'buy' else 'sell_extended_buy_lighter'
+
+        # T028: 日志输出显示真实价差vs中间价对比
+        # 先计算中间价差用于对比
+        extended_mid = (extended_bid + extended_ask) / Decimal('2')
+        lighter_mid = (lighter_bid + lighter_ask) / Decimal('2')
+        mid_spread = extended_mid - lighter_mid
+        mid_spread_rate = abs(mid_spread) / lighter_mid if lighter_mid > 0 else Decimal('0')
+
+        self.logger.debug(
+            f"[真实价差] direction={result.direction}, "
+            f"spread={result.spread:.4f} ({result.spread_rate:.4%}), "
+            f"期望收益={result.expected_profit_rate:.4%}, "
+            f"成本={result.costs.total_cost_rate:.4%}, "
+            f"【对比中间价】 mid_spread_rate={mid_spread_rate:.4%}"
+        )
+
+        return {
+            'spread': result.spread,
+            'spread_rate': result.spread_rate,
+            'direction': result.direction,
+            'side': extended_side,            # 向后兼容: bot.py中使用opportunity['side']
+            'extended_side': extended_side,
+            'type': opportunity_type,         # 向后兼容: bot.py中使用opportunity['type']
+            'extended_price': result.extended_entry_price,
+            'lighter_price': result.lighter_entry_price,
+            'expected_profit_rate': result.expected_profit_rate,
+            'quantity': quantity,
+            'real_spread': True,              # 标记为真实价差计算
+            'costs': result.costs             # 成本分解
+        }
+
+    def calculate_maker_price(
+        self,
+        side: str,
+        bid: Decimal,
+        ask: Decimal
+    ) -> Decimal:
+        """
+        T040: 计算maker订单价格（使用price_tick偏移）
+
+        算法:
+        - 买单: price = bid - price_tick (低于买一价，确保成为maker)
+        - 卖单: price = ask + price_tick (高于卖一价，确保成为maker)
+
+        Args:
+            side: 'buy' 或 'sell'
+            bid: 当前买一价
+            ask: 当前卖一价
+            price_tick: 价格精度（从config读取）
+
+        Returns:
+            Decimal: maker订单价格
+        """
+        price_tick = self.config.maker_price_tick
+
+        if side == 'buy':
+            # 买单：价格低于买一价，确保不会立即成交
+            maker_price = bid - price_tick
+        else:  # sell
+            # 卖单：价格高于卖一价，确保不会立即成交
+            maker_price = ask + price_tick
+
+        self.logger.debug(
+            f"[Maker定价] side={side}, bid={bid:.4f}, ask={ask:.4f}, "
+            f"price_tick={price_tick:.2f}, maker_price={maker_price:.4f}"
+        )
+
+        return maker_price
+
+    def should_use_maker(
+        self,
+        spread_rate: Decimal,
+        expected_profit_rate: Decimal
+    ) -> bool:
+        """
+        T041: 决定是否使用maker订单
+
+        决策逻辑:
+        1. 检查配置是否启用maker订单
+        2. 检查期望收益率是否足够高（覆盖maker拒绝风险）
+        3. 如果期望收益率太低，使用taker确保成交
+
+        Args:
+            spread_rate: 价差率
+            expected_profit_rate: 期望收益率（扣除成本后）
+
+        Returns:
+            bool: True=使用maker, False=使用taker
+        """
+        # 检查配置
+        if not self.config.use_maker_orders:
+            return False
+
+        # 检查最小盈利阈值
+        # 如果期望收益率太低，使用taker确保成交
+        if expected_profit_rate < self.config.min_profit_threshold:
+            self.logger.debug(
+                f"[Maker决策] 期望收益率{expected_profit_rate:.4%}低于阈值"
+                f"{self.config.min_profit_threshold:.4%}，使用taker"
+            )
+            return False
+
+        # 收益率足够，可以尝试maker节省手续费
+        self.logger.debug(
+            f"[Maker决策] 期望收益率{expected_profit_rate:.4%}足够，使用maker"
+        )
+        return True

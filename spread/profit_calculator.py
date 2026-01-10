@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Optional
 
 from .position_aggregator import UnifiedPosition
+from .cost_calculator import TradeCostBreakdown
 
 
 @dataclass
@@ -27,9 +28,37 @@ class ProfitBreakdown:
     extended_pnl: Decimal  # Extended盈亏
     lighter_pnl: Decimal  # Lighter盈亏
 
+    # T097-T098: 成本分解和盈亏归因
+    cost_breakdown: Optional[TradeCostBreakdown] = None  # 成本分解详情
+
     def calculate_net_profit(self) -> Decimal:
         """计算净收益 = spread_profit - opening_fees - estimated_closing_fees"""
         return self.spread_profit - self.opening_fees - self.estimated_closing_fees
+
+    def get_profit_attribution(self) -> dict:
+        """
+        T098: 盈亏归因分析
+
+        Returns:
+            Dict: 盈亏归因分析
+        """
+        attribution = {
+            'spread_profit': float(self.spread_profit),
+            'total_fees': float(self.opening_fees + self.estimated_closing_fees),
+            'net_profit': float(self.net_profit),
+            'fee_impact': float(self.opening_fees + self.estimated_closing_fees) / float(self.spread_profit) if self.spread_profit != 0 else 0,
+        }
+
+        # 如果有成本分解，添加更详细的归因
+        if self.cost_breakdown:
+            attribution.update({
+                'entry_fees': float(self.cost_breakdown.entry_extended_fee + self.cost_breakdown.entry_lighter_fee),
+                'exit_fees': float(self.cost_breakdown.exit_extended_fee + self.cost_breakdown.exit_lighter_fee),
+                'spread_cost': float(self.cost_breakdown.total_spread_cost),
+                'slippage_cost': float(self.cost_breakdown.total_slippage_cost),
+            })
+
+        return attribution
 
 
 class ProfitCalculator:

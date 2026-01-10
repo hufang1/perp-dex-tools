@@ -18,6 +18,8 @@ from .trade_logger import TradeLogger
 from .position_aggregator import PositionAggregator, UnifiedPosition
 from .profit_calculator import ProfitCalculator, ProfitBreakdown
 from .models import SpreadChange, CloseDecision, PositionBalance, SpreadSnapshot
+from .data_collector import DataCollector
+from .trade_analyzer import TradeAnalyzer
 
 
 class SpreadArbitrageBot:
@@ -62,6 +64,11 @@ class SpreadArbitrageBot:
             extended_fee_rate=config.extended_maker_fee_rate,
             lighter_fee_rate=config.lighter_fee_rate
         )
+
+        # T117: 初始化数据收集器和交易分析器
+        self.data_collector = DataCollector(output_dir="data")
+        self.trade_analyzer = TradeAnalyzer(data_collector=self.data_collector)
+        self.collected_orders: List[Dict[str, Any]] = []  # 收集的订单记录
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -104,7 +111,10 @@ class SpreadArbitrageBot:
             'failed_closes': 0,
             'total_profit': Decimal('0'),
             'total_loss': Decimal('0'),
-            'max_open_pairs': 0
+            'max_open_pairs': 0,
+            # T087-T088: 阈值相关统计
+            'threshold_rejections': 0,  # 因阈值不足拒绝的次数
+            'threshold_violations': 0   # 阈值违规次数
         }
 
         # 🔴 未对冲的Extended仓位跟踪（关键修复）
@@ -244,15 +254,14 @@ class SpreadArbitrageBot:
                     continue
                 
                 # 计算价差机会
-                extended_mid = (extended_bid + extended_ask) / Decimal('2')
-                opportunity = self.calculator.calculate_spread_opportunity(
+                # 009-fix-spread-loss-fees: T029 - 使用真实价差计算（对手价）替代中间价
+                opportunity = self.calculator.calculate_real_spread_opportunity(
                     extended_bid=extended_bid,
                     extended_ask=extended_ask,
                     lighter_bid=lighter_bid,
-                    lighter_ask=lighter_ask,
-                    extended_mid_price=extended_mid
+                    lighter_ask=lighter_ask
                 )
-                
+
                 if opportunity:
                     self.stats['total_opportunities'] += 1
 
@@ -270,10 +279,32 @@ class SpreadArbitrageBot:
                         )
 
                         if is_sufficient:
+                            # T030: DEBUG级别日志记录真实价差计算过程
+                            # T086: 添加阈值对比日志
+                            threshold = self.config.effective_min_spread
+                            self.logger.debug(
+                                f"📊 [真实价差详情] direction={opportunity.get('direction', 'N/A')}, "
+                                f"extended_price={opportunity['extended_price']:.4f}, "
+                                f"lighter_price={opportunity['lighter_price']:.4f}, "
+                                f"spread={opportunity.get('spread', 0):.4f}, "
+                                f"spread_rate={opportunity['spread_rate']:.4%}, "
+                                f"expected_profit={opportunity['expected_profit_rate']:.4%}, "
+                                f"【阈值对比】 spread_rate={opportunity['spread_rate']:.4%} >= "
+                                f"threshold={threshold:.4%} ✓"
+                            )
+                            if opportunity.get('costs'):
+                                costs = opportunity['costs']
+                                self.logger.debug(
+                                    f"📊 [成本分解] extended_cost={costs.extended_cost:.4%}, "
+                                    f"lighter_cost={costs.lighter_cost:.4%}, "
+                                    f"total_cost_rate={costs.total_cost_rate:.4%}"
+                                )
+
                             self.logger.info(
                                 f"🎯 发现开仓机会: {opportunity['type']} "
                                 f"价差率: {opportunity['spread_rate']:.4%} "
-                                f"预期利润: {opportunity['expected_profit_rate']:.4%}"
+                                f"预期利润: {opportunity['expected_profit_rate']:.4%} "
+                                f"(阈值: {threshold:.4%})"
                             )
 
                             # 🔴 关键修复：检查是否正在开仓，防止并发
@@ -309,7 +340,15 @@ class SpreadArbitrageBot:
                         self.logger.debug(
                             f"⚠️ 已达最大套利对数: {len(self.open_pairs)}/{self.config.max_open_pairs}"
                         )
-                
+                else:
+                    # T087: 记录阈值拒绝次数
+                    self.stats['threshold_rejections'] += 1
+                    # T086: 日志显示阈值对比
+                    threshold = self.config.effective_min_spread
+                    self.logger.debug(
+                        f"📊 [阈值检查] 无有效机会，当前价差不满足阈值 {threshold:.4%}"
+                    )
+
                 await asyncio.sleep(0.1)  # 100ms 检查间隔
                 
             except Exception as e:
@@ -366,26 +405,26 @@ class SpreadArbitrageBot:
                 else:
                     self.logger.info("📊 当前无持仓")
 
-                # 检查强制平仓条件（保留原有逻辑）
+                # T074-T075: 使用新的优先级平仓系统
                 for pair in self.open_pairs[:]:  # 复制列表
-                    # 确定当前平仓价格
-                    if pair.extended_side == 'buy':
-                        current_extended = extended_ask
-                        current_lighter = lighter_bid
-                    else:
-                        current_extended = extended_bid
-                        current_lighter = lighter_ask
-
-                    # 检查强制平仓条件
-                    should_close, reason = self._check_force_close(
-                        pair, current_extended, current_lighter
+                    # 检查是否应该平仓（多级优先级）
+                    decision = self._should_close_position(
+                        pair,
+                        extended_bid,
+                        extended_ask,
+                        lighter_bid,
+                        lighter_ask
                     )
 
-                    if should_close:
+                    if decision and decision.should_close:
                         self.logger.warning(
-                            f"⚠️ 套利对 #{pair.pair_id} 触发强制平仓: {reason}"
+                            f"⚠️ [P{decision.priority}] 套利对 #{pair.pair_id} 触发平仓: {decision.reason}"
                         )
-                        # T020: 使用新的市价平仓函数
+                        # T043: 记录平仓分析
+                        if not self.trade_logger.log_close_analysis(pair, decision):
+                            self.logger.warning("平仓分析记录失败，但交易继续")
+
+                        # 使用市价平仓
                         await self._close_pair_with_market_price(
                             pair,
                             extended_bid,
@@ -419,6 +458,12 @@ class SpreadArbitrageBot:
                 net_pnl = self.stats['total_profit'] - self.stats['total_loss']
                 self.logger.info(f"  净盈亏: ${net_pnl:.2f}")
 
+                # T087-T088: 显示阈值相关统计
+                if self.stats['threshold_rejections'] > 0:
+                    self.logger.info(f"  阈值拒绝: {self.stats['threshold_rejections']} 次")
+                if self.stats['threshold_violations'] > 0:
+                    self.logger.warning(f"  阈值违规: {self.stats['threshold_violations']} 次")
+
                 # 🆕 显示对冲失败率
                 if len(self.hedge_attempts) >= 5:
                     _, failure_rate = self._check_hedge_failure_rate()
@@ -432,6 +477,39 @@ class SpreadArbitrageBot:
                             f"     - {pos['side']} {pos['quantity']:.4f} @ {pos['price']:.2f} "
                             f"(订单ID: {pos['order_id']})"
                         )
+
+                # T118: 显示maker订单统计
+                maker_stats = self.order_manager.get_maker_stats()
+                if maker_stats['attempts'] > 0:
+                    self.logger.info("  Maker订单统计:")
+                    self.logger.info(f"    尝试: {maker_stats['attempts']} 次")
+                    self.logger.info(f"    成功: {maker_stats['successes']} 次")
+                    self.logger.info(f"    被拒: {maker_stats['rejections']} 次")
+                    self.logger.info(f"    转taker: {maker_stats['converts']} 次")
+                    self.logger.info(f"    成功率: {maker_stats['success_rate']:.2%}")
+                    if maker_stats['should_adjust_tick']:
+                        self.logger.warning(f"    建议: price_tick可能需要调整")
+
+                # T118: 显示交易分析报告
+                if len(self.closed_pairs) > 0:
+                    analysis = self.trade_analyzer.calculate_win_rate(self.closed_pairs)
+                    if analysis['total_trades'] > 0:
+                        self.logger.info("")
+                        self.logger.info("📊 交易分析:")
+                        self.logger.info(f"  胜率: {analysis['win_rate']:.2%}")
+                        self.logger.info(f"  盈亏比: {analysis['profit_factor']:.2f}")
+                        self.logger.info(f"  平均盈利: ${analysis['avg_profit']:.2f}")
+                        self.logger.info(f"  平均亏损: ${analysis['avg_loss']:.2f}")
+
+                # T117: 定期导出交易数据
+                if len(self.closed_pairs) > 0:
+                    trades_file = self.data_collector.export_trades_csv(self.closed_pairs)
+                    if trades_file:
+                        self.logger.debug(f"  交易记录已导出: {trades_file}")
+                    if self.collected_orders:
+                        orders_file = self.data_collector.export_orders_csv(self.collected_orders)
+                        if orders_file:
+                            self.logger.debug(f"  订单记录已导出: {orders_file}")
 
                 self.logger.info("="*60)
                 
@@ -727,13 +805,42 @@ class SpreadArbitrageBot:
                 f"可对冲{safe_quantity:.4f} @ ${avg_price:.2f}"
             )
 
-            # 1. Extended 下 Maker 单（如果启用了maker订单）
-            use_maker = self.config.use_maker_orders
+            # T041: 决定是否使用maker订单
+            use_maker = self.calculator.should_use_maker(
+                spread_rate=opportunity.get('spread_rate', Decimal('0')),
+                expected_profit_rate=opportunity.get('expected_profit_rate', Decimal('0'))
+            )
+
+            # T103: 如果使用maker，验证taker利润是否足够（防止maker被拒绝后亏损）
+            if use_maker:
+                # 检查taker利润是否足够
+                taker_profit_ok = self._should_open_with_taker(
+                    opportunity, extended_bid, extended_ask, lighter_bid, lighter_ask
+                )
+                if not taker_profit_ok:
+                    self.logger.warning(
+                        f"[Maker风险检查] Maker转taker后利润不足，跳过此机会"
+                    )
+                    self.stats['opportunities_rejected'] += 1
+                    return False
+
+            # T042: 计算maker订单价格（如果使用maker）
+            if use_maker:
+                extended_price = self.calculator.calculate_maker_price(
+                    side=opportunity['side'],
+                    bid=extended_bid,
+                    ask=extended_ask
+                )
+                self.logger.info(f"使用Maker定价: ${extended_price:.4f}")
+            else:
+                extended_price = opportunity['extended_price']
+
+            # 1. Extended 下单（T043: 传递post_only参数）
             order = await self.order_manager.place_spread_maker_order(
                 side=opportunity['side'],
-                price=opportunity['extended_price'],
+                price=extended_price,
                 quantity=opportunity['quantity'],
-                post_only=use_maker  # True=maker单, False=taker单
+                post_only=use_maker  # T043: True=maker单(post_only), False=taker单
             )
 
             self.logger.info(f"[DEBUG] 下单返回: success={order['success']}, order_id={order.get('order_id')}")
@@ -1010,7 +1117,289 @@ class SpreadArbitrageBot:
             self.logger.error(traceback.format_exc())
             self.stats['failed_closes'] += 1
             return False
-    
+
+    # ==================== T071-T076: 平仓决策辅助方法 ====================
+
+    def _calculate_close_pnl(
+        self,
+        pair: SpreadPair,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> Decimal:
+        """
+        T071: 计算平仓时的盈亏（使用真实价差）
+
+        Args:
+            pair: 套利对
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+
+        Returns:
+            Decimal: 平仓盈亏
+        """
+        # 确定平仓价格（对手价）
+        if pair.extended_side == 'buy':
+            close_extended = extended_bid
+            close_lighter = lighter_ask
+        else:
+            close_extended = extended_ask
+            close_lighter = lighter_bid
+
+        # 计算盈亏
+        if pair.extended_side == 'buy':
+            extended_pnl = (close_extended - pair.extended_price) * pair.extended_quantity
+            lighter_pnl = (pair.lighter_price - close_lighter) * pair.lighter_quantity
+        else:
+            extended_pnl = (pair.extended_price - close_extended) * pair.extended_quantity
+            lighter_pnl = (close_lighter - pair.lighter_price) * pair.lighter_quantity
+
+        return extended_pnl + lighter_pnl
+
+    def _is_spread_diverging(
+        self,
+        pair: SpreadPair,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> bool:
+        """
+        T072: 判断价差是否扩大（不利方向）
+
+        Args:
+            pair: 套利对
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+
+        Returns:
+            bool: True=价差扩大（不利）, False=价差收敛（有利）
+        """
+        # 检查价差收敛
+        is_converged, status_msg, spread_change = pair.is_spread_converged(
+            extended_bid, extended_ask, lighter_bid, lighter_ask
+        )
+
+        # 如果未收敛，说明价差在扩大（不利）
+        return not is_converged
+
+    def _should_close_position(
+        self,
+        pair: SpreadPair,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> Optional[CloseDecision]:
+        """
+        T073: 判断是否应该平仓（多级优先级）
+
+        P1: 盈利目标平仓 - 未实现盈亏达到目标收益率
+        P2: 时间小额平仓 - 持仓超时且有小额利润
+        P3: 回本止损 - 持仓超时且亏损，等待回本后平仓
+        P4: 强制平仓 - 持仓超过最大时间
+        P5: 价差扩大延迟平仓 - 价差扩大时的延迟处理
+
+        Args:
+            pair: 套利对
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+
+        Returns:
+            CloseDecision对象，如果不平仓则返回None
+        """
+        # 计算当前盈亏
+        unrealized_pnl = self._calculate_close_pnl(
+            pair, extended_bid, extended_ask, lighter_bid, lighter_ask
+        )
+
+        # 计算盈亏率
+        investment = pair.extended_quantity * pair.extended_price
+        pnl_rate = unrealized_pnl / investment if investment > 0 else Decimal('0')
+
+        # 检查价差收敛
+        is_converged, status_msg, spread_change = pair.is_spread_converged(
+            extended_bid, extended_ask, lighter_bid, lighter_ask
+        )
+
+        # 持仓时间
+        holding_time = pair.holding_time
+
+        # P1: 盈利目标平仓
+        if self.config.enable_profit_target and pnl_rate >= self.config.profit_target_rate:
+            return CloseDecision(
+                pair_id=pair.pair_id,
+                should_close=True,
+                priority=1,
+                reason=f"达到盈利目标: {pnl_rate:.4%} >= {self.config.profit_target_rate:.4%}",
+                reason_code="PROFIT_TARGET",
+                spread_change=spread_change,
+                unrealized_pnl=unrealized_pnl,
+                pnl_rate=pnl_rate,
+                holding_time=holding_time,
+                is_warning=False
+            )
+
+        # P2: 时间小额平仓
+        if (self.config.enable_time_close and
+            holding_time >= self.config.time_close_threshold and
+            pnl_rate > self.config.time_close_profit_threshold):
+            return CloseDecision(
+                pair_id=pair.pair_id,
+                should_close=True,
+                priority=2,
+                reason=f"时间小额平仓: {holding_time:.0f}秒, 利润{pnl_rate:.4%}",
+                reason_code="TIME_SMALL_PROFIT",
+                spread_change=spread_change,
+                unrealized_pnl=unrealized_pnl,
+                pnl_rate=pnl_rate,
+                holding_time=holding_time,
+                is_warning=False
+            )
+
+        # P3: 回本止损
+        if (holding_time >= self.config.time_close_threshold and
+            pnl_rate < 0 and
+            pnl_rate > -self.config.max_close_loss_rate):
+            # 还在亏损但未达到止损线，继续等待
+            return None
+
+        # P3: 回本后平仓
+        if (holding_time >= self.config.time_close_threshold and
+            pnl_rate >= 0 and pnl_rate < self.config.profit_target_rate):
+            return CloseDecision(
+                pair_id=pair.pair_id,
+                should_close=True,
+                priority=3,
+                reason=f"回本平仓: {holding_time:.0f}秒, 盈亏{pnl_rate:.4%}",
+                reason_code="BREAK_EVEN",
+                spread_change=spread_change,
+                unrealized_pnl=unrealized_pnl,
+                pnl_rate=pnl_rate,
+                holding_time=holding_time,
+                is_warning=False
+            )
+
+        # P4: 强制平仓
+        if holding_time >= self.config.max_holding_time:
+            return CloseDecision(
+                pair_id=pair.pair_id,
+                should_close=True,
+                priority=4,
+                reason=f"强制平仓: 超过最大持仓时间 {holding_time:.0f}秒",
+                reason_code="FORCE_CLOSE",
+                spread_change=spread_change,
+                unrealized_pnl=unrealized_pnl,
+                pnl_rate=pnl_rate,
+                holding_time=holding_time,
+                is_warning=True
+            )
+
+        # P5: 价差扩大延迟平仓
+        is_diverging = self._is_spread_diverging(
+            pair, extended_bid, extended_ask, lighter_bid, lighter_ask
+        )
+        if is_diverging and self.config.enable_delay_on_divergence:
+            # 价差扩大，延迟平仓
+            return None
+
+        # 不满足任何平仓条件
+        return None
+
+    # ==================== T102-T103, T106: 策略优化方法 ====================
+
+    def _should_open_with_taker(
+        self,
+        opportunity: Dict[str, Any],
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> bool:
+        """
+        T102: 检查使用taker订单是否仍有足够利润
+
+        当maker订单可能被拒绝时，需要验证taker订单的利润是否足够。
+
+        Args:
+            opportunity: 机会字典
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+
+        Returns:
+            bool: True=可以开仓, False=利润不足
+        """
+        # 计算使用taker的期望收益率
+        # taker需要支付双边手续费
+        taker_fees = self.config.extended_taker_fee_rate * 2
+        expected_profit = opportunity.get('expected_profit_rate', Decimal('0'))
+
+        # 减去额外手续费成本（maker本来可以是0手续费）
+        expected_profit_with_taker = expected_profit - taker_fees
+
+        # 检查是否仍满足最小盈利阈值
+        min_threshold = self.config.min_profit_threshold
+
+        self.logger.debug(
+            f"[Taker利润检查] 期望收益率={expected_profit:.4%}, "
+            f"taker后={expected_profit_with_taker:.4%}, "
+            f"阈值={min_threshold:.4%}"
+        )
+
+        return expected_profit_with_taker >= min_threshold
+
+    def detect_divergence_signal(
+        self,
+        pair: SpreadPair,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal
+    ) -> Dict[str, Any]:
+        """
+        T106: 检测价差扩大信号
+
+        Args:
+            pair: 套利对
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+
+        Returns:
+            Dict: 包含is_diverging, spread_delta, signal_strength等信息
+        """
+        # 检查价差收敛状态
+        is_converged, status_msg, spread_change = pair.is_spread_converged(
+            extended_bid, extended_ask, lighter_bid, lighter_ask
+        )
+
+        # 如果未收敛，说明在扩大
+        is_diverging = not is_converged
+
+        # 计算信号强度（基于价差变化幅度）
+        if spread_change.spread_change_rate != 0:
+            signal_strength = abs(spread_change.spread_change_rate)
+        else:
+            signal_strength = Decimal('0')
+
+        return {
+            'is_diverging': is_diverging,
+            'spread_delta': spread_change.spread_delta,
+            'spread_change_rate': spread_change.spread_change_rate,
+            'signal_strength': signal_strength,
+            'status': spread_change.status
+        }
+
     async def _close_pair_with_market_price(
         self,
         pair: SpreadPair,
@@ -1304,6 +1693,24 @@ class SpreadArbitrageBot:
                     self.logger.info("   平仓后收益: 价格数据异常，无法计算")
 
                 self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            # T062: 使用新的calculate_balance方法计算仓位平衡
+            balance_result = self.position_aggregator.calculate_balance(self.open_pairs)
+
+            # T064: 更新日志输出显示imbalance_level
+            self.logger.info("📊 仓位平衡状态:")
+            self.logger.info(f"   Extended总仓位: {balance_result.summary.extended_total_qty:.4f}")
+            self.logger.info(f"   Lighter总仓位: {balance_result.summary.lighter_total_qty:.4f}")
+            self.logger.info(f"   差异: {balance_result.summary.diff_qty:.4f} ({balance_result.diff_rate:.2%})")
+
+            # T065: 添加仓位不平衡警报逻辑
+            if balance_result.warning_level == 'CRITICAL':
+                self.logger.error(f"   🚨 状态: 严重失衡！需要人工干预！")
+            elif balance_result.warning_level == 'WARN':
+                self.logger.warning(f"   ⚠️ 状态: 失衡，请关注")
+            else:
+                self.logger.info(f"   ✅ 状态: 平衡")
+            self.logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         except Exception as e:
             self.logger.debug(f"统一持仓状态输出错误: {e}")

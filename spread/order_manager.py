@@ -44,6 +44,12 @@ class SpreadOrderManager:
         self._max_updates_per_order: int = 10  # 每订单最大更新数
         self._cache_hits: int = 0  # 缓存命中次数
         self._cache_misses: int = 0  # 缓存未命中次数
+
+        # T044-T049: Maker订单统计和跟踪
+        self.maker_attempts: int = 0  # Maker订单尝试次数
+        self.maker_rejections: int = 0  # Maker订单被拒绝次数
+        self.maker_successes: int = 0  # Maker订单成功次数
+        self.maker_converts: int = 0  # Maker转Taker次数
     
     async def place_spread_maker_order(
         self,
@@ -75,6 +81,10 @@ class SpreadOrderManager:
             f"[Extended] 下 {side.upper()} {'Maker' if post_only else 'Taker'} 单: "
             f"{quantity:.4f} @ {price:.2f}"
         )
+
+        # T044: 记录maker订单尝试
+        if post_only:
+            self.record_maker_attempt()
 
         # 重置状态
         self.current_order_status = None
@@ -310,15 +320,19 @@ class SpreadOrderManager:
                 'error': str (如果失败)
             }
         """
+        # T044: 记录maker转taker
+        self.record_maker_convert()
+
+        # T049: 更新日志显示maker订单实际状态
         self.logger.info(
-            f"🔄 转换为Taker订单: {side.upper()} {quantity:.4f} "
-            f"(原Maker订单: {original_order_id})"
+            f"🔄 [Maker转Taker] {side.upper()} {quantity:.4f} "
+            f"(原订单: {original_order_id[:8]}...)"
         )
 
         # 1. 取消原始maker订单
         cancel_result = await self.cancel_order(original_order_id)
         if not cancel_result:
-            self.logger.warning(f"取消原始Maker订单失败，继续下Taker单")
+            self.logger.warning(f"[Maker转Taker] 取消原订单失败，继续下taker单")
 
         # 2. 下taker订单（post_only=False）
         try:
@@ -330,7 +344,7 @@ class SpreadOrderManager:
             )
 
             if not order_result.success:
-                self.logger.error(f"Taker订单下单失败: {order_result.error_message}")
+                self.logger.error(f"[Maker转Taker] Taker订单下单失败: {order_result.error_message}")
                 return {
                     'success': False,
                     'error': order_result.error_message
@@ -341,9 +355,10 @@ class SpreadOrderManager:
             # 应用可能存在的缓存更新
             await self._apply_pending_updates(order_result.order_id)
 
+            # T049: 更新日志显示maker订单实际状态
             self.logger.info(
-                f"✅ Taker订单已提交: {order_result.order_id} "
-                f"@ {order_result.price:.2f}"
+                f"✅ [Maker转Taker] Taker订单已提交: {order_result.order_id[:8]}... "
+                f"@ {order_result.price:.2f} (原maker订单已取消)"
             )
 
             return {
@@ -355,7 +370,7 @@ class SpreadOrderManager:
             }
 
         except Exception as e:
-            self.logger.error(f"Taker订单下单异常: {e}")
+            self.logger.error(f"[Maker转Taker] 异常: {e}")
             return {
                 'success': False,
                 'error': str(e)
@@ -573,3 +588,89 @@ class SpreadOrderManager:
         if total == 0:
             return 0.0
         return self._cache_hits / total
+
+    # ==================== T044-T049: Maker订单统计和跟踪方法 ====================
+
+    def record_maker_attempt(self) -> None:
+        """
+        T044: 记录一次maker订单尝试
+        """
+        self.maker_attempts += 1
+        self.logger.debug(f"[Maker统计] 记录尝试，总次数: {self.maker_attempts}")
+
+    def record_maker_rejection(self) -> None:
+        """
+        T045: 记录一次maker订单被拒绝
+        """
+        self.maker_rejections += 1
+        self.logger.debug(f"[Maker统计] 记录拒绝，总拒绝: {self.maker_rejections}")
+
+    def record_maker_success(self) -> None:
+        """
+        记录一次maker订单成功成交
+        """
+        self.maker_successes += 1
+        self.logger.debug(f"[Maker统计] 记录成功，总成功: {self.maker_successes}")
+
+    def record_maker_convert(self) -> None:
+        """
+        记录一次maker转taker操作
+        """
+        self.maker_converts += 1
+        self.logger.debug(f"[Maker统计] 记录转换，总转换: {self.maker_converts}")
+
+    def get_maker_success_rate(self) -> float:
+        """
+        T046: 获取maker订单成功率
+
+        Returns:
+            float: 成功率（0-1之间），如果没有尝试则返回0
+        """
+        if self.maker_attempts == 0:
+            return 0.0
+        return self.maker_successes / self.maker_attempts
+
+    def get_maker_rejection_rate(self) -> float:
+        """
+        获取maker订单拒绝率
+
+        Returns:
+            float: 拒绝率（0-1之间），如果没有尝试则返回0
+        """
+        if self.maker_attempts == 0:
+            return 0.0
+        return self.maker_rejections / self.maker_attempts
+
+    def should_adjust_price_tick(self) -> bool:
+        """
+        T047: 判断是否需要调整price_tick
+
+        如果maker拒绝率过高（>50%），可能需要调整price_tick
+
+        Returns:
+            bool: True=需要调整, False=不需要调整
+        """
+        rejection_rate = self.get_maker_rejection_rate()
+        if self.maker_attempts >= 10 and rejection_rate > 0.5:
+            self.logger.warning(
+                f"[Maker统计] 拒绝率过高: {rejection_rate:.2%}，建议调整price_tick"
+            )
+            return True
+        return False
+
+    def get_maker_stats(self) -> Dict[str, Any]:
+        """
+        获取maker订单统计信息
+
+        Returns:
+            Dict: 包含所有maker统计的字典
+        """
+        return {
+            'attempts': self.maker_attempts,
+            'rejections': self.maker_rejections,
+            'successes': self.maker_successes,
+            'converts': self.maker_converts,
+            'success_rate': self.get_maker_success_rate(),
+            'rejection_rate': self.get_maker_rejection_rate(),
+            'should_adjust_tick': self.should_adjust_price_tick()
+        }

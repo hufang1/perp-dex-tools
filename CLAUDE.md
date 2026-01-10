@@ -16,6 +16,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-10
 - 内存状态存储（无数据库） (006-fix-lighter-close)
 - 内存状态存储 + 文件日志 (logs/trade.log) (001-fix-spread-loss)
 - Python 3.10+ + dataclasses (用于数据模型) (Phase 4-7: 平仓逻辑修复)
+- **Python 3.11+ + dataclasses + csv** (009-fix-spread-loss-fees: 核心修复)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -23,7 +24,8 @@ Auto-generated from all feature plans. Last updated: 2026-01-10
 - **decimal.Decimal**: 精确的金融数值计算
 - **pytest**: 单元测试框架
 - **logging**: Python标准日志库（用于交易日志）
-- **dataclasses**: 数据类（用于SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance）
+- **dataclasses**: 数据类（用于SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance, TradeCostBreakdown）
+- **csv**: CSV数据导出（用于交易分析）
 
 ## Project Structure
 
@@ -33,12 +35,16 @@ spread/                    # 价差套利模块
 ├── hedge_manager.py       # 对冲管理器（Lighter交易所）
 ├── bot.py                 # 套利机器人主逻辑
 ├── calculator.py          # 价差计算器
+├── real_spread_calculator.py  # [NEW] 真实价差计算器（对手价）
+├── cost_calculator.py     # [NEW] 成本分解计算器
 ├── spread_pair.py         # 套利对数据模型
 ├── trade_logger.py        # 交易日志记录器
 ├── config.py              # 配置类
 ├── models.py              # 数据模型（SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance）
 ├── position_aggregator.py # 持仓聚合器
-└── profit_calculator.py   # 收益计算器
+├── profit_calculator.py   # 收益计算器
+├── data_collector.py      # [NEW] 数据收集器（CSV导出）
+└── trade_analyzer.py      # [NEW] 交易分析器
 
 exchanges/                 # 交易所客户端
 ├── extended.py           # Extended交易所客户端
@@ -50,11 +56,17 @@ tests/                     # 测试文件
 ├── test_closing_logic.py         # 平仓价格选择逻辑测试（Phase 4）
 ├── test_spread_convergence.py    # 价差收敛检查测试（Phase 5）
 ├── test_enhanced_trade_logger.py # 增强诊断日志测试（Phase 6）
+├── test_real_spread_calculator.py  # [NEW] 对手价计算测试
+├── test_cost_calculator.py         # [NEW] 成本分解测试
 └── integration/
     └── test_trade_logging.py  # 交易日志集成测试
 
 logs/                      # 交易日志目录
 └── trade.log             # 交易日志文件（自动创建）
+
+data/                      # [NEW] 数据导出目录
+├── trades_YYYY_MM_DD.csv  # 交易记录导出（自动创建）
+└── orders_YYYY_MM_DD.csv  # 订单记录导出（自动创建）
 ```
 
 ## Commands
@@ -84,9 +96,37 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
-- 001-fix-spread-close: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
+
+### 009-fix-spread-loss-fees: 价差套利核心问题修复（2026-01-10）
+**重大修复**: 修复导致负收益的三个致命问题
+
+1. **真实价差计算** (spread/real_spread_calculator.py)
+   - 使用对手价（bid/ask）替代中间价计算
+   - 做多价差 = lighter_bid - extended_ask
+   - 做空价差 = extended_bid - lighter_ask
+
+2. **Maker订单定价修复** (spread/calculator.py)
+   - price_tick偏移定价：买单 = bid - 0.01, 卖单 = ask + 0.01
+   - Taker利润验证：防止maker被拒后转taker亏损
+
+3. **阈值调整确保正收益** (spread/config.py)
+   - min_spread_rate从0.05%提高到0.10%
+   - 添加effective_min_spread = min_spread_rate + latency_buffer
+
+4. **仓位平衡计算修复** (spread/position_aggregator.py)
+   - 使用相减：diff_qty = abs(extended - lighter)
+   - 修复前错误：diff_qty = abs(extended) + abs(lighter)
+
+5. **五级优先级平仓系统** (spread/bot.py)
+   - P1: 盈利目标 | P2: 时间小额 | P3: 回本止损 | P4: 强制平仓 | P5: 延迟平仓
+
+6. **成本分解和交易分析** (spread/cost_calculator.py, spread/data_collector.py)
+   - TradeCostBreakdown: 开仓/平仓手续费、点差、滑点分解
+   - CSV导出：trades_YYYY_MM_DD.csv, orders_YYYY_MM_DD.csv
+   - TradeAnalyzer: 胜率、盈亏比、每日报告
+
+- 001-fix-spread-close: Added 市价平仓逻辑
 - 001-fix-spread-loss: Added Python 3.10+
-- 001-fix-order-match: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 
 ### Phase 4-7: 价差套利平仓逻辑全面修复（2026-01-10）
 **重大改进**: 实现完整的市价平仓、价差收敛检查和增强诊断日志
@@ -229,5 +269,26 @@ cat logs/trade.log
     - 价差快照记录开仓时的市场状态
     - 平仓分析记录决策过程和理由
     - 仓位平衡监控两个交易所的仓位一致性
+
+11. **真实价差计算** (009-fix-spread-loss-fees):
+    - **致命错误**: 使用中间价(mid price)计算的价差是"买不到也卖不出"的虚假价格
+    - **正确做法**: 必须使用对手价(bid/ask)计算可交易的价差
+    - 做多价差 = lighter_bid - extended_ask（Extended买入支付ask，Lighter卖出获得bid）
+    - 做空价差 = extended_bid - lighter_ask（Extended卖出获得bid，Lighter买入支付ask）
+
+12. **Maker订单定价** (009-fix-spread-loss-fees):
+    - **Post-Only冲突**: 使用bid/ask价格下单会被立即成交，失去maker资格
+    - **正确做法**: price_tick偏移定价（price = bid - 0.01 或 ask + 0.01）
+    - 这样确保订单不会立即成交，保持maker身份节省手续费
+
+13. **最小价差率阈值** (009-fix-spread-loss-fees):
+    - **负期望问题**: 0.05%阈值减去0.045%手续费 = -0.015%期望收益
+    - **修复后**: 0.10%阈值减去0.045%手续费 = 0.055%正期望
+    - effective_min_spread = min_spread_rate + latency_buffer (默认0.10% + 0.01% = 0.11%)
+
+14. **仓位平衡计算** (009-fix-spread-loss-fees):
+    - **错误公式**: diff_qty = abs(extended_qty) + abs(lighter_qty) (会显示200%失衡)
+    - **正确公式**: diff_qty = abs(extended_qty - lighter_qty) (正确显示实际差异)
+    - Extended做多=正数，Lighter做空=负数（对冲关系）
 
 <!-- MANUAL ADDITIONS END -->

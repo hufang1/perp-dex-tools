@@ -12,6 +12,7 @@ Features:
 - Thread-safe atomic writes
 - Graceful error handling (never blocks trading)
 - T036-T042: Enhanced logging with spread snapshots, close analysis, and position balance
+- T096: Cost breakdown formatting for detailed profit attribution
 """
 
 import logging
@@ -19,10 +20,14 @@ import os
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 
 from .spread_pair import SpreadPair
 from .models import SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance
+
+# TYPE_CHECKING导入避免循环依赖
+if TYPE_CHECKING:
+    from .cost_calculator import TradeCostBreakdown
 
 
 class TradeLogger:
@@ -287,6 +292,7 @@ class TradeLogger:
 
         Includes timestamp, pair ID, direction, exchange details (price, quantity,
         order ID), and spread calculation in a human-readable format.
+        T031-T032: 添加 real_spread 和 spread_cost_breakdown 字段
         """
         # Calculate spread
         spread_absolute = pair.open_spread
@@ -311,6 +317,17 @@ class TradeLogger:
             f"  订单ID: {pair.open_extended_order_id or 'N/A'}",
             f"  价格: ${float(pair.extended_price):.2f}",
             f"  数量: {float(pair.extended_quantity):.4f}",
+        ]
+
+        # T050-T052: 添加 order_type, post_only, is_rejected 字段
+        if hasattr(pair, 'order_type') and pair.order_type is not None:
+            lines.append(f"  订单类型: {pair.order_type}")  # 'maker' 或 'taker'
+        if hasattr(pair, 'post_only') and pair.post_only is not None:
+            lines.append(f"  Post-Only: {'是' if pair.post_only else '否'}")
+        if hasattr(pair, 'is_rejected') and pair.is_rejected is not None:
+            lines.append(f"  被拒绝: {'是' if pair.is_rejected else '否'}")
+
+        lines.extend([
             "",
             "Lighter 交易所:",
             f"  订单ID: {pair.open_lighter_order_id or 'N/A'}",
@@ -320,8 +337,28 @@ class TradeLogger:
             "价差信息:",
             f"  绝对价差: ${float(spread_absolute):.2f}",
             f"  价差率: {float(spread_rate):.4%}",
-            "====================="
-        ]
+        ])
+
+        # T031: 添加 real_spread 字段
+        if hasattr(pair, 'real_spread') and pair.real_spread is not None:
+            lines.extend([
+                "",
+                "真实价差计算:",
+                f"  计算方式: {'对手价' if pair.real_spread else '中间价'}",
+            ])
+
+        # T032: 添加 spread_cost_breakdown 字段
+        if hasattr(pair, 'spread_cost_breakdown') and pair.spread_cost_breakdown is not None:
+            costs = pair.spread_cost_breakdown
+            lines.extend([
+                "",
+                "成本分解:",
+                f"  Extended点差成本: {float(costs.extended_cost):.4%}",
+                f"  Lighter点差成本: {float(costs.lighter_cost):.4%}",
+                f"  总成本率: {float(costs.total_cost_rate):.4%}",
+            ])
+
+        lines.append("=====================")
 
         return '\n'.join(lines)
 
@@ -368,6 +405,15 @@ class TradeLogger:
             f"套利对ID: {pair.pair_id}",
             f"方向: {direction}",
             f"持仓时间: {holding_time:.1f} 秒",
+        ]
+
+        # T077-T078: 添加 close_reason 和 close_priority 字段
+        if hasattr(pair, 'close_reason') and pair.close_reason is not None:
+            lines.append(f"平仓原因: {pair.close_reason}")
+        if hasattr(pair, 'close_priority') and pair.close_priority is not None:
+            lines.append(f"平仓优先级: P{pair.close_priority}")
+
+        lines.extend([
             "",
             "开仓价格 (参考):",
             f"  Extended: ${float(pair.extended_price):.2f}",
@@ -533,6 +579,52 @@ class TradeLogger:
             f"状态: {warning_display}",
             f"失衡: {'是' if balance.is_imbalanced else '否'}",
             "==================="
+        ]
+
+        return '\n'.join(lines)
+
+    # ==================== T096: 成本分解格式化方法 ====================
+
+    def _format_cost_breakdown(self, cost_breakdown: 'TradeCostBreakdown') -> str:
+        """
+        T096: 格式化成本分解信息
+
+        Args:
+            cost_breakdown: TradeCostBreakdown对象
+
+        Returns:
+            格式化的成本分解字符串
+        """
+        lines = [
+            "=== 成本分解 ===",
+            "",
+            "开仓成本:",
+            f"  Extended手续费: ${float(cost_breakdown.entry_extended_fee):.4f}",
+            f"  Lighter手续费: ${float(cost_breakdown.entry_lighter_fee):.4f}",
+            f"  Extended点差成本: ${float(cost_breakdown.entry_extended_spread_cost):.4f}",
+            f"  Lighter点差成本: ${float(cost_breakdown.entry_lighter_spread_cost):.4f}",
+            f"  开仓滑点: ${float(cost_breakdown.entry_slippage_cost):.4f}",
+            f"  开仓总成本: ${float(cost_breakdown.total_entry_cost):.4f}",
+            "",
+            "平仓成本:",
+            f"  Extended手续费: ${float(cost_breakdown.exit_extended_fee):.4f}",
+            f"  Lighter手续费: ${float(cost_breakdown.exit_lighter_fee):.4f}",
+            f"  Extended点差成本: ${float(cost_breakdown.exit_extended_spread_cost):.4f}",
+            f"  Lighter点差成本: ${float(cost_breakdown.exit_lighter_spread_cost):.4f}",
+            f"  平仓滑点: ${float(cost_breakdown.exit_slippage_cost):.4f}",
+            f"  平仓总成本: ${float(cost_breakdown.total_exit_cost):.4f}",
+            "",
+            "总成本:",
+            f"  总手续费: ${float(cost_breakdown.total_fees):.4f}",
+            f"  总点差成本: ${float(cost_breakdown.total_spread_cost):.4f}",
+            f"  总滑点: ${float(cost_breakdown.total_slippage_cost):.4f}",
+            f"  总成本: ${float(cost_breakdown.total_cost):.4f}",
+            "",
+            "收益:",
+            f"  毛收益: ${float(cost_breakdown.gross_profit):.4f}",
+            f"  净收益: ${float(cost_breakdown.net_profit):.4f}",
+            f"  收益率: {float(cost_breakdown.profit_rate):.4%}",
+            "==============="
         ]
 
         return '\n'.join(lines)

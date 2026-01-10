@@ -16,7 +16,7 @@ class SpreadArbConfig:
     order_quantity_usdt: Decimal = Decimal('35')          # 单次下单金额 (USDT)
 
     # ==================== 价差配置 ====================
-    min_spread_rate: Decimal = Decimal('0.0005')           # 最小价差率 (0.05%) - 基于手续费优化
+    min_spread_rate: Decimal = Decimal('0.0010')           # 最小价差率 (0.10%) - 修复: 确保正期望收益
     latency_buffer: Decimal = Decimal('0.0001')            # 延迟缓冲 (0.01%)
     
     # ==================== 持仓管理 ====================
@@ -89,6 +89,8 @@ class SpreadArbConfig:
     maker_timeout_seconds: int = 5                         # Maker单超时时间 (秒)
     maker_timeout_action: str = "convert_to_taker"          # 超时后动作: "convert_to_taker" 或 "cancel"
     use_maker_orders: bool = True                            # 是否使用maker单 (True=使用maker节省手续费)
+    maker_price_tick: Decimal = Decimal('0.01')             # Maker价格精度 (美元) - Extended价格最小单位
+    min_profit_threshold: Decimal = Decimal('0.0002')       # 最小盈利阈值 (0.02%) - Maker转换条件
 
     # ==================== 其他 ====================
     enable_partial_fill: bool = True                       # 允许部分成交
@@ -141,6 +143,14 @@ class SpreadArbConfig:
 
         if self.maker_timeout_action not in ["convert_to_taker", "cancel"]:
             raise ValueError("maker_timeout_action 必须是 'convert_to_taker' 或 'cancel'")
+
+        # 009-fix-spread-loss-fees: 验证maker价格精度
+        if self.maker_price_tick <= 0:
+            raise ValueError("maker_price_tick 必须大于 0")
+
+        # 009-fix-spread-loss-fees: 验证最小盈利阈值
+        if self.min_profit_threshold < 0:
+            raise ValueError("min_profit_threshold 不能为负数")
 
     @property
     def effective_min_spread(self) -> Decimal:
