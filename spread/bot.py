@@ -558,7 +558,7 @@ class SpreadArbitrageBot:
                     'side': opportunity['side'],
                     'quantity': fill_result['filled_quantity'],
                     'price': fill_result['filled_price'],
-                    'expected_price': opportunity['lighter']['price'],  # 预期的对冲价格
+                    'expected_price': opportunity['lighter_price'],  # 预期的对冲价格
                     'timestamp': time.time(),
                     'error': hedge_result.get('error', 'Unknown')
                 }

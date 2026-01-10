@@ -77,7 +77,7 @@ class HedgeManager:
                 )
 
                 # 检查Lighter订单簿深度
-                orderbook = await self.lighter_client.get_orderbook()
+                orderbook = self.lighter_client.order_book
                 if orderbook:
                     book_side = 'asks' if side == 'buy' else 'bids'
                     depth = orderbook.get(book_side, {})
