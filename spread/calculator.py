@@ -109,12 +109,16 @@ class SpreadCalculator:
         # 计算下单数量
         quantity = self.config.order_quantity_usdt / extended_mid
 
+        # 生成type字符串（向后兼容）
+        opportunity_type = 'buy_extended_sell_lighter' if extended_side == 'buy' else 'sell_extended_buy_lighter'
+
         return {
             'spread_mid': spread,
             'spread_rate': spread_rate,
             'direction': direction,
             'side': extended_side,            # 向后兼容: bot.py中使用opportunity['side']
             'extended_side': extended_side,
+            'type': opportunity_type,         # 向后兼容: bot.py中使用opportunity['type']
             'extended_price': extended_price,
             'lighter_price': lighter_price,
             'expected_profit_rate': expected_profit_rate,
