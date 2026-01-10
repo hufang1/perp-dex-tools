@@ -433,7 +433,7 @@ class TradeLogger:
             f"  总盈亏: ${float(extended_pnl):.4f} + ${float(lighter_pnl):.4f} = ${float(total_pnl):.4f}",
             f"  收益率: {float(return_rate):.4%}",
             "====================="
-        ]
+        ])
 
         return '\n'.join(lines)
 
