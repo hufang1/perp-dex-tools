@@ -57,6 +57,15 @@ class SpreadPair:
         self.open_time = time.time()
         self.close_time: Optional[float] = None
 
+        # 订单类型 (新增)
+        self.open_order_type: str = "MAKER"  # "MAKER" 或 "TAKER"
+        self.close_order_type: str = "MAKER"  # "MAKER" 或 "TAKER"
+        self.maker_wait_duration_ms: int = 0  # maker单等待时长（毫秒）
+
+        # 手续费类型 (新增)
+        self.open_extended_fee_type: str = "MAKER"  # "MAKER" 或 "TAKER"
+        self.close_extended_fee_type: str = "MAKER"  # "MAKER" 或 "TAKER"
+
         # 状态
         self.is_closed = False
         self.is_closing = False  # 是否正在平仓中（防止重复平仓）

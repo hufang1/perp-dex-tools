@@ -199,7 +199,7 @@ class ExtendedClient(BaseExchangeClient):
             self.logger.log(f"Error fetching BBO prices for {contract_id}: {str(e)}", level="ERROR")
             return Decimal('0'), Decimal('0')
 
-    async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+    async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str, post_only: bool = False) -> OrderResult:
         """Place an open order with Extended using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
         retry_count = 0
@@ -254,9 +254,8 @@ class ExtendedClient(BaseExchangeClient):
                     level="INFO"
                 )
 
-                # For arbitrage, we need fast execution. Always use regular limit orders (not post-only)
-                # This ensures immediate execution - arbitrage profits should cover taker fees
-                post_only = False
+                # Use the post_only parameter passed in (maker orders use post_only=True)
+                # This allows using maker orders to save fees when appropriate
 
                 self.logger.log(f"[DEBUG] spread={spread}, post_only={post_only}", level="INFO")
 

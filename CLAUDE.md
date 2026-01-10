@@ -14,6 +14,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-09
 - Python 3.11+ + asyncio, websockets, decimal.Decimal, logging (Python标准库) (005-unify-position-monitor)
 - 内存状态存储，日志写入文件 (005-unify-position-monitor)
 - 内存状态存储（无数据库） (006-fix-lighter-close)
+- 内存状态存储 + 文件日志 (logs/trade.log) (001-fix-spread-loss)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -74,9 +75,9 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-fix-spread-loss: Added Python 3.10+
 - 001-fix-order-match: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 - 006-fix-lighter-close: Added Python 3.11+
-- 005-unify-position-monitor: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging (Python标准库)
 
 ### 003-close-position-debug: 平仓逻辑修复与持仓监控调试（2026-01-09）
 **修复核心Bug**: 实现强制平仓逻辑，修复持仓无法平仓的问题

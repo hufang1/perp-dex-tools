@@ -463,11 +463,13 @@ class SpreadArbitrageBot:
                 f"可对冲{safe_quantity:.4f} @ ${avg_price:.2f}"
             )
 
-            # 1. Extended 下 Maker 单
+            # 1. Extended 下 Maker 单（如果启用了maker订单）
+            use_maker = self.config.use_maker_orders
             order = await self.order_manager.place_spread_maker_order(
                 side=opportunity['side'],
                 price=opportunity['extended_price'],
-                quantity=opportunity['quantity']
+                quantity=opportunity['quantity'],
+                post_only=use_maker  # True=maker单, False=taker单
             )
 
             self.logger.info(f"[DEBUG] 下单返回: success={order['success']}, order_id={order.get('order_id')}")
@@ -476,21 +478,59 @@ class SpreadArbitrageBot:
                 self.stats['failed_opens'] += 1
                 self.consecutive_failures += 1
                 return False
-            
-            # 2. 等待成交
-            fill_result = await self.order_manager.wait_for_fill(
-                order_id=order['order_id'],
-                timeout=self.config.extended_fill_timeout,
-                allow_partial=self.config.enable_partial_fill
-            )
-            
-            if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
-                # 完全未成交,取消订单
-                await self.order_manager.cancel_order(order['order_id'])
-                self.stats['failed_opens'] += 1
-                self.consecutive_failures += 1
-                return False
-            
+
+            # 2. 等待成交（如果是maker订单，使用超时等待）
+            if use_maker:
+                # 使用maker超时等待
+                fill_result = await self.order_manager.maker_timeout_wait(
+                    order_id=order['order_id'],
+                    timeout=self.config.maker_timeout_seconds
+                )
+
+                # 如果超时且未成交，转换为taker订单
+                if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
+                    self.logger.warning(f"Maker订单超时，转换为Taker订单...")
+                    taker_order = await self.order_manager.convert_to_taker(
+                        side=opportunity['side'],
+                        quantity=opportunity['quantity'],
+                        original_order_id=order['order_id']
+                    )
+
+                    if not taker_order['success']:
+                        self.stats['failed_opens'] += 1
+                        self.consecutive_failures += 1
+                        return False
+
+                    # 等待taker订单成交
+                    fill_result = await self.order_manager.wait_for_fill(
+                        order_id=taker_order['order_id'],
+                        timeout=self.config.extended_fill_timeout,
+                        allow_partial=self.config.enable_partial_fill
+                    )
+
+                    if fill_result['filled_quantity'] == 0:
+                        self.stats['failed_opens'] += 1
+                        self.consecutive_failures += 1
+                        return False
+
+                elif fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] > 0:
+                    # 部分成交，取消剩余部分
+                    await self.order_manager.cancel_order(order['order_id'])
+            else:
+                # taker订单直接等待成交
+                fill_result = await self.order_manager.wait_for_fill(
+                    order_id=order['order_id'],
+                    timeout=self.config.extended_fill_timeout,
+                    allow_partial=self.config.enable_partial_fill
+                )
+
+                if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
+                    # 完全未成交,取消订单
+                    await self.order_manager.cancel_order(order['order_id'])
+                    self.stats['failed_opens'] += 1
+                    self.consecutive_failures += 1
+                    return False
+
             if fill_result['filled_quantity'] == 0:
                 self.stats['failed_opens'] += 1
                 self.consecutive_failures += 1

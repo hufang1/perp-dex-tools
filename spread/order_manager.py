@@ -49,16 +49,18 @@ class SpreadOrderManager:
         self,
         side: str,
         price: Decimal,
-        quantity: Decimal
+        quantity: Decimal,
+        post_only: bool = False
     ) -> Dict[str, Any]:
         """
         在 Extended 下价差 Maker 单
-        
+
         Args:
             side: 'buy' or 'sell'
             price: 挂单价格
             quantity: 下单数量 (币数)
-        
+            post_only: 是否使用post_only (True=maker单, False=taker单)
+
         Returns:
             {
                 'success': bool,
@@ -70,21 +72,22 @@ class SpreadOrderManager:
             }
         """
         self.logger.info(
-            f"[Extended] 下 {side.upper()} Maker 单: "
+            f"[Extended] 下 {side.upper()} {'Maker' if post_only else 'Taker'} 单: "
             f"{quantity:.4f} @ {price:.2f}"
         )
-        
+
         # 重置状态
         self.current_order_status = None
         self.filled_quantity = Decimal('0')
         self.filled_price = Decimal('0')
-        
+
         try:
             # 使用 Extended 客户端下单
             order_result = await self.extended_client.place_open_order(
                 contract_id=self.extended_client.contract_id,
                 quantity=quantity,
-                direction=side
+                direction=side,
+                post_only=post_only
             )
             
             if not order_result.success:
@@ -222,7 +225,142 @@ class SpreadOrderManager:
         except Exception as e:
             self.logger.error(f"取消订单异常: {e}")
             return False
-    
+
+    async def maker_timeout_wait(
+        self,
+        order_id: str,
+        timeout: int
+    ) -> Dict[str, Any]:
+        """
+        等待maker订单成交或超时
+
+        Args:
+            order_id: 订单ID
+            timeout: 超时时间（秒）
+
+        Returns:
+            {
+                'status': 'FILLED' | 'TIMEOUT',
+                'filled_quantity': Decimal,
+                'filled_price': Decimal,
+                'remaining': Decimal
+            }
+        """
+        start_time = time.time()
+        check_interval = 0.5  # 检查间隔 500ms
+
+        self.logger.info(f"等待Maker订单成交: {order_id} (超时 {timeout}秒)")
+
+        while time.time() - start_time < timeout:
+            # 检查订单状态
+            if self.current_order_status == 'FILLED':
+                self.logger.info(
+                    f"✅ Maker订单完全成交: {self.filled_quantity:.4f} @ {self.filled_price:.2f}"
+                )
+                return {
+                    'status': 'FILLED',
+                    'filled_quantity': self.filled_quantity,
+                    'filled_price': self.filled_price,
+                    'remaining': Decimal('0')
+                }
+
+            if self.current_order_status in ['CANCELLED', 'CANCELED']:
+                self.logger.warning(f"❌ Maker订单已取消")
+                return {
+                    'status': 'CANCELLED',
+                    'filled_quantity': self.filled_quantity,
+                    'filled_price': self.filled_price if self.filled_price > 0 else Decimal('0'),
+                    'remaining': self.config.order_quantity_usdt - self.filled_quantity
+                }
+
+            await asyncio.sleep(check_interval)
+
+        # 超时
+        self.logger.warning(
+            f"⏰ Maker订单等待超时: 已成交 {self.filled_quantity:.4f}"
+        )
+        return {
+            'status': 'TIMEOUT',
+            'filled_quantity': self.filled_quantity,
+            'filled_price': self.filled_price if self.filled_price > 0 else Decimal('0'),
+            'remaining': self.config.order_quantity_usdt - self.filled_quantity
+        }
+
+    async def convert_to_taker(
+        self,
+        side: str,
+        quantity: Decimal,
+        original_order_id: str
+    ) -> Dict[str, Any]:
+        """
+        将maker订单转换为taker订单
+
+        Args:
+            side: 'buy' or 'sell'
+            quantity: 下单数量
+            original_order_id: 原始maker订单ID（用于取消）
+
+        Returns:
+            {
+                'success': bool,
+                'order_id': str,
+                'price': Decimal,
+                'quantity': Decimal,
+                'side': str,
+                'error': str (如果失败)
+            }
+        """
+        self.logger.info(
+            f"🔄 转换为Taker订单: {side.upper()} {quantity:.4f} "
+            f"(原Maker订单: {original_order_id})"
+        )
+
+        # 1. 取消原始maker订单
+        cancel_result = await self.cancel_order(original_order_id)
+        if not cancel_result:
+            self.logger.warning(f"取消原始Maker订单失败，继续下Taker单")
+
+        # 2. 下taker订单（post_only=False）
+        try:
+            order_result = await self.extended_client.place_open_order(
+                contract_id=self.extended_client.contract_id,
+                quantity=quantity,
+                direction=side,
+                post_only=False  # taker订单
+            )
+
+            if not order_result.success:
+                self.logger.error(f"Taker订单下单失败: {order_result.error_message}")
+                return {
+                    'success': False,
+                    'error': order_result.error_message
+                }
+
+            self.current_order_id = order_result.order_id
+
+            # 应用可能存在的缓存更新
+            await self._apply_pending_updates(order_result.order_id)
+
+            self.logger.info(
+                f"✅ Taker订单已提交: {order_result.order_id} "
+                f"@ {order_result.price:.2f}"
+            )
+
+            return {
+                'success': True,
+                'order_id': order_result.order_id,
+                'price': order_result.price,
+                'quantity': quantity,
+                'side': side
+            }
+
+        except Exception as e:
+            self.logger.error(f"Taker订单下单异常: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
     def update_order_status(self, order_data: Dict[str, Any]):
         """
         更新订单状态 (由 WebSocket 回调调用)

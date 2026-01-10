@@ -69,14 +69,8 @@ class SpreadArbConfig:
     prioritize_closing: bool = True                        # 优先平仓而非开仓
     
     # ==================== 手续费配置 ====================
-    extended_maker_fee_rate: Decimal = Decimal('0.0001')    # Extended maker手续费率 (0.01%) - 假设值
-    extended_taker_fee_rate: Decimal = Decimal('0.000225')   # Extended taker手续费率 (0.0225%)
+    extended_fee_rate: Decimal = Decimal('0.000225')      # Extended taker手续费率 (0.0225%)
     lighter_fee_rate: Decimal = Decimal('0.0')             # Lighter手续费率 (0%)
-
-    # ==================== Maker/Taker策略配置 ====================
-    maker_timeout_seconds: int = 5                         # Maker单超时时间 (秒)
-    maker_timeout_action: str = "convert_to_taker"          # 超时后动作: "convert_to_taker" 或 "cancel"
-    use_maker_orders: bool = True                            # 是否使用maker单 (True=使用maker节省手续费)
 
     # ==================== 其他 ====================
     enable_partial_fill: bool = True                       # 允许部分成交
@@ -114,21 +108,11 @@ class SpreadArbConfig:
             raise ValueError("max_holding_time 必须大于 time_close_threshold")
 
         # 验证手续费率
-        if self.extended_maker_fee_rate < 0:
-            raise ValueError("extended_maker_fee_rate 不能为负数")
-
-        if self.extended_taker_fee_rate < 0:
-            raise ValueError("extended_taker_fee_rate 不能为负数")
+        if self.extended_fee_rate < 0:
+            raise ValueError("extended_fee_rate 不能为负数")
 
         if self.lighter_fee_rate < 0:
             raise ValueError("lighter_fee_rate 不能为负数")
-
-        # 验证maker/taker策略配置
-        if self.maker_timeout_seconds <= 0:
-            raise ValueError("maker_timeout_seconds 必须大于 0")
-
-        if self.maker_timeout_action not in ["convert_to_taker", "cancel"]:
-            raise ValueError("maker_timeout_action 必须是 'convert_to_taker' 或 'cancel'")
 
     @property
     def effective_min_spread(self) -> Decimal:
