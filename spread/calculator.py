@@ -113,6 +113,7 @@ class SpreadCalculator:
             'spread_mid': spread,
             'spread_rate': spread_rate,
             'direction': direction,
+            'side': extended_side,            # 向后兼容: bot.py中使用opportunity['side']
             'extended_side': extended_side,
             'extended_price': extended_price,
             'lighter_price': lighter_price,
