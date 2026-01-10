@@ -20,6 +20,7 @@ from .profit_calculator import ProfitCalculator, ProfitBreakdown
 from .models import SpreadChange, CloseDecision, PositionBalance, SpreadSnapshot
 from .data_collector import DataCollector
 from .trade_analyzer import TradeAnalyzer
+from .spread_recorder import SpreadRecorder
 
 
 class SpreadArbitrageBot:
@@ -69,6 +70,12 @@ class SpreadArbitrageBot:
         self.data_collector = DataCollector(output_dir="data")
         self.trade_analyzer = TradeAnalyzer(data_collector=self.data_collector)
         self.collected_orders: List[Dict[str, Any]] = []  # 收集的订单记录
+
+        # 价差记录器（001-spread-recorder）
+        self.spread_recorder: Optional[SpreadRecorder] = None
+        if config.enable_spread_recorder:
+            self.spread_recorder = SpreadRecorder(config)
+            self.logger.info("价差记录器已启用")
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -144,6 +151,15 @@ class SpreadArbitrageBot:
                 asyncio.create_task(self._stats_reporter(), name="stats"),
                 asyncio.create_task(self._reconciliation_loop(), name="reconciliation")  # 🆕 持仓对账
             ]
+
+            # 3. 添加价差记录器任务（如果启用）
+            if self.spread_recorder:
+                tasks.append(
+                    asyncio.create_task(
+                        self.spread_recorder.record_loop(self._get_orderbook_prices),
+                        name="spread_recorder"
+                    )
+                )
             
             # 3. 运行
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -2000,11 +2016,28 @@ class SpreadArbitrageBot:
         """更新 Lighter 订单簿 (由外部调用)"""
         self.lighter_orderbook = orderbook_data
         self.lighter_orderbook_ready = True
-    
+
+    def _get_orderbook_prices(self):
+        """获取当前订单簿价格（用于价差记录器）
+
+        Returns:
+            tuple: (extended_bid, extended_ask, lighter_bid, lighter_ask)
+        """
+        extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
+        extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
+        lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
+        lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
+
+        return (extended_bid, extended_ask, lighter_bid, lighter_ask)
+
     async def _cleanup(self):
         """清理资源"""
         self.logger.info("清理资源...")
         self.stop_flag = True
+
+        # 停止价差记录器
+        if self.spread_recorder:
+            self.spread_recorder.stop()
 
         # 打印最终统计
         self.logger.info("="*60)
