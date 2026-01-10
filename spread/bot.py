@@ -17,7 +17,7 @@ from .hedge_manager import HedgeManager
 from .trade_logger import TradeLogger
 from .position_aggregator import PositionAggregator, UnifiedPosition
 from .profit_calculator import ProfitCalculator, ProfitBreakdown
-from .models import SpreadChange, CloseDecision
+from .models import SpreadChange, CloseDecision, PositionBalance, SpreadSnapshot
 
 
 class SpreadArbitrageBot:
