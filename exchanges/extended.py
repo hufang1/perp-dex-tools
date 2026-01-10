@@ -220,23 +220,32 @@ class ExtendedClient(BaseExchangeClient):
                 # Calculate spread
                 spread = best_ask - best_bid
 
-                # For arbitrage, we need orders to get filled quickly
-                # For small spreads (2 ticks or less), use aggressive pricing
+                # Determine order price based on direction and post_only flag
                 if direction == 'buy':
-                    if spread <= self.config.tick_size * Decimal('2'):
-                        # Small spread - use best_ask for quick fill (will be taker)
-                        order_price = best_ask
+                    if post_only:
+                        # Maker buy order: must be at or below best_bid to avoid crossing the spread
+                        order_price = best_bid  # Place at best_bid to be top of bid queue
                     else:
-                        # Larger spread - use price between bid and ask
-                        order_price = (best_bid + best_ask) / 2
+                        # Taker buy order: can cross the spread
+                        if spread <= self.config.tick_size * Decimal('2'):
+                            # Small spread - use best_ask for quick fill (will be taker)
+                            order_price = best_ask
+                        else:
+                            # Larger spread - use price between bid and ask
+                            order_price = (best_bid + best_ask) / 2
                     side = OrderSide.BUY
                 else:
-                    if spread <= self.config.tick_size * Decimal('2'):
-                        # Small spread - use best_bid for quick fill (will be taker)
-                        order_price = best_bid
+                    if post_only:
+                        # Maker sell order: must be at or above best_ask to avoid crossing the spread
+                        order_price = best_ask  # Place at best_ask to be top of ask queue
                     else:
-                        # Larger spread - use price between bid and ask
-                        order_price = (best_bid + best_ask) / 2
+                        # Taker sell order: can cross the spread
+                        if spread <= self.config.tick_size * Decimal('2'):
+                            # Small spread - use best_bid for quick fill (will be taker)
+                            order_price = best_bid
+                        else:
+                            # Larger spread - use price between bid and ask
+                            order_price = (best_bid + best_ask) / 2
                     side = OrderSide.SELL
 
                 # Round price to appropriate precision
