@@ -22,6 +22,104 @@ class SpreadCalculator:
         self.config = config
         self.logger = logging.getLogger("SpreadCalculator")
     
+    def calculate_spread_opportunity_mid(
+        self,
+        extended_bid: Decimal,
+        extended_ask: Decimal,
+        lighter_bid: Decimal,
+        lighter_ask: Decimal,
+        min_spread_rate: Optional[Decimal] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        使用中间价计算价差机会（修复后的方法）
+
+        算法:
+        1. 计算中间价: extended_mid = (bid + ask) / 2
+        2. 计算价差: spread = extended_mid - lighter_mid
+        3. 判断方向: spread > 0 → short_spread, spread < 0 → long_spread
+        4. 验证价差率是否超过阈值
+
+        Args:
+            extended_bid: Extended买一价
+            extended_ask: Extended卖一价
+            lighter_bid: Lighter买一价
+            lighter_ask: Lighter卖一价
+            min_spread_rate: 最小价差率阈值（默认使用config.min_spread_rate）
+
+        Returns:
+            {
+                'spread_mid': Decimal,           # 中间价差
+                'spread_rate': Decimal,          # 价差率
+                'direction': str,                # 'long_spread' | 'short_spread'
+                'extended_side': str,            # 'buy' | 'sell'
+                'extended_price': Decimal,       # Extended挂单价格
+                'lighter_price': Decimal,        # Lighter对冲价格
+                'expected_profit_rate': Decimal  # 预期利润率
+            }
+            或 None (如果没有机会)
+        """
+        if min_spread_rate is None:
+            min_spread_rate = self.config.min_spread_rate
+
+        # 1. 计算中间价
+        extended_mid = (extended_bid + extended_ask) / Decimal('2')
+        lighter_mid = (lighter_bid + lighter_ask) / Decimal('2')
+
+        # 2. 计算价差: spread = extended_mid - lighter_mid
+        spread = extended_mid - lighter_mid
+        spread_abs = abs(spread)
+
+        # 计算价差率 (相对于lighter中间价)
+        if lighter_mid > 0:
+            spread_rate = spread_abs / lighter_mid
+        else:
+            self.logger.warning("Lighter中间价 <= 0，无法计算价差率")
+            return None
+
+        # 扣除延迟缓冲
+        expected_profit_rate = spread_rate - self.config.latency_buffer
+
+        self.logger.debug(
+            f"[价差检查(中间价)] Extended_mid={extended_mid:.2f}, Lighter_mid={lighter_mid:.2f}, "
+            f"Spread={spread:.2f} ({spread_rate:.4%}), 预期利润={expected_profit_rate:.4%}, "
+            f"阈值={min_spread_rate:.4%}"
+        )
+
+        # 3. 验证价差率是否超过阈值
+        if expected_profit_rate < min_spread_rate:
+            return None
+
+        # 4. 根据价差符号决定方向
+        if spread > 0:
+            # Extended贵于Lighter → 做空价差
+            direction = 'short_spread'
+            extended_side = 'sell'  # 卖出Extended
+            extended_price = extended_ask  # 在卖一挂单
+            lighter_price = lighter_bid   # Lighter用买一对冲
+        elif spread < 0:
+            # Extended便宜于Lighter → 做多价差
+            direction = 'long_spread'
+            extended_side = 'buy'   # 买入Extended
+            extended_price = extended_bid  # 在买一挂单
+            lighter_price = lighter_ask    # Lighter用卖一对冲
+        else:
+            # spread = 0，无套利机会
+            return None
+
+        # 计算下单数量
+        quantity = self.config.order_quantity_usdt / extended_mid
+
+        return {
+            'spread_mid': spread,
+            'spread_rate': spread_rate,
+            'direction': direction,
+            'extended_side': extended_side,
+            'extended_price': extended_price,
+            'lighter_price': lighter_price,
+            'expected_profit_rate': expected_profit_rate,
+            'quantity': quantity
+        }
+
     def calculate_spread_opportunity(
         self,
         extended_bid: Decimal,
@@ -31,111 +129,29 @@ class SpreadCalculator:
         extended_mid_price: Optional[Decimal] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        计算价差机会
-        
+        计算价差机会（已修复：使用中间价计算）
+
+        本方法现在调用calculate_spread_opportunity_mid来确保：
+        - 使用中间价计算价差（spread = extended_mid - lighter_mid）
+        - 根据价差符号决定正确的套利方向
+
         Args:
             extended_bid: Extended 最佳买价
             extended_ask: Extended 最佳卖价
             lighter_bid: Lighter 最佳买价
             lighter_ask: Lighter 最佳卖价
-            extended_mid_price: Extended 中间价 (用于计算数量)
-        
+            extended_mid_price: Extended 中间价 (用于计算数量，已弃用参数)
+
         Returns:
             套利机会字典，如果没有机会则返回 None
-            {
-                'type': 'buy_extended_sell_lighter' | 'sell_extended_buy_lighter',
-                'side': 'buy' | 'sell',              # Extended 方向
-                'spread': Decimal,                    # 绝对价差
-                'spread_rate': Decimal,               # 价差率
-                'expected_profit_rate': Decimal,      # 预期利润率 (扣除延迟缓冲)
-                'extended_price': Decimal,            # Extended 挂单价格
-                'lighter_price': Decimal,             # Lighter 预期成交价格
-                'quantity': Decimal                   # 建议下单量 (币数)
-            }
         """
-        opportunities = []
-        
-        # 计算中间价 (用于 USDT 转币数量)
-        if extended_mid_price is None:
-            extended_mid_price = (extended_bid + extended_ask) / Decimal('2')
-        
-        # 机会 1: Extended 买入 + Lighter 卖出
-        # Extended 在买一挂单, Lighter 用卖一对冲 (taker买入)
-        # 条件: Extended买一 < Lighter卖一 (低买高卖)
-        if extended_bid < lighter_ask:
-            spread = lighter_ask - extended_bid
-            spread_rate = spread / extended_bid
-
-            # 扣除延迟缓冲后的预期利润率
-            expected_profit_rate = spread_rate - self.config.latency_buffer
-
-            # 新增: 价差阈值调试日志
-            self.logger.debug(
-                f"[价差检查] 买入机会 - Spread: {spread:.2f} ({spread_rate:.4%}), "
-                f"预期利润: {expected_profit_rate:.4%}, "
-                f"阈值: {self.config.min_spread_rate:.4%} (有效: {self.config.effective_min_spread:.4%})"
-            )
-
-            if expected_profit_rate >= self.config.min_spread_rate:
-                # 计算下单数量 (USDT 转币数量)
-                quantity = self.config.order_quantity_usdt / extended_mid_price
-
-                opportunities.append({
-                    'type': 'buy_extended_sell_lighter',
-                    'side': 'buy',
-                    'spread': spread,
-                    'spread_rate': spread_rate,
-                    'expected_profit_rate': expected_profit_rate,
-                    'extended_price': extended_bid,   # 在买一挂单
-                    'lighter_price': lighter_ask,     # 用Lighter卖一对冲 (买入平仓)
-                    'quantity': quantity
-                })
-        
-        # 机会 2: Extended 卖出 + Lighter 买入
-        # Extended 在卖一挂单, Lighter 用买一对冲 (taker卖出)
-        # 条件: Extended卖一 > Lighter买一 (高卖低买)
-        if extended_ask > lighter_bid:
-            spread = extended_ask - lighter_bid
-            spread_rate = spread / extended_ask  # 修复: 分母使用extended_ask
-
-            # 扣除延迟缓冲后的预期利润率
-            expected_profit_rate = spread_rate - self.config.latency_buffer
-
-            # 新增: 价差阈值调试日志
-            self.logger.debug(
-                f"[价差检查] 卖出机会 - Spread: {spread:.2f} ({spread_rate:.4%}), "
-                f"预期利润: {expected_profit_rate:.4%}, "
-                f"阈值: {self.config.min_spread_rate:.4%} (有效: {self.config.effective_min_spread:.4%})"
-            )
-
-            if expected_profit_rate >= self.config.min_spread_rate:
-                # 计算下单数量
-                quantity = self.config.order_quantity_usdt / extended_mid_price
-
-                opportunities.append({
-                    'type': 'sell_extended_buy_lighter',
-                    'side': 'sell',
-                    'spread': spread,
-                    'spread_rate': spread_rate,
-                    'expected_profit_rate': expected_profit_rate,
-                    'extended_price': extended_ask,   # 在卖一挂单
-                    'lighter_price': lighter_bid,     # 用Lighter买一对冲 (卖出平仓)
-                    'quantity': quantity
-                })
-        
-        # 返回最优机会 (按预期利润率排序)
-        if opportunities:
-            best = max(opportunities, key=lambda x: x['expected_profit_rate'])
-            
-            self.logger.debug(
-                f"发现套利机会: {best['type']} "
-                f"价差率={best['spread_rate']:.4%} "
-                f"预期利润={best['expected_profit_rate']:.4%}"
-            )
-            
-            return best
-        
-        return None
+        # 调用新的中间价计算方法
+        return self.calculate_spread_opportunity_mid(
+            extended_bid=extended_bid,
+            extended_ask=extended_ask,
+            lighter_bid=lighter_bid,
+            lighter_ask=lighter_ask
+        )
     
     def calculate_max_safe_quantity(
         self,

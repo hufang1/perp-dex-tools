@@ -4,9 +4,7 @@
 
 import time
 from decimal import Decimal
-from typing import Optional, Dict, Any, Tuple
-
-from spread.models import SpreadChange
+from typing import Optional, Dict, Any
 
 
 class SpreadPair:
@@ -244,78 +242,6 @@ class SpreadPair:
         )
         
         return self.realized_pnl
-
-    def is_spread_converged(
-        self,
-        extended_bid: Decimal,
-        extended_ask: Decimal,
-        lighter_bid: Decimal,
-        lighter_ask: Decimal
-    ) -> Tuple[bool, str, SpreadChange]:
-        """
-        检查价差是否收敛（008-fix-spread-close新增）
-
-        算法:
-        1. 计算当前中间价差
-        2. 计算价差变化 = current_spread - open_spread
-        3. 根据持仓方向判断收敛:
-           - 做多: spread_delta > 0 → 收敛
-           - 做空: spread_delta < 0 → 收敛
-
-        Args:
-            extended_bid: 当前Extended买一价
-            extended_ask: 当前Extended卖一价
-            lighter_bid: 当前Lighter买一价
-            lighter_ask: 当前Lighter卖一价
-
-        Returns:
-            (is_converged, status_message, spread_change)
-        """
-        # 计算当前中间价差
-        current_extended_mid = (extended_bid + extended_ask) / Decimal('2')
-        current_lighter_mid = (lighter_bid + lighter_ask) / Decimal('2')
-        current_spread = current_extended_mid - current_lighter_mid
-
-        # 计算价差变化
-        spread_delta = current_spread - self.open_spread
-
-        # 根据持仓方向判断收敛
-        if self.extended_side == 'buy':
-            # 做多价差：期待价差变大（向正方向）
-            is_converged = spread_delta > 0
-            if spread_delta > 0:
-                status = f"价差收敛: {self.open_spread:.2f} → {current_spread:.2f} (+{spread_delta:.2f})"
-            else:
-                status = f"价差扩大: {self.open_spread:.2f} → {current_spread:.2f} ({spread_delta:.2f})"
-        else:
-            # 做空价差：期待价差变小（向负方向）
-            is_converged = spread_delta < 0
-            if spread_delta < 0:
-                status = f"价差收敛: {self.open_spread:.2f} → {current_spread:.2f} ({spread_delta:.2f})"
-            else:
-                status = f"价差扩大: {self.open_spread:.2f} → {current_spread:.2f} (+{spread_delta:.2f})"
-
-        # 计算变化率
-        if self.open_spread != 0:
-            spread_change_rate = spread_delta / abs(self.open_spread)
-        else:
-            spread_change_rate = Decimal('0')
-
-        # 判断当前是否有利
-        is_favorable = is_converged
-
-        # 创建SpreadChange对象
-        spread_change = SpreadChange(
-            open_spread=self.open_spread,
-            current_spread=current_spread,
-            spread_delta=spread_delta,
-            spread_change_rate=spread_change_rate,
-            is_converged=is_converged,
-            is_favorable=is_favorable,
-            status=status
-        )
-
-        return is_converged, status, spread_change
 
     def calculate_opening_fees(
         self,

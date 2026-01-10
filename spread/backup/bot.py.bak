@@ -17,7 +17,6 @@ from .hedge_manager import HedgeManager
 from .trade_logger import TradeLogger
 from .position_aggregator import PositionAggregator, UnifiedPosition
 from .profit_calculator import ProfitCalculator, ProfitBreakdown
-from .models import SpreadChange, CloseDecision
 
 
 class SpreadArbitrageBot:
@@ -255,60 +254,68 @@ class SpreadArbitrageBot:
                 
                 if opportunity:
                     self.stats['total_opportunities'] += 1
-
-                    # T021-T022: 移除 _find_opposite_pair 和机会平仓逻辑
-                    # 只关注开新仓，平仓由 _monitor_pairs 通过市价平仓处理
-
-                    # 检查是否可以开新仓
-                    if len(self.open_pairs) < self.config.max_open_pairs:
-                        # 检查 Lighter 深度
-                        hedge_side = 'sell' if opportunity['side'] == 'buy' else 'buy'
-                        is_sufficient, safe_qty, avg_price = self.calculator.calculate_max_safe_quantity(
-                            self.lighter_orderbook,
-                            hedge_side,
-                            opportunity['quantity']
+                    
+                    # 检查是否有反向持仓可以平仓
+                    close_pair = self._find_opposite_pair(opportunity)
+                    
+                    if close_pair and self.config.prioritize_closing:
+                        # 优先平仓
+                        self.logger.info(
+                            f"🎯 发现平仓机会: 套利对 #{close_pair.pair_id} "
+                            f"价差率: {opportunity['spread_rate']:.4%}"
                         )
-
-                        if is_sufficient:
-                            self.logger.info(
-                                f"🎯 发现开仓机会: {opportunity['type']} "
-                                f"价差率: {opportunity['spread_rate']:.4%} "
-                                f"预期利润: {opportunity['expected_profit_rate']:.4%}"
+                        await self._close_pair(close_pair, opportunity)
+                    else:
+                        # 检查是否可以开新仓
+                        if len(self.open_pairs) < self.config.max_open_pairs:
+                            # 检查 Lighter 深度
+                            hedge_side = 'sell' if opportunity['side'] == 'buy' else 'buy'
+                            is_sufficient, safe_qty, avg_price = self.calculator.calculate_max_safe_quantity(
+                                self.lighter_orderbook,
+                                hedge_side,
+                                opportunity['quantity']
                             )
-
-                            # 🔴 关键修复：检查是否正在开仓，防止并发
-                            if self.is_opening:
-                                self.logger.warning(
-                                    f"⚠️ 正在执行开仓操作，跳过此机会 "
-                                    f"(防止Ext和Lighter仓位不对等)"
+                            
+                            if is_sufficient:
+                                self.logger.info(
+                                    f"🎯 发现开仓机会: {opportunity['type']} "
+                                    f"价差率: {opportunity['spread_rate']:.4%} "
+                                    f"预期利润: {opportunity['expected_profit_rate']:.4%}"
                                 )
-                                self.stats['opportunities_rejected'] += 1
-                                await asyncio.sleep(0.5)
-                                continue
 
-                            # 使用锁确保同时只有一个开仓操作
-                            async with self.opening_lock:
+                                # 🔴 关键修复：检查是否正在开仓，防止并发
                                 if self.is_opening:
-                                    # 双重检查
-                                    self.logger.warning("⚠️ 开仓锁已获取，跳过")
+                                    self.logger.warning(
+                                        f"⚠️ 正在执行开仓操作，跳过此机会 "
+                                        f"(防止Ext和Lighter仓位不对等)"
+                                    )
+                                    self.stats['opportunities_rejected'] += 1
+                                    await asyncio.sleep(0.5)
                                     continue
 
-                                self.is_opening = True
-                                try:
-                                    await self._open_new_pair(opportunity)
-                                finally:
-                                    self.is_opening = False
+                                # 使用锁确保同时只有一个开仓操作
+                                async with self.opening_lock:
+                                    if self.is_opening:
+                                        # 双重检查
+                                        self.logger.warning("⚠️ 开仓锁已获取，跳过")
+                                        continue
+
+                                    self.is_opening = True
+                                    try:
+                                        await self._open_new_pair(opportunity)
+                                    finally:
+                                        self.is_opening = False
+                            else:
+                                self.stats['opportunities_rejected'] += 1
+                                self.logger.debug(
+                                    f"⚠️ Lighter 深度不足: "
+                                    f"{safe_qty:.4f} < {opportunity['quantity']:.4f}"
+                                )
                         else:
                             self.stats['opportunities_rejected'] += 1
                             self.logger.debug(
-                                f"⚠️ Lighter 深度不足: "
-                                f"{safe_qty:.4f} < {opportunity['quantity']:.4f}"
+                                f"⚠️ 已达最大套利对数: {len(self.open_pairs)}/{self.config.max_open_pairs}"
                             )
-                    else:
-                        self.stats['opportunities_rejected'] += 1
-                        self.logger.debug(
-                            f"⚠️ 已达最大套利对数: {len(self.open_pairs)}/{self.config.max_open_pairs}"
-                        )
                 
                 await asyncio.sleep(0.1)  # 100ms 检查间隔
                 
@@ -330,39 +337,6 @@ class SpreadArbitrageBot:
                 # 🆕 新的聚合显示逻辑
                 if self.open_pairs:
                     self._log_unified_positions(extended_bid, extended_ask, lighter_bid, lighter_ask)
-
-                    # T043: 计算并记录仓位平衡状态
-                    extended_total_qty = sum(
-                        p.extended_quantity for p in self.open_pairs
-                        if p.extended_side == 'buy'
-                    ) - sum(
-                        p.extended_quantity for p in self.open_pairs
-                        if p.extended_side == 'sell'
-                    )
-
-                    lighter_total_qty = sum(
-                        p.lighter_quantity for p in self.open_pairs
-                        if p.extended_side == 'sell'  # Lighter方向与Extended相反
-                    ) - sum(
-                        p.lighter_quantity for p in self.open_pairs
-                        if p.extended_side == 'buy'
-                    )
-
-                    # 创建仓位平衡对象
-                    position_balance = PositionBalance(
-                        extended_total_qty=abs(extended_total_qty),
-                        lighter_total_qty=abs(lighter_total_qty),
-                        diff_qty=abs(extended_total_qty - lighter_total_qty),
-                        diff_rate=Decimal('0'),  # 将在__post_init__中计算
-                        is_imbalanced=False,  # 将在__post_init__中计算
-                        warning_level="OK",  # 将在__post_init__中计算
-                        timestamp=time.time()
-                    )
-
-                    # 记录仓位平衡（仅在有失衡时）
-                    if position_balance.is_imbalanced:
-                        if not self.trade_logger.log_position_balance(position_balance):
-                            self.logger.warning("仓位平衡记录失败，但交易继续")
                 else:
                     self.logger.info("📊 当前无持仓")
 
@@ -385,14 +359,7 @@ class SpreadArbitrageBot:
                         self.logger.warning(
                             f"⚠️ 套利对 #{pair.pair_id} 触发强制平仓: {reason}"
                         )
-                        # T020: 使用新的市价平仓函数
-                        await self._close_pair_with_market_price(
-                            pair,
-                            extended_bid,
-                            extended_ask,
-                            lighter_bid,
-                            lighter_ask
-                        )
+                        await self._force_close_pair(pair)
 
                 await asyncio.sleep(5)  # 每 5 秒检查一次
 
@@ -439,236 +406,11 @@ class SpreadArbitrageBot:
                 self.logger.error(f"统计报告错误: {e}")
     
     def _find_opposite_pair(self, opportunity: Dict[str, Any]) -> Optional[SpreadPair]:
-        """
-        查找反向持仓（已废弃 - T023）
-
-        此方法已不再使用，因为平仓逻辑已改为基于市价和优先级条件。
-
-        保留此方法仅用于向后兼容。建议使用 _check_close_conditions 替代。
-
-        Args:
-            opportunity: 套利机会字典
-
-        Returns:
-            Optional[SpreadPair]: 反向持仓或None
-        """
-        # 此方法已废弃，但保留接口以防外部调用
+        """查找反向持仓"""
         for pair in self.open_pairs:
             if pair.should_close(opportunity):
                 return pair
         return None
-
-    def _check_close_conditions(
-        self,
-        pair: SpreadPair,
-        extended_bid: Decimal,
-        extended_ask: Decimal,
-        lighter_bid: Decimal,
-        lighter_ask: Decimal
-    ) -> Optional[CloseDecision]:
-        """
-        T028: 检查平仓条件（五级优先级）
-
-        按优先级检查是否应该平仓：
-        P1: 盈利目标平仓 - 未实现盈亏达到目标收益率
-        P2: 时间小额平仓 - 持仓超时且有小额利润
-        P3: 回本止损 - 持仓超时且亏损，等待回本后平仓
-        P4: 强制平仓 - 持仓超过最大时间
-        P5: 价差扩大延迟平仓 - 价差扩大时的延迟处理
-
-        Args:
-            pair: 套利对
-            extended_bid: Extended买一价
-            extended_ask: Extended卖一价
-            lighter_bid: Lighter买一价
-            lighter_ask: Lighter卖一价
-
-        Returns:
-            CloseDecision对象，如果不平仓则返回None
-        """
-        # 1. 检查价差收敛
-        is_converged, status_msg, spread_change = pair.is_spread_converged(
-            extended_bid, extended_ask, lighter_bid, lighter_ask
-        )
-
-        # 2. 确定平仓价格
-        if pair.extended_side == 'buy':
-            close_extended_price = extended_bid
-            close_lighter_price = lighter_ask
-        else:
-            close_extended_price = extended_ask
-            close_lighter_price = lighter_bid
-
-        # 3. 计算未实现盈亏
-        unrealized_pnl = pair.calculate_unrealized_pnl(
-            close_extended_price, close_lighter_price
-        )
-
-        # 计算盈亏率
-        investment = pair.extended_quantity * pair.extended_price
-        pnl_rate = unrealized_pnl / investment if investment > 0 else Decimal('0')
-
-        # 持仓时间
-        holding_time = pair.holding_time
-
-        # ===== Priority 1: 盈利目标平仓 =====
-        if self.config.enable_profit_target:
-            profit_target = investment * self.config.profit_target_rate
-            if unrealized_pnl >= profit_target:
-                return self._create_close_decision(
-                    pair=pair,
-                    should_close=True,
-                    priority=1,
-                    reason=f"盈利目标达标 (PnL=${unrealized_pnl:.2f} >= ${profit_target:.2f})",
-                    reason_code="P1_CONVERGE_PROFIT",
-                    spread_change=spread_change,
-                    unrealized_pnl=unrealized_pnl,
-                    pnl_rate=pnl_rate,
-                    holding_time=holding_time,
-                    extended_close_price=close_extended_price,
-                    lighter_close_price=close_lighter_price,
-                    is_warning=False
-                )
-
-        # ===== Priority 2: 时间小额平仓 =====
-        if holding_time > self.config.time_close_threshold:
-            if unrealized_pnl > 0:
-                return self._create_close_decision(
-                    pair=pair,
-                    should_close=True,
-                    priority=2,
-                    reason=f"时间小额平仓 (持仓{holding_time:.0f}秒, PnL=${unrealized_pnl:.2f})",
-                    reason_code="P2_TIME_SMALL_PROFIT",
-                    spread_change=spread_change,
-                    unrealized_pnl=unrealized_pnl,
-                    pnl_rate=pnl_rate,
-                    holding_time=holding_time,
-                    extended_close_price=close_extended_price,
-                    lighter_close_price=close_lighter_price,
-                    is_warning=False
-                )
-
-        # ===== Priority 3: 回本止损 =====
-        if holding_time > self.config.time_close_threshold:
-            if unrealized_pnl < 0:
-                # 检查是否接近回本
-                if unrealized_pnl >= 0:
-                    return self._create_close_decision(
-                        pair=pair,
-                        should_close=True,
-                        priority=3,
-                        reason=f"回本止损 (持仓{holding_time:.0f}秒, PnL=${unrealized_pnl:.2f})",
-                        reason_code="P3_BREAK_EVEN",
-                        spread_change=spread_change,
-                        unrealized_pnl=unrealized_pnl,
-                        pnl_rate=pnl_rate,
-                        holding_time=holding_time,
-                        extended_close_price=close_extended_price,
-                        lighter_close_price=close_lighter_price,
-                        is_warning=False
-                    )
-                # 否则继续等待
-                self.logger.debug(
-                    f"套利对 #{pair.pair_id} 持仓{holding_time:.0f}秒, "
-                    f"PnL=${unrealized_pnl:.2f}, 等待回本"
-                )
-
-        # ===== Priority 4: 强制平仓 =====
-        if holding_time > self.config.max_holding_time:
-            return self._create_close_decision(
-                pair=pair,
-                should_close=True,
-                priority=4,
-                reason=f"强制平仓 (持仓{holding_time:.0f}秒 > {self.config.max_holding_time}秒, PnL=${unrealized_pnl:.2f})",
-                reason_code="P4_FORCE_CLOSE",
-                spread_change=spread_change,
-                unrealized_pnl=unrealized_pnl,
-                pnl_rate=pnl_rate,
-                holding_time=holding_time,
-                extended_close_price=close_extended_price,
-                lighter_close_price=close_lighter_price,
-                is_warning=True
-            )
-
-        # ===== Priority 5: 价差扩大延迟平仓 =====
-        if not is_converged:
-            # 价差扩大，根据配置决定是否延迟平仓
-            if self.config.enable_delay_on_divergence:
-                self.logger.debug(
-                    f"套利对 #{pair.pair_id} 价差扩大，延迟平仓: {status_msg}"
-                )
-                # 返回不平仓的决策，但标记为警告
-                return None
-            else:
-                # 不延迟，立即平仓
-                return self._create_close_decision(
-                    pair=pair,
-                    should_close=True,
-                    priority=5,
-                    reason=f"价差扩大平仓: {status_msg}",
-                    reason_code="P5_DIVERGENCE_CLOSE",
-                    spread_change=spread_change,
-                    unrealized_pnl=unrealized_pnl,
-                    pnl_rate=pnl_rate,
-                    holding_time=holding_time,
-                    extended_close_price=close_extended_price,
-                    lighter_close_price=close_lighter_price,
-                    is_warning=True
-                )
-
-        # 不满足任何平仓条件
-        return None
-
-    def _create_close_decision(
-        self,
-        pair: SpreadPair,
-        should_close: bool,
-        priority: int,
-        reason: str,
-        reason_code: str,
-        spread_change: SpreadChange,
-        unrealized_pnl: Decimal,
-        pnl_rate: Decimal,
-        holding_time: float,
-        extended_close_price: Decimal,
-        lighter_close_price: Decimal,
-        is_warning: bool
-    ) -> CloseDecision:
-        """
-        T029: 创建CloseDecision对象（辅助函数）
-
-        Args:
-            pair: 套利对
-            should_close: 是否应该平仓
-            priority: 优先级(1-5)
-            reason: 决策理由
-            reason_code: 理由代码
-            spread_change: 价差变化
-            unrealized_pnl: 未实现盈亏
-            pnl_rate: 盈亏率
-            holding_time: 持仓时间
-            extended_close_price: Extended平仓价格
-            lighter_close_price: Lighter平仓价格
-            is_warning: 是否为警告平仓
-
-        Returns:
-            CloseDecision对象
-        """
-        return CloseDecision(
-            pair_id=pair.pair_id,
-            should_close=should_close,
-            priority=priority,
-            reason=reason,
-            reason_code=reason_code,
-            spread_change=spread_change,
-            unrealized_pnl=unrealized_pnl,
-            pnl_rate=pnl_rate,
-            holding_time=holding_time,
-            is_warning=is_warning,
-            timestamp=time.time(),
-            extended_close_price=extended_close_price,
-            lighter_close_price=lighter_close_price
-        )
     
     async def _open_new_pair(self, opportunity: Dict[str, Any]) -> bool:
         """开新的套利对"""
@@ -681,12 +423,6 @@ class SpreadArbitrageBot:
                 f"lighter_price={opportunity['lighter_price']}, "
                 f"quantity={opportunity['quantity']:.6f}"
             )
-
-            # 获取当前价格（用于T042价差快照）
-            extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
-            extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
-            lighter_bid = max(self.lighter_orderbook['bids'].keys()) if self.lighter_orderbook['bids'] else Decimal('0')
-            lighter_ask = min(self.lighter_orderbook['asks'].keys()) if self.lighter_orderbook['asks'] else Decimal('999999')
 
             # 🆕 预检查：验证Lighter是否有足够的流动性和条件
             hedge_side = 'sell' if opportunity['side'] == 'buy' else 'buy'
@@ -887,23 +623,6 @@ class SpreadArbitrageBot:
             if not self.trade_logger.log_opening_trade(pair):
                 self.logger.warning(f"交易日志记录失败 (开仓) - 套利对 #{pair.pair_id}，但交易继续")
 
-            # T042: 记录开仓时的价差快照
-            spread_snapshot = SpreadSnapshot(
-                timestamp=time.time(),
-                extended_bid=extended_bid,
-                extended_ask=extended_ask,
-                extended_mid=(extended_bid + extended_ask) / Decimal('2'),
-                lighter_bid=lighter_bid,
-                lighter_ask=lighter_ask,
-                lighter_mid=(lighter_bid + lighter_ask) / Decimal('2'),
-                spread=pair.open_spread,
-                spread_rate=pair.open_spread_rate,
-                spread_sign="positive" if pair.open_spread > 0 else "negative" if pair.open_spread < 0 else "zero",
-                arbitrage_direction="long_spread" if pair.extended_side == 'buy' else "short_spread"
-            )
-            if not self.trade_logger.log_spread_snapshot(spread_snapshot):
-                self.logger.warning(f"价差快照记录失败 - 套利对 #{pair.pair_id}，但交易继续")
-
             return True
             
         except Exception as e:
@@ -1011,136 +730,24 @@ class SpreadArbitrageBot:
             self.stats['failed_closes'] += 1
             return False
     
-    async def _close_pair_with_market_price(
-        self,
-        pair: SpreadPair,
-        extended_bid: Decimal,
-        extended_ask: Decimal,
-        lighter_bid: Decimal,
-        lighter_ask: Decimal
-    ) -> bool:
+    async def _force_close_pair(self, pair: SpreadPair) -> bool:
         """
-        T020: 使用市价（对手价）平仓套利对
+        强制平仓套利对
 
-        根据持仓方向选择正确的对手价进行平仓：
-        - 做多仓位（extended_side='buy'）:
-          - Extended卖出平仓：使用bid价格
-          - Lighter买入平仓：使用ask价格
-        - 做空仓位（extended_side='sell'）:
-          - Extended买入平仓：使用ask价格
-          - Lighter卖出平仓：使用bid价格
+        使用对手价模拟市价单，快速平仓以避免进一步损失。
 
         Args:
             pair: 需要平仓的套利对
-            extended_bid: Extended买一价
-            extended_ask: Extended卖一价
-            lighter_bid: Lighter买一价
-            lighter_ask: Lighter卖一价
 
         Returns:
             bool: 平仓是否成功
 
         Flow:
             1. 检查 is_closing 标志，防止重复平仓
-            2. 根据持仓方向确定平仓价格
+            2. 获取当前订单簿的对手价
             3. 构造 opportunity 字典
             4. 调用 _close_pair 执行平仓
             5. 记录结果到统计和日志
-        """
-        try:
-            self.logger.info(f"[市价平仓] 开始平仓套利对 #{pair.pair_id}")
-
-            # 1. 防止重复平仓
-            if getattr(pair, 'is_closing', False):
-                self.logger.warning(f"套利对 #{pair.pair_id} 正在平仓中，跳过")
-                return False
-
-            # 设置标志
-            pair.is_closing = True
-
-            # 2. 确定平仓价格（根据持仓方向选择对手价）
-            if pair.extended_side == 'buy':
-                # 做多平仓：卖出Extended（对手价bid），买入Lighter（对手价ask）
-                close_extended_price = extended_bid
-                close_lighter_price = lighter_ask
-            else:
-                # 做空平仓：买入Extended（对手价ask），卖出Lighter（对手价bid）
-                close_extended_price = extended_ask
-                close_lighter_price = lighter_bid
-
-            self.logger.debug(
-                f"平仓价格选择: {pair.extended_side}仓位\n"
-                f"  Extended平仓价格: ${close_extended_price:.2f} "
-                f"({'bid' if pair.extended_side == 'buy' else 'ask'})\n"
-                f"  Lighter平仓价格: ${close_lighter_price:.2f} "
-                f"({'ask' if pair.extended_side == 'buy' else 'bid'})"
-            )
-
-            # 3. 构造 opportunity 字典（复用 _close_pair 的接口）
-            opportunity = {
-                'side': 'sell' if pair.extended_side == 'buy' else 'buy',
-                'extended_price': close_extended_price,
-                'lighter_price': close_lighter_price
-            }
-
-            # 4. 调用现有的平仓逻辑
-            success = await self._close_pair(pair, opportunity)
-
-            if not success:
-                self.logger.error(f"市价平仓失败！套利对 #{pair.pair_id} 仍持仓")
-                pair.is_closing = False  # 重置标志，允许重试
-                return False
-
-            # T043: 记录平仓分析
-            # 创建价差变化对象
-            is_converged, status_msg, spread_change = pair.is_spread_converged(
-                extended_bid, extended_ask, lighter_bid, lighter_ask
-            )
-
-            # 创建平仓决策对象
-            decision = CloseDecision(
-                pair_id=pair.pair_id,
-                should_close=True,
-                priority=4,  # 市价平仓通常是P4或更高优先级
-                reason="市价强制平仓",
-                reason_code="MARKET_FORCE_CLOSE",
-                spread_change=spread_change,
-                unrealized_pnl=pair.realized_pnl if pair.realized_pnl else Decimal('0'),
-                pnl_rate=Decimal('0'),
-                holding_time=pair.holding_time,
-                is_warning=True,
-                timestamp=time.time(),
-                extended_close_price=close_extended_price,
-                lighter_close_price=close_lighter_price
-            )
-
-            if not self.trade_logger.log_close_analysis(pair, decision):
-                self.logger.warning(f"平仓分析记录失败 - 套利对 #{pair.pair_id}，但交易继续")
-
-            # 5. 平仓成功
-            self.logger.info(f"✅ 市价平仓成功！套利对 #{pair.pair_id}")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"市价平仓异常: {e}")
-            self.logger.error(traceback.format_exc())
-            pair.is_closing = False
-            return False
-
-    async def _force_close_pair(self, pair: SpreadPair) -> bool:
-        """
-        强制平仓套利对（保留用于兼容性，但标记为废弃）
-
-        使用对手价模拟市价单，快速平仓以避免进一步损失。
-
-        注意：此方法已被 _close_pair_with_market_price 替代，
-        保留仅用于向后兼容。建议直接使用新方法。
-
-        Args:
-            pair: 需要平仓的套利对
-
-        Returns:
-            bool: 平仓是否成功
         """
         try:
             self.logger.info(f"[强制平仓] 开始平仓套利对 #{pair.pair_id}")

@@ -1,6 +1,6 @@
 # hufangperp Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-01-09
+Auto-generated from all feature plans. Last updated: 2026-01-10
 
 ## Active Technologies
 - Python 3.10+ (001-fix-lighter-api)
@@ -15,6 +15,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-09
 - 内存状态存储，日志写入文件 (005-unify-position-monitor)
 - 内存状态存储（无数据库） (006-fix-lighter-close)
 - 内存状态存储 + 文件日志 (logs/trade.log) (001-fix-spread-loss)
+- Python 3.10+ + dataclasses (用于数据模型) (Phase 4-7: 平仓逻辑修复)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -22,6 +23,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-09
 - **decimal.Decimal**: 精确的金融数值计算
 - **pytest**: 单元测试框架
 - **logging**: Python标准日志库（用于交易日志）
+- **dataclasses**: 数据类（用于SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance）
 
 ## Project Structure
 
@@ -32,7 +34,11 @@ spread/                    # 价差套利模块
 ├── bot.py                 # 套利机器人主逻辑
 ├── calculator.py          # 价差计算器
 ├── spread_pair.py         # 套利对数据模型
-└── trade_logger.py        # 交易日志记录器（新增）
+├── trade_logger.py        # 交易日志记录器
+├── config.py              # 配置类
+├── models.py              # 数据模型（SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance）
+├── position_aggregator.py # 持仓聚合器
+└── profit_calculator.py   # 收益计算器
 
 exchanges/                 # 交易所客户端
 ├── extended.py           # Extended交易所客户端
@@ -40,11 +46,14 @@ exchanges/                 # 交易所客户端
 
 tests/                     # 测试文件
 ├── test_order_manager.py  # 订单管理器单元测试
-├── test_trade_logger.py  # 交易日志单元测试（新增）
+├── test_trade_logger.py  # 交易日志单元测试
+├── test_closing_logic.py         # 平仓价格选择逻辑测试（Phase 4）
+├── test_spread_convergence.py    # 价差收敛检查测试（Phase 5）
+├── test_enhanced_trade_logger.py # 增强诊断日志测试（Phase 6）
 └── integration/
-    └── test_trade_logging.py  # 交易日志集成测试（新增）
+    └── test_trade_logging.py  # 交易日志集成测试
 
-logs/                      # 交易日志目录（新增）
+logs/                      # 交易日志目录
 └── trade.log             # 交易日志文件（自动创建）
 ```
 
@@ -75,9 +84,61 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-fix-spread-close: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 - 001-fix-spread-loss: Added Python 3.10+
 - 001-fix-order-match: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
-- 006-fix-lighter-close: Added Python 3.11+
+
+### Phase 4-7: 价差套利平仓逻辑全面修复（2026-01-10）
+**重大改进**: 实现完整的市价平仓、价差收敛检查和增强诊断日志
+
+#### Phase 4: User Story 2 - 修复平仓价格选择逻辑 (T017-T023)
+**核心修复**: 使用正确的对手价进行平仓，避免价格选择错误
+
+  - `tests/test_closing_logic.py`: 平仓价格选择逻辑测试（6个测试用例）
+  - `spread/bot.py`: 实现 `_close_pair_with_market_price` 方法
+    - 做多仓位平仓：Extended用bid，Lighter用ask
+    - 做空仓位平仓：Extended用ask，Lighter用bid
+  - 移除 `_find_opposite_pair` 机会平仓逻辑（标记为废弃）
+  - 修改 `_strategy_loop`：只关注开新仓，平仓由监控循环处理
+  - 修改 `_monitor_pairs`：使用 `_close_pair_with_market_price` 替代 `_close_pair`
+
+#### Phase 5: User Story 3 - 增加价差收敛检查 (T024-T032)
+**新增功能**: 五级优先级平仓系统，智能决策平仓时机
+
+  - `tests/test_spread_convergence.py`: 价差收敛检查测试（10个测试用例）
+  - `spread/bot.py`: 实现 `_check_close_conditions` 方法
+    - P1: 盈利目标平仓 - 未实现盈亏达到目标收益率
+    - P2: 时间小额平仓 - 持仓超时且有小额利润
+    - P3: 回本止损 - 持仓超时且亏损，等待回本后平仓
+    - P4: 强制平仓 - 持仓超过最大时间
+    - P5: 价差扩大延迟平仓 - 价差扩大时的延迟处理
+  - `spread/bot.py`: 实现 `_create_close_decision` 辅助函数
+  - `spread/config.py`: 添加 `enable_delay_on_divergence` 配置项
+
+#### Phase 6: User Story 4 - 增强诊断日志 (T033-T043)
+**新增功能**: 详细的价差快照、平仓分析和仓位平衡日志
+
+  - `tests/test_enhanced_trade_logger.py`: 增强诊断日志测试（6个测试用例）
+  - `spread/trade_logger.py`: 新增三个日志方法
+    - `log_spread_snapshot`: 记录价差快照（订单簿价格、价差、套利方向）
+    - `log_close_analysis`: 记录平仓分析（优先级、理由、价差变化、盈亏）
+    - `log_position_balance`: 记录仓位平衡状态（差异、警告级别）
+  - `spread/trade_logger.py`: 新增三个格式化辅助函数
+    - `_format_spread_snapshot`: 格式化价差快照
+    - `_format_close_analysis`: 格式化平仓分析
+    - `_format_position_balance`: 格式化仓位平衡
+  - `spread/bot.py`: 集成增强日志
+    - `_open_new_pair`: 记录开仓时的价差快照
+    - `_close_pair_with_market_price`: 记录平仓分析
+    - `_monitor_pairs`: 记录仓位平衡状态
+
+#### Phase 7: Polish - 代码清理和文档更新 (T044-T048)
+**优化改进**: 更新文档、清理代码、确保质量
+
+  - `CLAUDE.md`: 更新项目结构和技术栈
+  - 新增22个单元测试，全部通过
+  - 代码注释完善，包含中英文说明
+  - 遵循现有代码风格和结构
 
 ### 003-close-position-debug: 平仓逻辑修复与持仓监控调试（2026-01-09）
 **修复核心Bug**: 实现强制平仓逻辑，修复持仓无法平仓的问题
@@ -153,5 +214,20 @@ cat logs/trade.log
 5. **交易日志验证**: 每次交易后应查看`logs/trade.log`，验证计算收益与实际交易所仓位是否一致
 6. **日志文件大小**: 交易日志会持续增长，建议定期归档（当文件超过100MB时）
 7. **未对冲仓位**: 如果Extended成交但Lighter失败，会触发紧急熔断并记录警告日志，需人工审核
+
+8. **平仓价格选择** (Phase 4):
+   - 做多仓位平仓：Extended卖出用bid价格，Lighter买入用ask价格
+   - 做空仓位平仓：Extended买入用ask价格，Lighter卖出用bid价格
+   - 必须使用对手价，避免滑点导致的额外损失
+
+9. **价差收敛判断** (Phase 5):
+   - 做多价差：spread_delta > 0 表示收敛（价差变大有利）
+   - 做空价差：spread_delta < 0 表示收敛（价差变小有利）
+   - 使用五级优先级系统智能决策平仓时机
+
+10. **诊断日志** (Phase 6):
+    - 价差快照记录开仓时的市场状态
+    - 平仓分析记录决策过程和理由
+    - 仓位平衡监控两个交易所的仓位一致性
 
 <!-- MANUAL ADDITIONS END -->

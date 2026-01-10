@@ -37,18 +37,6 @@ class SpreadArbConfig:
     # ==================== 新增：时间止盈配置 ====================
     time_close_profit_threshold: Decimal = Decimal('0.0001')  # 时间止盈最小利润率 (0.01%)
     allow_negative_close: bool = False                     # 是否允许负利润平仓 (False=必须利润>0)
-
-    # ==================== 008-fix-spread-close: 价差收敛和平仓优先级配置 ====================
-    # 价差收敛判断阈值
-    spread_convergence_threshold: Decimal = Decimal('0.001')   # 价差收敛阈值 (0.1%)
-    # 启用新的5级优先级平仓系统
-    close_priority_enabled: bool = True                       # 启用优先级平仓（True=使用P1-P5系统）
-    # 平仓利润率配置
-    min_close_profit_rate: Decimal = Decimal('0.0005')         # 最小平仓利润率 (0.05%) - P1触发条件
-    max_close_loss_rate: Decimal = Decimal('0.01')             # 最大平仓亏损率 (1%) - P4触发条件
-    delay_close_threshold: Decimal = Decimal('0.01')           # 延迟平仓阈值 (1%) - P5触发条件
-    # T028: 价差扩大延迟平仓配置
-    enable_delay_on_divergence: bool = False                  # 价差扩大时是否延迟平仓（默认False=立即平仓）
     
     # ==================== 风险控制 ====================
     max_lighter_depth_ratio: Decimal = Decimal('0.5')      # Lighter 深度使用比例 (50%)

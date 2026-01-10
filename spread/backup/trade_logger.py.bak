@@ -11,7 +11,6 @@ Features:
 - Human-readable format for manual verification
 - Thread-safe atomic writes
 - Graceful error handling (never blocks trading)
-- T036-T042: Enhanced logging with spread snapshots, close analysis, and position balance
 """
 
 import logging
@@ -22,7 +21,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .spread_pair import SpreadPair
-from .models import SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance
 
 
 class TradeLogger:
@@ -154,86 +152,6 @@ class TradeLogger:
             return True
         except Exception as e:
             logging.error(f"Failed to log unhedged position: {e}")
-            return False
-
-    def log_spread_snapshot(self, snapshot: SpreadSnapshot) -> bool:
-        """
-        T036: 记录价差快照
-
-        记录某一时刻的价差状态，包括订单簿价格和套利方向。
-
-        Args:
-            snapshot: SpreadSnapshot对象
-
-        Returns:
-            True if logging succeeded, False otherwise
-        """
-        if self.logger is None:
-            return False
-
-        try:
-            entry = self._format_spread_snapshot(snapshot)
-            self.logger.info(entry)
-            return True
-        except Exception as e:
-            logging.error(f"Failed to log spread snapshot: {e}")
-            return False
-
-    def log_close_analysis(
-        self,
-        pair: SpreadPair,
-        decision: CloseDecision
-    ) -> bool:
-        """
-        T037: 记录平仓分析
-
-        记录平仓决策的详细分析，包括优先级、理由、价差变化和盈亏。
-
-        Args:
-            pair: SpreadPair对象
-            decision: CloseDecision对象
-
-        Returns:
-            True if logging succeeded, False otherwise
-        """
-        if self.logger is None:
-            return False
-
-        try:
-            entry = self._format_close_analysis(pair, decision)
-            self.logger.info(entry)
-            return True
-        except Exception as e:
-            logging.error(f"Failed to log close analysis: {e}")
-            return False
-
-    def log_position_balance(self, balance: PositionBalance) -> bool:
-        """
-        T038: 记录仓位平衡状态
-
-        记录两个交易所的仓位平衡情况，包括差异和警告级别。
-
-        Args:
-            balance: PositionBalance对象
-
-        Returns:
-            True if logging succeeded, False otherwise
-        """
-        if self.logger is None:
-            return False
-
-        try:
-            entry = self._format_position_balance(balance)
-            # 根据警告级别选择日志级别
-            if balance.warning_level == "CRITICAL":
-                self.logger.error(entry)
-            elif balance.warning_level == "WARN":
-                self.logger.warning(entry)
-            else:
-                self.logger.info(entry)
-            return True
-        except Exception as e:
-            logging.error(f"Failed to log position balance: {e}")
             return False
 
     def get_log_file_path(self) -> str:
@@ -420,119 +338,6 @@ class TradeLogger:
             "",
             "⚠️  未对冲仓位 - 需要人工审核",
             "========================================="
-        ]
-
-        return '\n'.join(lines)
-
-    def _format_spread_snapshot(self, snapshot: SpreadSnapshot) -> str:
-        """
-        T039: 格式化价差快照日志
-
-        包含时间戳、订单簿价格、价差和套利方向。
-        """
-        timestamp = datetime.fromtimestamp(snapshot.timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-        direction_display = {
-            "long_spread": "做多价差 (Extended买, Lighter卖)",
-            "short_spread": "做空价差 (Extended卖, Lighter买)"
-        }.get(snapshot.arbitrage_direction, "未知")
-
-        lines = [
-            "=== 价差快照 ===",
-            f"时间戳: {timestamp}",
-            "",
-            "Extended 订单簿:",
-            f"  买一价: ${float(snapshot.extended_bid):.2f}",
-            f"  卖一价: ${float(snapshot.extended_ask):.2f}",
-            f"  中间价: ${float(snapshot.extended_mid):.2f}",
-            "",
-            "Lighter 订单簿:",
-            f"  买一价: ${float(snapshot.lighter_bid):.2f}",
-            f"  卖一价: ${float(snapshot.lighter_ask):.2f}",
-            f"  中间价: ${float(snapshot.lighter_mid):.2f}",
-            "",
-            "价差信息:",
-            f"  绝对价差: ${float(snapshot.spread):.2f}",
-            f"  价差率: {float(snapshot.spread_rate):.4%}",
-            f"  价差符号: {snapshot.spread_sign}",
-            f"  套利方向: {direction_display}",
-            "==================="
-        ]
-
-        return '\n'.join(lines)
-
-    def _format_close_analysis(
-        self,
-        pair: SpreadPair,
-        decision: CloseDecision
-    ) -> str:
-        """
-        T040: 格式化平仓分析日志
-
-        包含平仓决策详情、价差变化、盈亏分析和持仓时间。
-        """
-        timestamp = datetime.fromtimestamp(decision.timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-        direction = "做多" if pair.extended_side == 'buy' else "做空"
-
-        lines = [
-            "=== 平仓分析 ===",
-            f"时间戳: {timestamp}",
-            f"套利对ID: {pair.pair_id}",
-            f"方向: {direction}",
-            "",
-            "平仓决策:",
-            f"  优先级: P{decision.priority}",
-            f"  理由代码: {decision.reason_code}",
-            f"  理由: {decision.reason}",
-            f"  警告级别: {'是' if decision.is_warning else '否'}",
-            "",
-            "价差变化:",
-            f"  开仓价差: ${float(decision.spread_change.open_spread):.2f}",
-            f"  当前价差: ${float(decision.spread_change.current_spread):.2f}",
-            f"  价差变化: ${float(decision.spread_change.spread_delta):.2f} ({float(decision.spread_change.spread_change_rate):.2%})",
-            f"  状态: {decision.spread_change.status}",
-            "",
-            "盈亏分析:",
-            f"  未实现盈亏: ${float(decision.unrealized_pnl):.4f}",
-            f"  盈亏率: {float(decision.pnl_rate):.4%}",
-            f"  持仓时间: {decision.holding_time:.1f} 秒",
-            "",
-            "平仓价格:",
-            f"  Extended: ${float(decision.extended_close_price):.2f}" if decision.extended_close_price else "  Extended: N/A",
-            f"  Lighter: ${float(decision.lighter_close_price):.2f}" if decision.lighter_close_price else "  Lighter: N/A",
-            "==================="
-        ]
-
-        return '\n'.join(lines)
-
-    def _format_position_balance(self, balance: PositionBalance) -> str:
-        """
-        T041: 格式化仓位平衡日志
-
-        包含两个交易所的总仓位、差异和警告级别。
-        """
-        timestamp = datetime.fromtimestamp(balance.timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-        warning_display = {
-            "OK": "✅ 平衡",
-            "WARN": "⚠️ 失衡",
-            "CRITICAL": "🚨 严重失衡"
-        }.get(balance.warning_level, balance.warning_level)
-
-        lines = [
-            "=== 仓位平衡状态 ===",
-            f"时间戳: {timestamp}",
-            "",
-            "仓位总览:",
-            f"  Extended总仓位: {float(balance.extended_total_qty):.4f}",
-            f"  Lighter总仓位: {float(balance.lighter_total_qty):.4f}",
-            f"  差异: {float(balance.diff_qty):.4f}",
-            f"  差异率: {float(balance.diff_rate):.2%}",
-            "",
-            f"状态: {warning_display}",
-            f"失衡: {'是' if balance.is_imbalanced else '否'}",
-            "==================="
         ]
 
         return '\n'.join(lines)

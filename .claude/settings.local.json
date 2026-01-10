@@ -24,7 +24,8 @@
       "Bash(test:*)",
       "Bash(pytest:*)",
       "Bash(pip show:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(sort:*)"
     ]
   }
 }
