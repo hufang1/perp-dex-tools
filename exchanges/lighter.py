@@ -553,10 +553,12 @@ class LighterClient(BaseExchangeClient):
         order_api = lighter.OrderApi(self.api_client)
 
         # Get inactive orders for the specific market
+        # limit参数是必需的，设置为100以获取足够的历史订单
         orders_response = await order_api.account_inactive_orders(
             account_index=self.account_index,
             market_id=self.config.contract_id,
-            auth=auth_token
+            auth=auth_token,
+            limit=100
         )
 
         if not orders_response:
