@@ -17,6 +17,8 @@ Auto-generated from all feature plans. Last updated: 2026-01-10
 - 内存状态存储 + 文件日志 (logs/trade.log) (001-fix-spread-loss)
 - Python 3.10+ + dataclasses (用于数据模型) (Phase 4-7: 平仓逻辑修复)
 - **Python 3.11+ + dataclasses + csv** (009-fix-spread-loss-fees: 核心修复)
+- Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库) (001-spread-recorder)
+- 本地CSV文件系统存储 (001-spread-recorder)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -39,8 +41,9 @@ spread/                    # 价差套利模块
 ├── cost_calculator.py     # [NEW] 成本分解计算器
 ├── spread_pair.py         # 套利对数据模型
 ├── trade_logger.py        # 交易日志记录器
+├── spread_recorder.py     # [NEW] 价差实时记录器（001-spread-recorder）
 ├── config.py              # 配置类
-├── models.py              # 数据模型（SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance）
+├── models.py              # 数据模型（SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance, SpreadRecord）
 ├── position_aggregator.py # 持仓聚合器
 ├── profit_calculator.py   # 收益计算器
 ├── data_collector.py      # [NEW] 数据收集器（CSV导出）
@@ -53,20 +56,23 @@ exchanges/                 # 交易所客户端
 tests/                     # 测试文件
 ├── test_order_manager.py  # 订单管理器单元测试
 ├── test_trade_logger.py  # 交易日志单元测试
+├── test_spread_recorder.py  # [NEW] 价差记录器单元测试（001-spread-recorder）
 ├── test_closing_logic.py         # 平仓价格选择逻辑测试（Phase 4）
 ├── test_spread_convergence.py    # 价差收敛检查测试（Phase 5）
 ├── test_enhanced_trade_logger.py # 增强诊断日志测试（Phase 6）
 ├── test_real_spread_calculator.py  # [NEW] 对手价计算测试
 ├── test_cost_calculator.py         # [NEW] 成本分解测试
 └── integration/
-    └── test_trade_logging.py  # 交易日志集成测试
+    ├── test_trade_logging.py  # 交易日志集成测试
+    └── test_spread_recorder_integration.py  # [NEW] 价差记录器集成测试（001-spread-recorder）
 
 logs/                      # 交易日志目录
 └── trade.log             # 交易日志文件（自动创建）
 
 data/                      # [NEW] 数据导出目录
 ├── trades_YYYY_MM_DD.csv  # 交易记录导出（自动创建）
-└── orders_YYYY_MM_DD.csv  # 订单记录导出（自动创建）
+├── orders_YYYY_MM_DD.csv  # 订单记录导出（自动创建）
+└── spreads_YYYY_MM_DD.csv # [NEW] 价差记录导出（001-spread-recorder，自动创建）
 ```
 
 ## Commands
@@ -78,6 +84,10 @@ pytest tests/test_order_manager.py -v
 # 运行交易日志测试
 pytest tests/test_trade_logger.py -v
 
+# 运行价差记录器测试
+pytest tests/test_spread_recorder.py -v
+pytest tests/integration/test_spread_recorder_integration.py -v
+
 # 运行价差套利机器人
 python spread/bot.py --ticker ETH --size 35 --max-pairs 3
 
@@ -86,6 +96,9 @@ python hedge/hedge_mode.py --exchange extended --ticker ETH --size 0.01 --iter 2
 
 # 查看交易日志
 cat logs/trade.log
+
+# 查看价差记录CSV
+cat data/spreads_YYYY_MM_DD.csv
 ```
 
 ## Code Style
@@ -96,6 +109,47 @@ cat logs/trade.log
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
+
+### 001-spread-recorder: 价差实时记录器（2026-01-10）
+**新功能**: 定期采样价差数据并记录到CSV文件，支持数据分析和透明度
+
+1. **核心功能** (spread/spread_recorder.py)
+   - 定期采样（默认5秒间隔，可配置）
+   - 使用RealSpreadCalculator计算真实价差（对手价）
+   - 同时输出到CSV文件和终端日志
+   - 按日期自动创建和管理CSV文件（spreads_YYYY_MM_DD.csv）
+
+2. **数据模型** (spread/models.py)
+   - SpreadRecord: 包含时间戳、订单簿价格、价差值、价差率、成本分解
+   - 支持 VALID 和 INVALID 状态标记
+
+3. **配置管理** (spread/config.py)
+   - enable_spread_recorder: 启用/禁用记录器
+   - spread_recorder_interval: 采样间隔（秒）
+   - spread_recorder_output_dir: CSV输出目录
+   - spread_recorder_buffer_size: 缓冲区大小
+   - spread_recorder_flush_interval: 刷新间隔
+
+4. **集成到主循环** (spread/bot.py)
+   - 在__init__中初始化SpreadRecorder
+   - 在run方法中添加记录器任务（asyncio.create_task）
+   - 在_cleanup中停止记录器（优雅关闭）
+
+5. **测试覆盖**
+   - 25个单元测试（tests/test_spread_recorder.py）
+   - 7个集成测试（tests/integration/test_spread_recorder_integration.py）
+   - 所有测试通过
+
+6. **CSV文件格式**
+   - UTF-8 with BOM编码（Excel兼容）
+   - 包含13列：时间戳、价格、价差、成本、状态
+   - 支持pandas.read_csv()直接读取
+
+7. **性能优化**
+   - 缓冲写入（减少磁盘IO）
+   - 异步任务（不阻塞主循环）
+   - 记录操作耗时 < 50ms
 
 ### 009-fix-spread-loss-fees: 价差套利核心问题修复（2026-01-10）
 **重大修复**: 修复导致负收益的三个致命问题

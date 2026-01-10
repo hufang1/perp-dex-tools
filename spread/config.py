@@ -97,6 +97,14 @@ class SpreadArbConfig:
     log_level: str = "INFO"                                # 日志级别
     env_file: str = ".env"                                 # 环境变量文件路径
 
+    # ==================== 价差记录器配置 ====================
+    enable_spread_recorder: bool = True                    # 启用价差记录器
+    spread_recorder_interval: int = 5                      # 采样间隔（秒）
+    spread_recorder_output_dir: str = "data"               # CSV输出目录路径
+    spread_recorder_buffer_size: int = 100                 # 缓冲区大小（记录数）
+    spread_recorder_log_level: str = "INFO"                # 日志级别
+    spread_recorder_flush_interval: int = 60               # 缓冲刷新间隔（秒）
+
     def __post_init__(self):
         """验证配置"""
         # 验证价差率
@@ -151,6 +159,19 @@ class SpreadArbConfig:
         # 009-fix-spread-loss-fees: 验证最小盈利阈值
         if self.min_profit_threshold < 0:
             raise ValueError("min_profit_threshold 不能为负数")
+
+        # 验证价差记录器配置
+        if self.spread_recorder_interval <= 0:
+            raise ValueError("spread_recorder_interval 必须大于 0")
+
+        if self.spread_recorder_buffer_size <= 0:
+            raise ValueError("spread_recorder_buffer_size 必须大于 0")
+
+        if self.spread_recorder_flush_interval <= 0:
+            raise ValueError("spread_recorder_flush_interval 必须大于 0")
+
+        if self.spread_recorder_log_level not in ["DEBUG", "INFO", "WARNING", "ERROR"]:
+            raise ValueError("spread_recorder_log_level 必须是 DEBUG/INFO/WARNING/ERROR 之一")
 
     @property
     def effective_min_spread(self) -> Decimal:

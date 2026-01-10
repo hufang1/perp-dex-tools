@@ -117,3 +117,22 @@ class PositionBalance:
         else:
             self.is_imbalanced = True
             self.warning_level = "CRITICAL"
+
+
+@dataclass
+class SpreadRecord:
+    """价差记录 - 单次价差采样的完整数据"""
+
+    timestamp: str                # 采样时间戳 (ISO 8601格式, 精确到毫秒)
+    extended_bid: Decimal         # Extended买一价
+    extended_ask: Decimal         # Extended卖一价
+    lighter_bid: Decimal          # Lighter买一价
+    lighter_ask: Decimal          # Lighter卖一价
+    long_spread: Decimal          # 做多价差值 (lighter_bid - extended_ask)
+    long_spread_rate: Decimal     # 做多价差率 (long_spread / lighter_bid)
+    short_spread: Decimal         # 做空价差值 (extended_bid - lighter_ask)
+    short_spread_rate: Decimal    # 做空价差率 (short_spread / extended_bid)
+    extended_spread_cost: Decimal # Extended点差成本率
+    lighter_spread_cost: Decimal  # Lighter点差成本率
+    total_cost_rate: Decimal      # 总成本率 (extended + lighter)
+    status: str                   # 数据状态 ("VALID" 或 "INVALID")
