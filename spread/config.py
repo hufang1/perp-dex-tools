@@ -69,7 +69,7 @@ class SpreadArbConfig:
     prioritize_closing: bool = True                        # 优先平仓而非开仓
     
     # ==================== 手续费配置 ====================
-    extended_maker_fee_rate: Decimal = Decimal('0.0001')    # Extended maker手续费率 (0.01%) - 假设值
+    extended_maker_fee_rate: Decimal = Decimal('0')    # Extended maker手续费率 (0.01%) - 假设值
     extended_taker_fee_rate: Decimal = Decimal('0.000225')   # Extended taker手续费率 (0.0225%)
     lighter_fee_rate: Decimal = Decimal('0.0')             # Lighter手续费率 (0%)
 

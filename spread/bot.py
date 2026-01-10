@@ -54,11 +54,11 @@ class SpreadArbitrageBot:
 
         # 初始化持仓聚合器和收益计算器
         self.position_aggregator = PositionAggregator(
-            extended_fee_rate=config.extended_fee_rate,
+            extended_fee_rate=config.extended_maker_fee_rate,
             lighter_fee_rate=config.lighter_fee_rate
         )
         self.profit_calculator = ProfitCalculator(
-            extended_fee_rate=config.extended_fee_rate,
+            extended_fee_rate=config.extended_maker_fee_rate,
             lighter_fee_rate=config.lighter_fee_rate
         )
         
