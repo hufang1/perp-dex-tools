@@ -25,7 +25,8 @@
       "Bash(pytest:*)",
       "Bash(pip show:*)",
       "Bash(bash:*)",
-      "Bash(sort:*)"
+      "Bash(sort:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

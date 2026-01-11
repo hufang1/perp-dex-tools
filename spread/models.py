@@ -8,7 +8,7 @@
 - PositionBalance: 仓位平衡状态
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
 
@@ -87,36 +87,102 @@ class CloseDecision:
 class PositionBalance:
     """仓位平衡状态 - 两个交易所的仓位平衡状态"""
 
+    timestamp: float              # 时间戳
     extended_total_qty: Decimal   # Extended总仓位
     lighter_total_qty: Decimal    # Lighter总仓位
     diff_qty: Decimal             # 差异 (extended - lighter)
-    diff_rate: Decimal            # 差异率 (diff / lighter, 避免除零)
-    is_imbalanced: bool           # 是否失衡
-    warning_level: str            # 警告级别: "OK" | "WARN" | "CRITICAL"
-    timestamp: float              # 时间戳
+    diff_rate: Decimal = field(init=False)           # 差异率（自动计算）
+    is_imbalanced: bool = field(init=False)          # 是否失衡（自动计算）
+    warning_level: str = field(init=False)           # 警告级别（自动计算）: "OK" | "WARN" | "CRITICAL"
 
     def __post_init__(self):
-        """计算平衡状态"""
-        # 避免除零错误
-        if self.lighter_total_qty == 0:
-            if self.extended_total_qty == 0:
-                self.diff_rate = Decimal('0')
-            else:
-                # Lighter为0但Extended不为0，严重失衡
-                self.diff_rate = Decimal('999')
-        else:
-            self.diff_rate = abs(self.diff_qty) / self.lighter_total_qty
+        """计算平衡状态 - 使用绝对值计算真实的仓位失衡率"""
+        # 使用绝对值计算总暴露度
+        total_exposure = abs(self.extended_total_qty) + abs(self.lighter_total_qty)
 
-        # 判断失衡状态
-        if self.diff_rate < Decimal('0.1'):  # 10%
-            self.is_imbalanced = False
-            self.warning_level = "OK"
-        elif self.diff_rate < Decimal('0.3'):  # 30%
-            self.is_imbalanced = True
-            self.warning_level = "WARN"
+        # 计算实际差异（绝对值之间的差异）
+        actual_diff_qty = abs(abs(self.extended_total_qty) - abs(self.lighter_total_qty))
+
+        # 计算差异率
+        if total_exposure > 0:
+            self.diff_rate = actual_diff_qty / total_exposure
         else:
-            self.is_imbalanced = True
-            self.warning_level = "CRITICAL"
+            self.diff_rate = Decimal('0')
+
+        # 判断失衡级别
+        if self.diff_rate >= Decimal('0.5'):  # 50%以上
+            self.warning_level = 'CRITICAL'
+        elif self.diff_rate >= Decimal('0.1'):  # 10%以上
+            self.warning_level = 'WARN'
+        else:
+            self.warning_level = 'OK'
+
+        self.is_imbalanced = self.warning_level != 'OK'
+
+
+@dataclass
+class SafetyState:
+    """系统安全状态 - 用于安全监控和熔断决策"""
+
+    # 基本状态
+    is_paused: bool = False
+    pause_reason: str = ""
+    pause_since: Optional[float] = None
+
+    # 对冲失败率监控
+    hedge_failure_window: int = 10
+    recent_hedge_attempts: list = None
+    hedge_failure_rate: Decimal = Decimal('0')
+
+    # 仓位失衡监控
+    position_imbalance_rate: Decimal = Decimal('0')
+    last_imbalance_check: Optional[float] = None
+
+    # 未对冲仓位
+    unhedged_positions: list = None
+    total_unhedged_value: Decimal = Decimal('0')
+
+    # 熔断级别
+    circuit_breaker_level: int = 0
+
+    # 统计
+    total_hedge_attempts: int = 0
+    total_hedge_failures: int = 0
+
+    def __post_init__(self):
+        """初始化列表字段"""
+        if self.recent_hedge_attempts is None:
+            self.recent_hedge_attempts = []
+        if self.unhedged_positions is None:
+            self.unhedged_positions = []
+
+
+@dataclass
+class HedgeFailureTracking:
+    """对冲失败跟踪记录"""
+
+    timestamp: float
+    pair_id: int
+    extended_order_id: str
+    extended_fill_qty: Decimal
+
+    # 对冲尝试信息
+    hedge_attempts: int = 1
+    hedge_order_ids: list = None
+
+    # 失败原因
+    failure_reason: str = "unknown"
+    failure_details: str = ""
+
+    # 状态
+    is_resolved: bool = False
+    resolved_at: Optional[float] = None
+    resolution_method: Optional[str] = None
+
+    def __post_init__(self):
+        """初始化列表字段"""
+        if self.hedge_order_ids is None:
+            self.hedge_order_ids = []
 
 
 @dataclass

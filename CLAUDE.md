@@ -1,6 +1,6 @@
 # hufangperp Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-01-10
+Auto-generated from all feature plans. Last updated: 2026-01-11
 
 ## Active Technologies
 - Python 3.10+ (001-fix-lighter-api)
@@ -19,6 +19,8 @@ Auto-generated from all feature plans. Last updated: 2026-01-10
 - **Python 3.11+ + dataclasses + csv** (009-fix-spread-loss-fees: 核心修复)
 - Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库) (001-spread-recorder)
 - 本地CSV文件系统存储 (001-spread-recorder)
+- Python 3.10.19 + websockets 12.0+, x10-python-trading-starknet 0.0.10, lighter-sdk 0.1.4, pytest, decimal.Decimal (010-fix-position-imbalance)
+- 内存状态存储 + 文件日志（logs/trade.log） + CSV导出（data/） (010-fix-position-imbalance)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -37,17 +39,19 @@ spread/                    # 价差套利模块
 ├── hedge_manager.py       # 对冲管理器（Lighter交易所）
 ├── bot.py                 # 套利机器人主逻辑
 ├── calculator.py          # 价差计算器
-├── real_spread_calculator.py  # [NEW] 真实价差计算器（对手价）
-├── cost_calculator.py     # [NEW] 成本分解计算器
+├── real_spread_calculator.py  # 真实价差计算器（对手价）
+├── cost_calculator.py     # 成本分解计算器
 ├── spread_pair.py         # 套利对数据模型
 ├── trade_logger.py        # 交易日志记录器
-├── spread_recorder.py     # [NEW] 价差实时记录器（001-spread-recorder）
+├── spread_recorder.py     # 价差实时记录器（001-spread-recorder）
 ├── config.py              # 配置类
-├── models.py              # 数据模型（SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance, SpreadRecord）
+├── models.py              # 数据模型
 ├── position_aggregator.py # 持仓聚合器
 ├── profit_calculator.py   # 收益计算器
-├── data_collector.py      # [NEW] 数据收集器（CSV导出）
-└── trade_analyzer.py      # [NEW] 交易分析器
+├── data_collector.py      # 数据收集器（CSV导出）
+├── trade_analyzer.py      # 交易分析器
+├── safety_monitor.py      # [NEW] 安全监控器（010-fix-position-imbalance）
+└── adaptive_threshold_manager.py # [NEW] 动态阈值管理器（010-fix-position-imbalance）
 
 exchanges/                 # 交易所客户端
 ├── extended.py           # Extended交易所客户端
@@ -56,23 +60,27 @@ exchanges/                 # 交易所客户端
 tests/                     # 测试文件
 ├── test_order_manager.py  # 订单管理器单元测试
 ├── test_trade_logger.py  # 交易日志单元测试
-├── test_spread_recorder.py  # [NEW] 价差记录器单元测试（001-spread-recorder）
+├── test_spread_recorder.py  # 价差记录器单元测试（001-spread-recorder）
 ├── test_closing_logic.py         # 平仓价格选择逻辑测试（Phase 4）
 ├── test_spread_convergence.py    # 价差收敛检查测试（Phase 5）
 ├── test_enhanced_trade_logger.py # 增强诊断日志测试（Phase 6）
-├── test_real_spread_calculator.py  # [NEW] 对手价计算测试
-├── test_cost_calculator.py         # [NEW] 成本分解测试
+├── test_real_spread_calculator.py  # 对手价计算测试
+├── test_cost_calculator.py         # 成本分解测试
+├── test_position_balance_fix.py    # [NEW] 仓位平衡计算修复测试（010-fix-position-imbalance）
+├── test_safety_monitor.py          # [NEW] 安全监控测试（010-fix-position-imbalance）
+├── test_adaptive_threshold_manager.py # [NEW] 动态阈值测试（010-fix-position-imbalance）
 └── integration/
     ├── test_trade_logging.py  # 交易日志集成测试
-    └── test_spread_recorder_integration.py  # [NEW] 价差记录器集成测试（001-spread-recorder）
+    ├── test_spread_recorder_integration.py  # 价差记录器集成测试（001-spread-recorder）
+    └── test_circuit_breaker_integration.py  # [NEW] 熔断机制集成测试（010-fix-position-imbalance）
 
 logs/                      # 交易日志目录
 └── trade.log             # 交易日志文件（自动创建）
 
-data/                      # [NEW] 数据导出目录
+data/                      # 数据导出目录
 ├── trades_YYYY_MM_DD.csv  # 交易记录导出（自动创建）
 ├── orders_YYYY_MM_DD.csv  # 订单记录导出（自动创建）
-└── spreads_YYYY_MM_DD.csv # [NEW] 价差记录导出（001-spread-recorder，自动创建）
+└── spreads_YYYY_MM_DD.csv # 价差记录导出（001-spread-recorder，自动创建）
 ```
 
 ## Commands
@@ -87,6 +95,15 @@ pytest tests/test_trade_logger.py -v
 # 运行价差记录器测试
 pytest tests/test_spread_recorder.py -v
 pytest tests/integration/test_spread_recorder_integration.py -v
+
+# 运行P0/P1安全监控测试（010-fix-position-imbalance）
+pytest tests/test_position_balance_fix.py -v
+pytest tests/test_safety_monitor.py -v
+pytest tests/test_adaptive_threshold_manager.py -v
+pytest tests/integration/test_circuit_breaker_integration.py -v
+
+# 运行所有测试
+pytest tests/ -v
 
 # 运行价差套利机器人
 python spread/bot.py --ticker ETH --size 35 --max-pairs 3
@@ -110,6 +127,56 @@ cat data/spreads_YYYY_MM_DD.csv
 
 ## Recent Changes
 - 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
+
+### 010-fix-position-imbalance: 修复仓位失衡和优化开仓标准（2026-01-11）
+**重大修复**: 修复Extended 0.21 ETH vs Lighter 0.02 ETH的严重仓位失衡问题，实现安全监控和动态阈值
+
+**P0 - 关键安全修复**:
+1. **仓位平衡计算修复** (spread/models.py)
+   - 修复PositionBalance.__post_init__: 使用绝对值计算总暴露度和实际差异
+   - 完全对冲仓位(0.01 vs -0.01)现在正确显示0%差异率
+   - 实际失衡(0.21 vs 0.02)现在正确显示82.6%差异率
+
+2. **SafetyMonitor模块** (spread/safety_monitor.py)
+   - 对冲失败率监控（滑动窗口，保留最近10次）
+   - 仓位失衡率计算
+   - 多级熔断器机制（0=正常, 1=警告, 2=禁止开仓, 3=完全暂停）
+   - 手动重置功能
+
+3. **Bot集成** (spread/bot.py)
+   - 初始化SafetyMonitor
+   - 开仓前安全检查（禁止熔断时开仓）
+   - 对冲结果记录
+   - 仓位失衡率更新
+   - 统计报告中显示安全状态
+
+4. **配置增强** (spread/config.py)
+   - safety_enabled: 启用安全监控
+   - safety_hedge_failure_threshold: 对冲失败率阈值(30%)
+   - safety_position_imbalance_threshold: 仓位失衡率阈值(50%)
+
+**P1 - 动态阈值调整**:
+1. **AdaptiveThresholdManager模块** (spread/adaptive_threshold_manager.py)
+   - 根据对冲成功率动态调整开仓阈值
+   - 高成功率(>90%)时使用降低阈值0.06%
+   - 低成功率时使用安全阈值0.15%
+   - 支持中间值插值
+
+2. **配置项** (spread/config.py)
+   - adaptive_threshold_enabled: 启用动态阈值(默认False)
+   - reduced_min_spread_rate: 0.06%
+   - reduced_profit_target_rate: 0.02%
+
+**P2 - 优化平仓策略**:
+- profit_target_rate: 0.05% → 0.02%
+- min_close_profit_rate: 0.05% → 0.03%
+
+**测试覆盖**:
+- test_position_balance_fix.py: 7个测试
+- test_safety_monitor.py: 13个测试
+- test_adaptive_threshold_manager.py: 8个测试
+- test_circuit_breaker_integration.py: 5个集成测试
+- 总计33个测试全部通过
 
 ### 001-spread-recorder: 价差实时记录器（2026-01-10）
 **新功能**: 定期采样价差数据并记录到CSV文件，支持数据分析和透明度
@@ -180,7 +247,6 @@ cat data/spreads_YYYY_MM_DD.csv
    - TradeAnalyzer: 胜率、盈亏比、每日报告
 
 - 001-fix-spread-close: Added 市价平仓逻辑
-- 001-fix-spread-loss: Added Python 3.10+
 
 ### Phase 4-7: 价差套利平仓逻辑全面修复（2026-01-10）
 **重大改进**: 实现完整的市价平仓、价差收敛检查和增强诊断日志

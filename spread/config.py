@@ -29,7 +29,7 @@ class SpreadArbConfig:
     time_close_threshold: int = 60                         # 时间平仓阈值 (秒, 1分钟) - 新增
 
     enable_profit_target: bool = True                      # 启用盈利目标
-    profit_target_rate: Decimal = Decimal('0.0005')        # 目标盈利率 (0.05%)
+    profit_target_rate: Decimal = Decimal('0.0002')        # P2: 目标盈利率 (0.02%) - 降低以加快资金周转
 
     enable_stop_loss: bool = True                          # 启用止损
     stop_loss_usdt: Decimal = Decimal('5')                 # 止损金额 ($5)
@@ -44,7 +44,7 @@ class SpreadArbConfig:
     # 启用新的5级优先级平仓系统
     close_priority_enabled: bool = True                       # 启用优先级平仓（True=使用P1-P5系统）
     # 平仓利润率配置
-    min_close_profit_rate: Decimal = Decimal('0.0005')         # 最小平仓利润率 (0.05%) - P1触发条件
+    min_close_profit_rate: Decimal = Decimal('0.0003')         # P2: 最小平仓利润率 (0.03%) - 降低以加快资金周转
     max_close_loss_rate: Decimal = Decimal('0.01')             # 最大平仓亏损率 (1%) - P4触发条件
     delay_close_threshold: Decimal = Decimal('0.01')           # 延迟平仓阈值 (1%) - P5触发条件
     # T028: 价差扩大延迟平仓配置
@@ -104,6 +104,25 @@ class SpreadArbConfig:
     spread_recorder_buffer_size: int = 100                 # 缓冲区大小（记录数）
     spread_recorder_log_level: str = "INFO"                # 日志级别
     spread_recorder_flush_interval: int = 60               # 缓冲刷新间隔（秒）
+
+    # ==================== P0: 安全监控配置 ====================
+    safety_enabled: bool = True                                    # 启用安全监控
+    safety_hedge_failure_threshold: Decimal = Decimal('0.3')       # 对冲失败率阈值（30%）
+    safety_position_imbalance_threshold: Decimal = Decimal('0.5')  # 仓位失衡率阈值（50%）
+    safety_failure_window: int = 10                                # 失败率统计窗口（最近N次）
+    safety_pause_duration: int = 3600                              # 安全暂停时长（秒，默认1小时）
+
+    # ==================== P1: 动态阈值调整配置 ====================
+    adaptive_threshold_enabled: bool = False                        # 启用动态阈值调整
+    adaptive_min_hedge_success_rate: Decimal = Decimal('0.9')       # 最低对冲成功率（90%）
+    adaptive_min_spread_rate_safe: Decimal = Decimal('0.0015')      # 安全阈值（0.15%）
+    adaptive_min_spread_rate_aggressive: Decimal = Decimal('0.0006')  # 激进阈值（0.06%）
+    adaptive_adjustment_interval: int = 300                         # 阈值调整间隔（秒，默认5分钟）
+
+    # ==================== P1: 降低阈值配置 ====================
+    reduced_min_spread_rate: Decimal = Decimal('0.0006')            # 降低后的开仓阈值（0.06%）
+    reduced_profit_target_rate: Decimal = Decimal('0.0002')         # 降低后的盈利目标（0.02%）
+    reduced_min_close_profit_rate: Decimal = Decimal('0.0003')      # 降低后的平仓阈值（0.03%）
 
     def __post_init__(self):
         """验证配置"""
@@ -172,6 +191,33 @@ class SpreadArbConfig:
 
         if self.spread_recorder_log_level not in ["DEBUG", "INFO", "WARNING", "ERROR"]:
             raise ValueError("spread_recorder_log_level 必须是 DEBUG/INFO/WARNING/ERROR 之一")
+
+        # 验证安全配置
+        if self.safety_hedge_failure_threshold < 0 or self.safety_hedge_failure_threshold > 1:
+            raise ValueError("safety_hedge_failure_threshold 必须在 [0, 1] 范围内")
+
+        if self.safety_position_imbalance_threshold < 0 or self.safety_position_imbalance_threshold > 1:
+            raise ValueError("safety_position_imbalance_threshold 必须在 [0, 1] 范围内")
+
+        if self.safety_failure_window < 1:
+            raise ValueError("safety_failure_window 必须大于 0")
+
+        # 验证动态阈值配置
+        if self.adaptive_min_hedge_success_rate < 0 or self.adaptive_min_hedge_success_rate > 1:
+            raise ValueError("adaptive_min_hedge_success_rate 必须在 [0, 1] 范围内")
+
+        if self.adaptive_min_spread_rate_safe <= self.adaptive_min_spread_rate_aggressive:
+            raise ValueError("adaptive_min_spread_rate_safe 必须大于 adaptive_min_spread_rate_aggressive")
+
+        # 验证降低阈值配置
+        if self.reduced_min_spread_rate <= 0:
+            raise ValueError("reduced_min_spread_rate 必须大于 0")
+
+        if self.reduced_profit_target_rate <= 0:
+            raise ValueError("reduced_profit_target_rate 必须大于 0")
+
+        if self.reduced_min_spread_rate <= self.reduced_min_close_profit_rate:
+            raise ValueError("reduced_min_spread_rate 必须大于 reduced_min_close_profit_rate（确保盈利空间）")
 
     @property
     def effective_min_spread(self) -> Decimal:
