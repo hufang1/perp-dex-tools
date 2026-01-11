@@ -298,12 +298,14 @@ class ConcurrentExecutor:
                 f"间隔: {send_gap_ms:.2f}ms, 延迟: {total_latency_ms:.2f}ms"
             )
         elif is_legging:
+            # 🔴 FIX: 修复日志格式bug，正确显示成交/失败状态
+            success_side = 'Extended' if ext_result['success'] else 'Lighter'
+            fail_side = 'Lighter' if ext_result['success'] else 'Extended'
             self.logger.warning(
-                f"⚠️ [单腿持仓] {'Extended' if ext_result['success'] else 'Lighter'}: "
-                f"{'成交' if ext_result['success'] else '成交'}, "
-                f"{'Lighter' if lit_result['success'] else 'Extended'}: "
-                f"{'失败' if not lit_result['success'] else '失败'}, "
-                f"间隔: {send_gap_ms:.2f}ms"
+                f"⚠️ [单腿持仓] {success_side}: 成交, {fail_side}: 失败, "
+                f"间隔: {send_gap_ms:.2f}ms | "
+                f"Extended: success={ext_result['success']}, order_id={ext_result['order_id']}, "
+                f"Lighter: success={lit_result['success']}, order_id={lit_result['order_id']}"
             )
         else:
             self.logger.error(

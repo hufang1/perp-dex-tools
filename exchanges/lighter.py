@@ -221,7 +221,10 @@ class LighterClient(BaseExchangeClient):
                 self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                 f"{filled_size} @ {price}", "INFO")
 
-            if order_data['client_order_index'] == self.current_order_client_id or order_type == 'OPEN':
+            # 🔴 FIX: 只有当订单ID匹配时才更新current_order
+            # BUG: 之前使用 `or order_type == 'OPEN'` 会导致任何OPEN订单都设置current_order
+            # 这可能导致误将其他订单的状态当作当前订单状态
+            if order_data['client_order_index'] == self.current_order_client_id:
                 current_order = OrderInfo(
                     order_id=order_id,
                     side=side,
@@ -233,6 +236,7 @@ class LighterClient(BaseExchangeClient):
                     cancel_reason=''
                 )
                 self.current_order = current_order
+                self.logger.log(f"[订单匹配] order_id={order_id}, status={status}, filled={filled_size}", "DEBUG")
 
             if status in ['FILLED', 'CANCELED']:
                 self.logger.log_transaction(order_id, side, filled_size, price, status)
@@ -340,39 +344,53 @@ class LighterClient(BaseExchangeClient):
         else:
             # No WebSocket update yet - query order status to verify if filled
             # IOC orders should either fill immediately or be cancelled
+            # 🔴 FIX: get_active_orders() returns empty list, use get_inactive_orders() instead
             try:
-                # Query the order status from the exchange
-                active_orders = await self.get_active_orders(contract_id)
+                # Query inactive orders (filled/cancelled) to verify if order was filled
+                # Note: get_active_orders() returns empty list for Lighter
+                inactive_orders = await self.get_inactive_orders(contract_id)
+
                 filled_order = None
-                for order in active_orders:
+                for order in inactive_orders:
                     if order.order_id == order_result.order_id:
                         filled_order = order
                         break
 
                 if filled_order and filled_order.status == 'FILLED':
                     # Order was filled but WebSocket callback was delayed
+                    self.logger.log(
+                        f"[订单查询] order_id={order_result.order_id} 在inactive订单中找到，状态=FILLED",
+                        "INFO"
+                    )
                     return OrderResult(
                         success=True,
                         order_id=filled_order.order_id,
                         side=direction,
-                        size=quantity,
+                        size=filled_order.filled_size,  # Use actual filled size
                         price=order_price,
                         status='FILLED'
                     )
                 else:
                     # IOC order was not filled - it was rejected or cancelled
-                    # Return failure so the bot can handle it properly
+                    # 🔴 IMPORTANT: 对于IOC订单，如果在inactive订单中找不到或状态不是FILLED，
+                    # 说明订单没有成交，应该返回失败
+                    self.logger.log(
+                        f"[订单查询] order_id={order_result.order_id} 未成交 "
+                        f"(在inactive订单中{'找到但状态=' + filled_order.status if filled_order else '未找到'})",
+                        "WARNING"
+                    )
                     return OrderResult(
-                        success=False,  # FIX: Return False for unfilled IOC orders
+                        success=False,
                         order_id=order_result.order_id,
                         side=direction,
                         size=Decimal('0'),  # No fill
                         price=order_price,
                         status='CANCELLED',
-                        error_message='IOC order not filled within 0.5s'
+                        error_message='IOC order not filled within 0.5s and not found in inactive orders'
                     )
             except Exception as e:
                 # If query fails, assume order failed for safety
+                self.logger.log(f"[订单查询] 查询失败: {str(e)}", "ERROR")
                 return OrderResult(
                     success=False,
                     order_id=order_result.order_id,
