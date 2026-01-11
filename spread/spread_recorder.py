@@ -440,11 +440,15 @@ class SpreadRecorder:
             f"做空价差: ${record.short_spread} ({short_rate_pct:+.4f}%)\n"
             f"点差成本: {cost_pct:.4f}%\n"
             f"\n"
-            f"不开仓理由: {self._format_rejection_reason(record)}\n"
+            f"价差分析: {self._format_rejection_reason(record)}\n"
+            f"⚠️ 注意: 实际开仓决策还需考虑安全检查、仓位限制等其他因素"
         )
 
     def _format_rejection_reason(self, record: SpreadRecord) -> str:
-        """格式化不开仓理由（包含数学公式说明）
+        """格式化价差分析结果（仅基于价差条件，不包含安全检查等其他因素）
+
+        注意：此方法仅分析价差是否满足开仓条件，不代表最终开仓决策。
+        实际开仓还需考虑安全检查、仓位限制等因素。
 
         使用与机器人完全一致的判断逻辑：
         - 分别计算做多和做空的expected_profit
@@ -455,7 +459,7 @@ class SpreadRecorder:
             record: 价差记录对象
 
         Returns:
-            str: 格式化的拒绝理由
+            str: 格式化的价差分析结果
         """
         # 获取配置的有效阈值（包含延迟缓冲）
         min_spread_rate = float(self.config.effective_min_spread)
@@ -515,10 +519,10 @@ class SpreadRecorder:
                 f"   减去点差成本: -{spread_cost_pct:.4f}%\n"
                 f"   期望收益率: {spread_pct:.4f}% - {taker_fees_pct:.4f}% - {spread_cost_pct:.4f}% = {expected_profit_pct:.4f}%\n"
                 f"   有效阈值: {min_spread_pct:.4f}% (含0.01%延迟缓冲)\n"
-                f"   结论: 期望收益率 {expected_profit_pct:.4f}% < 阈值 {min_spread_pct:.4f}%，不开仓"
+                f"   结论: 期望收益率 {expected_profit_pct:.4f}% < 阈值 {min_spread_pct:.4f}%，价差不满足条件"
             )
 
-        return f"✅ 价差满足开仓条件: {direction} 期望收益率{expected_profit_pct:.4f}% ≥ 有效阈值{min_spread_pct:.4f}% (价差率{spread_pct:.4f}% - 手续费{taker_fees_pct:.4f}% - 点差{spread_cost_pct:.4f}%)"
+        return f"✅ 价差满足条件: {direction} 期望收益率{expected_profit_pct:.4f}% ≥ 有效阈值{min_spread_pct:.4f}% (价差率{spread_pct:.4f}% - 手续费{taker_fees_pct:.4f}% - 点差{spread_cost_pct:.4f}%)"
 
     def _format_long_spread_formula(self, record: SpreadRecord) -> str:
         """格式化做多价差计算公式

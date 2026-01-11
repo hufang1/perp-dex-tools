@@ -1082,8 +1082,21 @@ class SpreadArbitrageBot:
         try:
             # P0: 安全检查（010-fix-position-imbalance）
             if self.safety_monitor.should_pause_opening():
+                # 🔴 增强：显示详细的失败统计和重置指引
+                state = self.safety_monitor.state
+                circuit_level, circuit_reason = self.safety_monitor.check_circuit_breaker()
+
+                # 计算失败次数
+                attempts = len(state.recent_hedge_attempts)
+                failures = sum(1 for x in state.recent_hedge_attempts if not x)
+
                 self.logger.warning(
-                    f"安全监控器禁止开仓: {self.safety_monitor.state.pause_reason}"
+                    f"🛑 [安全检查拒绝] 禁止开仓\n"
+                    f"   失败率: {state.hedge_failure_rate:.2%} ({failures}/{attempts} 次失败)\n"
+                    f"   仓位失衡率: {state.position_imbalance_rate:.2%}\n"
+                    f"   熔断级别: {circuit_level} ({circuit_reason})\n"
+                    f"   暂停原因: {state.pause_reason if state.pause_reason else circuit_reason}\n"
+                    f"   💡 提示: 如需恢复交易，请检查并修复Lighter连接问题后重启机器人"
                 )
                 self.stats['opportunities_rejected'] += 1
                 return False
@@ -1091,10 +1104,10 @@ class SpreadArbitrageBot:
             circuit_level, reason = self.safety_monitor.check_circuit_breaker()
             if circuit_level >= 2:
                 self.logger.warning(
-                    f"熔断器级别{circuit_level}禁止开仓: {reason}"
+                    f"🛑 [熔断器] 级别{circuit_level}禁止开仓: {reason}\n"
+                    f"   💡 提示: 检查Lighter交易所连接和订单状态"
                 )
                 self.stats['opportunities_rejected'] += 1
-                return False
 
             self.logger.info(f"开仓套利对...")
             self.logger.info(
@@ -1479,8 +1492,21 @@ class SpreadArbitrageBot:
         try:
             # 安全检查
             if self.safety_monitor.should_pause_opening():
+                # 🔴 增强：显示详细的失败统计和重置指引
+                state = self.safety_monitor.state
+                circuit_level, circuit_reason = self.safety_monitor.check_circuit_breaker()
+
+                # 计算失败次数
+                attempts = len(state.recent_hedge_attempts)
+                failures = sum(1 for x in state.recent_hedge_attempts if not x)
+
                 self.logger.warning(
-                    f"安全监控器禁止开仓: {self.safety_monitor.state.pause_reason}"
+                    f"🛑 [安全检查拒绝] 禁止开仓\n"
+                    f"   失败率: {state.hedge_failure_rate:.2%} ({failures}/{attempts} 次失败)\n"
+                    f"   仓位失衡率: {state.position_imbalance_rate:.2%}\n"
+                    f"   熔断级别: {circuit_level} ({circuit_reason})\n"
+                    f"   暂停原因: {state.pause_reason if state.pause_reason else circuit_reason}\n"
+                    f"   💡 提示: 如需恢复交易，请检查并修复Lighter连接问题后重启机器人"
                 )
                 self.stats['opportunities_rejected'] += 1
                 return False
