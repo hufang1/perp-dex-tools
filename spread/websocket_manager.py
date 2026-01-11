@@ -62,7 +62,7 @@ class WebSocketManager:
 
         # WebSocket URL配置（需要在exchanges模块中配置）
         self.ws_urls = {
-            'extended': 'wss://exchange.extended.com/ws',  # 需要从配置获取
+            'extended': 'wss://starknet.app.extended.exchange/stream.extended.exchange',  # 需要从配置获取
             'lighter': 'wss://mainnet.zklighter.elliot.ai/stream'  # 已知URL
         }
 
