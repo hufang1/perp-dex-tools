@@ -83,7 +83,9 @@ class SpreadArbConfig:
     # ==================== 手续费配置 ====================
     extended_maker_fee_rate: Decimal = Decimal('0')    # Extended maker手续费率 (0.01%) - 假设值
     extended_taker_fee_rate: Decimal = Decimal('0.000225')   # Extended taker手续费率 (0.0225%)
-    lighter_fee_rate: Decimal = Decimal('0.0')             # Lighter手续费率 (0%)
+    lighter_maker_fee_rate: Decimal = Decimal('0.0')        # Lighter maker手续费率
+    lighter_taker_fee_rate: Decimal = Decimal('0.00020')    # Lighter taker手续费率 (0.020%) - 011-fix-lighter-hedge
+    lighter_fee_rate: Decimal = Decimal('0.0')             # Lighter手续费率 (0%) - legacy, keep for compatibility
 
     # ==================== Maker/Taker策略配置 ====================
     maker_timeout_seconds: int = 5                         # Maker单超时时间 (秒)
@@ -138,6 +140,7 @@ class SpreadArbConfig:
     max_tick_to_trade_latency_ms: float = 10.0                   # 行情处理最大延迟（毫秒，默认10ms）
     max_execution_latency_ms: float = 300.0                       # 执行最大延迟（毫秒，默认300ms）
     max_data_age_ms: float = 500.0                                # 数据最大有效期（毫秒，默认500ms）
+    max_data_delay_ms: float = 500.0                              # 数据最大延迟阈值（毫秒，默认500ms） - 011-fix-lighter-hedge
     concurrent_order_send_threshold_ms: float = 5.0               # 并发订单发送时间差阈值（毫秒，默认5ms）
 
     # IOC订单配置

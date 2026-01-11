@@ -32,7 +32,10 @@
       "Bash(git -C /Users/hufang/Desktop/web3 project/perp/hufangperp status --porcelain)",
       "Bash(python3.11:*)",
       "Bash(python3.12:*)",
-      "Bash(python3.13:*)"
+      "Bash(python3.13:*)",
+      "Bash(pip3 show:*)",
+      "Bash(find:*)",
+      "Bash(git branch:*)"
     ]
   }
 }

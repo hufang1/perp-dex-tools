@@ -973,3 +973,170 @@ class PerformanceMonitor:
         }
 
         return analysis
+
+    # ========================================================================
+    # 011-fix-lighter-hedge: 并发执行记录
+    # ========================================================================
+
+    def record_concurrent_execution(
+        self,
+        extended_order_id: str,
+        lighter_order_id: str,
+        send_a_ts: float,
+        send_b_ts: float,
+        result: Any,  # ConcurrentOrderResult
+    ) -> None:
+        """记录并发订单执行指标
+
+        Args:
+            extended_order_id: Extended订单ID
+            lighter_order_id: Lighter订单ID
+            send_a_ts: Extended发送时间戳（毫秒）
+            send_b_ts: Lighter发送时间戳（毫秒）
+            result: ConcurrentOrderResult对象
+
+        副作用:
+            - 更新统计数据
+            - 记录发送时间差
+            - 记录总延迟
+            - 输出日志
+
+        Example:
+            monitor.record_concurrent_execution(
+                extended_order_id='EXT-123',
+                lighter_order_id='LIT-456',
+                send_a_ts=1704960123465.23,
+                send_b_ts=1704960123468.44,
+                result=concurrent_result
+            )
+        """
+        # 计算发送时间差
+        send_gap_ms = abs(send_b_ts - send_a_ts)
+
+        # 计算总延迟（从第一个发送到最后一个完成）
+        # 假设result包含completion_ts或类似字段
+        if hasattr(result, 'total_latency_ms'):
+            total_latency_ms = result.total_latency_ms
+        else:
+            total_latency_ms = 0.0
+
+        # 记录发送时间差
+        self.record_concurrent_send_gap(send_a_ts, send_b_ts)
+
+        # 输出日志
+        status = "✅" if result.is_both_filled else "⚠️" if result.is_legging else "❌"
+        msg = (
+            f"🔄 [并发执行] Extended:{extended_order_id} | Lighter:{lighter_order_id} | "
+            f"发送间隔: {send_gap_ms:.2f}ms {status} | "
+            f"总延迟: {total_latency_ms:.2f}ms"
+        )
+
+        if result.is_both_filled:
+            self.logger.info(msg)
+        elif result.is_legging:
+            self.logger.critical(msg)
+        else:
+            self.logger.warning(msg)
+
+        self.perf_logger.info(msg)
+
+    # ========================================================================
+    # 011-fix-lighter-hedge: 性能摘要
+    # ========================================================================
+
+    def get_performance_summary(
+        self,
+        window_seconds: int = 60
+    ) -> Dict[str, Any]:
+        """获取性能统计摘要
+
+        Args:
+            window_seconds: 时间窗口（秒），默认60秒
+
+        Returns:
+            包含性能统计的字典
+
+        Example:
+            summary = monitor.get_performance_summary(window_seconds=300)
+            print(f"总订单数: {summary['total_orders']}")
+            print(f"成功率: {summary['success_rate']:.2%}")
+        """
+        import statistics
+
+        # 计算统计数据
+        tick_latencies = self._stats['tick_to_trade_latencies']
+        execution_latencies = self._stats['execution_latencies']
+        concurrent_gaps = self._stats['concurrent_gaps']
+        rollback_latencies = self._stats['rollback_latencies']
+
+        # 成功率计算（基于记录的决策）
+        total_records = len(self._decision_records)
+        successful_records = sum(1 for r in self._decision_records if r.status == 'SUCCESS')
+        failed_records = sum(1 for r in self._decision_records if r.status == 'FAILED')
+
+        success_rate = (successful_records / total_records) if total_records > 0 else 0.0
+        failure_rate = (failed_records / total_records) if total_records > 0 else 0.0
+
+        # 单腿持仓率（基于rollback_latencies数量）
+        legging_count = len(rollback_latencies)
+        legging_rate = (legging_count / total_records) if total_records > 0 else 0.0
+
+        # 延迟统计
+        avg_send_gap = float(statistics.mean(concurrent_gaps)) if concurrent_gaps else 0.0
+        p95_send_gap = float(statistics.quantiles(concurrent_gaps, n=20)[18]) if len(concurrent_gaps) > 20 else max(concurrent_gaps) if concurrent_gaps else 0.0
+        max_send_gap = float(max(concurrent_gaps)) if concurrent_gaps else 0.0
+
+        avg_total_latency = float(statistics.mean(execution_latencies)) if execution_latencies else 0.0
+        p95_total_latency = float(statistics.quantiles(execution_latencies, n=20)[18]) if len(execution_latencies) > 20 else max(execution_latencies) if execution_latencies else 0.0
+        max_total_latency = float(max(execution_latencies)) if execution_latencies else 0.0
+
+        avg_tick_to_trade = float(statistics.mean(tick_latencies)) if tick_latencies else 0.0
+        p95_tick_to_trade = float(statistics.quantiles(tick_latencies, n=20)[18]) if len(tick_latencies) > 20 else max(tick_latencies) if tick_latencies else 0.0
+
+        avg_rollback_latency = float(statistics.mean(rollback_latencies)) if rollback_latencies else 0.0
+        p95_rollback_latency = float(statistics.quantiles(rollback_latencies, n=20)[18]) if len(rollback_latencies) > 20 else max(rollback_latencies) if rollback_latencies else 0.0
+
+        # SLA合规性检查
+        send_gap_sla_compliant = sum(1 for g in concurrent_gaps if g < 5.0) / len(concurrent_gaps) if concurrent_gaps else True
+        latency_sla_compliant = sum(1 for l in execution_latencies if l < 500.0) / len(execution_latencies) if execution_latencies else True
+        rollback_sla_compliant = sum(1 for r in rollback_latencies if r < 500.0) / len(rollback_latencies) if rollback_latencies else True
+
+        return {
+            # 订单计数
+            'total_orders': total_records,
+            'successful_orders': successful_records,
+            'failed_orders': failed_records,
+            'rollback_count': legging_count,
+
+            # 成功率
+            'success_rate': success_rate,
+            'failure_rate': failure_rate,
+            'legging_rate': legging_rate,
+
+            # 发送时间差统计
+            'avg_send_gap_ms': avg_send_gap,
+            'p95_send_gap_ms': p95_send_gap,
+            'max_send_gap_ms': max_send_gap,
+
+            # 总延迟统计
+            'avg_total_latency_ms': avg_total_latency,
+            'p95_total_latency_ms': p95_total_latency,
+            'max_total_latency_ms': max_total_latency,
+
+            # tick-to-trade延迟
+            'avg_tick_to_trade_ms': avg_tick_to_trade,
+            'p95_tick_to_trade_ms': p95_tick_to_trade,
+
+            # 回滚延迟
+            'avg_rollback_latency_ms': avg_rollback_latency,
+            'p95_rollback_latency_ms': p95_rollback_latency,
+
+            # SLA合规性
+            'send_gap_sla_compliant': send_gap_sla_compliant >= 0.95,
+            'latency_sla_compliant': latency_sla_compliant >= 0.90,
+            'rollback_sla_compliant': rollback_sla_compliant >= 0.95,
+
+            # 时间窗口
+            'window_start_ts': time.time() * 1000 - (window_seconds * 1000),
+            'window_end_ts': time.time() * 1000,
+        }

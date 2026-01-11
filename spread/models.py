@@ -9,6 +9,7 @@
 - 成功率追踪相关枚举和数据类
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
@@ -672,3 +673,85 @@ class IOCOrderError(Exception):
 class ProfitabilityError(Exception):
     """利润不足异常"""
     pass
+
+
+# ============================================================================
+# 011-fix-lighter-hedge: 订单缓存（WebSocket竞态条件处理）
+# ============================================================================
+
+class OrderCache:
+    """
+    订单结果缓存
+
+    用于解决WebSocket回调可能在订单ID设置前到达的竞态问题。
+    """
+    def __init__(self):
+        self._pending_orders: Dict[int, asyncio.Future] = {}
+        self._completed_orders: Dict[int, any] = {}
+        self._lock = asyncio.Lock()
+
+    async def register_pending(self, client_order_index: int) -> asyncio.Future:
+        """注册待处理订单，返回Future供等待"""
+        async with self._lock:
+            future = asyncio.Future()
+            self._pending_orders[client_order_index] = future
+            return future
+
+    async def resolve_pending(self, client_order_index: int, result: any) -> None:
+        """WebSocket回调解析订单"""
+        async with self._lock:
+            if client_order_index in self._pending_orders:
+                if not self._pending_orders[client_order_index].done():
+                    self._pending_orders[client_order_index].set_result(result)
+                del self._pending_orders[client_order_index]
+            self._completed_orders[client_order_index] = result
+
+    async def resolve_from_rest(self, client_order_index: int, result: any) -> None:
+        """REST API查询结果解析订单"""
+        await self.resolve_pending(client_order_index, result)
+
+    async def wait_for_result(
+        self,
+        client_order_index: int,
+        timeout: float = 1.0
+    ) -> any:
+        """等待订单结果（WebSocket或REST API）"""
+        # 如果已完成，直接返回
+        if client_order_index in self._completed_orders:
+            return self._completed_orders[client_order_index]
+
+        # 注册并等待
+        future = await self.register_pending(client_order_index)
+        try:
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            return None
+
+    async def cleanup_old(self, max_age_seconds: int = 300) -> None:
+        """清理旧订单缓存"""
+        import time
+
+        current_time = time.time()
+        async with self._lock:
+            # 清理已完成的旧订单
+            to_remove = []
+            for idx, result in self._completed_orders.items():
+                if hasattr(result, 'timestamp'):
+                    if current_time - result.timestamp > max_age_seconds:
+                        to_remove.append(idx)
+                elif hasattr(result, 'local_update_time'):
+                    if current_time - (result.local_update_time / 1000) > max_age_seconds:
+                        to_remove.append(idx)
+
+            for idx in to_remove:
+                del self._completed_orders[idx]
+
+            # 清理超时的pending订单
+            to_remove_pending = []
+            for idx, future in self._pending_orders.items():
+                if future.done():
+                    to_remove_pending.append(idx)
+
+            for idx in to_remove_pending:
+                del self._pending_orders[idx]

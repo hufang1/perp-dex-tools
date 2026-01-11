@@ -22,6 +22,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-11
 - Python 3.10.19 + websockets 12.0+, x10-python-trading-starknet 0.0.10, lighter-sdk 0.1.4, pytest, decimal.Decimal (010-fix-position-imbalance)
 - 内存状态存储 + 文件日志（logs/trade.log） + CSV导出（data/） (010-fix-position-imbalance)
 - Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv (001-fix-order-type)
+- Python 3.10+ (primarily using 3.11+ features) (011-fix-lighter-hedge)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -128,6 +129,7 @@ cat data/spreads_YYYY_MM_DD.csv
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 011-fix-lighter-hedge: Added Python 3.10+ (primarily using 3.11+ features)
 - 001-fix-order-type: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv
 - 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
 

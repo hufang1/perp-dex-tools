@@ -12,6 +12,9 @@ from typing import Dict, Any, List, Optional, Tuple
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 
+# 011-fix-lighter-hedge: Import OrderCache for WebSocket race condition handling
+from spread.models import OrderCache
+
 # Import official Lighter SDK for API client
 import lighter
 from lighter import SignerClient, ApiClient, Configuration
@@ -59,6 +62,9 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+
+        # 011-fix-lighter-hedge: OrderCache for WebSocket race conditions
+        self.order_cache = OrderCache()
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -294,7 +300,7 @@ class LighterClient(BaseExchangeClient):
             'price': int(price * self.price_multiplier),
             'is_ask': is_ask,
             'order_type': self.lighter_client.ORDER_TYPE_LIMIT,
-            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,  # 011-fix-lighter-hedge: IOC
             'reduce_only': False,
             'trigger_price': 0,
         }
@@ -303,34 +309,44 @@ class LighterClient(BaseExchangeClient):
         return order_result
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
-        """Place an open order with Lighter using official SDK."""
+        """Place an open order with Lighter using official SDK.
 
+        011-fix-lighter-hedge: Now uses IOC orders - returns immediately after placement.
+        No wait loop - order will either fill or cancel immediately.
+        """
         self.current_order = None
         self.current_order_client_id = None
         order_price = await self.get_order_price(direction)
-
         order_price = self.round_to_tick(order_price)
+
         order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
         if not order_result.success:
             raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
 
-        start_time = time.time()
-        order_status = 'OPEN'
+        # 011-fix-lighter-hedge: Wait briefly (0.5s) for WebSocket update, not 10s
+        # IOC orders should execute immediately, but we wait a short time for WebSocket callback
+        await asyncio.sleep(0.5)
 
-        # While waiting for order to be filled
-        while time.time() - start_time < 10 and order_status != 'FILLED':
-            await asyncio.sleep(0.1)
-            if self.current_order is not None:
-                order_status = self.current_order.status
-
-        return OrderResult(
-            success=True,
-            order_id=self.current_order.order_id,
-            side=direction,
-            size=quantity,
-            price=order_price,
-            status=self.current_order.status
-        )
+        # Return immediately - IOC order is either filled or cancelled
+        if self.current_order is not None:
+            return OrderResult(
+                success=(self.current_order.status == 'FILLED'),
+                order_id=self.current_order.order_id,
+                side=direction,
+                size=quantity,
+                price=order_price,
+                status=self.current_order.status
+            )
+        else:
+            # No WebSocket update yet - return based on order_result
+            return OrderResult(
+                success=True,  # Order was submitted successfully
+                order_id=order_result.order_id,
+                side=direction,
+                size=quantity,
+                price=order_price,
+                status='OPEN'  # IOC orders execute immediately
+            )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
         """Get active close orders for a contract using official SDK."""
