@@ -439,8 +439,72 @@ class SpreadRecorder:
             f"做多价差: ${record.long_spread} ({long_rate_pct:+.4f}%)\n"
             f"做空价差: ${record.short_spread} ({short_rate_pct:+.4f}%)\n"
             f"点差成本: {cost_pct:.4f}%\n"
-            f"CSV记录: {self.current_csv_file or self._get_csv_filename()} (第{self.total_records + len(self.buffer) + 1}条)\n"
+            f"\n"
+            f"不开仓理由: {self._format_rejection_reason(record)}\n"
         )
+
+    def _format_rejection_reason(self, record: SpreadRecord) -> str:
+        """格式化不开仓理由（包含数学公式说明）
+
+        Args:
+            record: 价差记录对象
+
+        Returns:
+            str: 格式化的拒绝理由
+        """
+        # 获取配置的阈值
+        min_spread_rate = float(self.config.min_spread_rate)
+        min_spread_pct = min_spread_rate * 100
+
+        # 获取价差率
+        long_rate = float(record.long_spread_rate)
+        short_rate = float(record.short_spread_rate)
+        cost_rate = float(record.total_cost_rate)
+
+        # 判断哪个方向的价差更大
+        if abs(long_rate) >= abs(short_rate):
+            direction = "做多"
+            spread_rate = long_rate
+            spread_value = record.long_spread
+            formula = f"做多价差 = lighter_bid - extended_ask = {record.lighter_bid} - {record.extended_ask}"
+        else:
+            direction = "做空"
+            spread_rate = short_rate
+            spread_value = record.short_spread
+            formula = f"做空价差 = extended_bid - lighter_ask = {record.extended_bid} - {record.lighter_ask}"
+
+        spread_pct = abs(spread_rate) * 100
+
+        # 构建拒绝理由
+        if record.status == "INVALID":
+            return "❌ 数据无效（价格缺失或异常）"
+
+        if spread_pct <= 0:
+            return f"❌ 价差为负（{direction}价差=${spread_value:.4f}），无套利空间"
+
+        # 检查是否低于阈值
+        if spread_pct < min_spread_pct:
+            return (
+                f"❌ 价差率不足: {direction}\n"
+                f"   公式: {formula}\n"
+                f"   当前价差率: {spread_pct:.4f}% < 阈值: {min_spread_pct:.4f}%\n"
+                f"   净收益率 = {spread_pct:.4f}% - {cost_rate:.4f}% (成本) = {spread_pct - cost_rate:.4f}% < 0\n"
+                f"   结论: 扣除点差成本后为负收益，不开仓"
+            )
+
+        # 检查扣除成本后是否为正
+        net_return = spread_pct - cost_rate
+        if net_return <= 0:
+            return (
+                f"❌ 扣除成本后无利润: {direction}\n"
+                f"   公式: {formula}\n"
+                f"   价差率: {spread_pct:.4f}%\n"
+                f"   点差成本: {cost_rate:.4f}%\n"
+                f"   净收益率 = {spread_pct:.4f}% - {cost_rate:.4f}% = {net_return:.4f}% ≤ 0\n"
+                f"   结论: 扣除点差成本后无利润或亏损，不开仓"
+            )
+
+        return f"✅ 价差满足开仓条件: {direction} {spread_pct:.4f}% ≥ {min_spread_pct:.4f}%"
 
     def _format_long_spread_formula(self, record: SpreadRecord) -> str:
         """格式化做多价差计算公式
