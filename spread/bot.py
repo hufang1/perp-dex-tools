@@ -256,6 +256,10 @@ class SpreadArbitrageBot:
         # ========================================================================
         self.websocket_manager = WebSocketManager(self.config, self.logger)
 
+        # 设置Extended API密钥（用于WebSocket认证）
+        if hasattr(self.extended_client, 'api_key'):
+            self.websocket_manager.set_extended_api_key(self.extended_client.api_key)
+
         # 设置订单簿回调
         self.websocket_manager.set_orderbook_callback(self._handle_websocket_orderbook)
 
