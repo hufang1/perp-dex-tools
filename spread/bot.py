@@ -1319,7 +1319,8 @@ class SpreadArbitrageBot:
                 unrealized_pnl=unrealized_pnl,
                 pnl_rate=pnl_rate,
                 holding_time=holding_time,
-                is_warning=False
+                is_warning=False,
+                timestamp=time.time()
             )
 
         # P2: 时间小额平仓
@@ -1336,7 +1337,8 @@ class SpreadArbitrageBot:
                 unrealized_pnl=unrealized_pnl,
                 pnl_rate=pnl_rate,
                 holding_time=holding_time,
-                is_warning=False
+                is_warning=False,
+                timestamp=time.time()
             )
 
         # P3: 回本止损
@@ -1359,7 +1361,8 @@ class SpreadArbitrageBot:
                 unrealized_pnl=unrealized_pnl,
                 pnl_rate=pnl_rate,
                 holding_time=holding_time,
-                is_warning=False
+                is_warning=False,
+                timestamp=time.time()
             )
 
         # P4: 强制平仓
@@ -1374,7 +1377,8 @@ class SpreadArbitrageBot:
                 unrealized_pnl=unrealized_pnl,
                 pnl_rate=pnl_rate,
                 holding_time=holding_time,
-                is_warning=True
+                is_warning=True,
+                timestamp=time.time()
             )
 
         # P5: 价差扩大延迟平仓
