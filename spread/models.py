@@ -530,3 +530,145 @@ class TradeOperationRecord:
             'status': self.status,
             'send_gap_ms': f"{self.send_gap_ms:.2f}" if self.send_gap_ms is not None else ''
         }
+
+
+# ============================================================================
+# 012-dual-leg-concurrency: 双腿并发交易数据模型
+# ============================================================================
+
+@dataclass
+class ConcurrentOrderResult:
+    """并发订单执行结果
+
+    记录使用asyncio.gather同时发送两个订单的执行结果。
+    """
+    # Extended订单结果
+    extended_success: bool
+    extended_order_id: Optional[str]
+    extended_filled_qty: Decimal
+    extended_filled_price: Optional[Decimal]
+    extended_error: Optional[str]
+
+    # Lighter订单结果
+    lighter_success: bool
+    lighter_order_id: Optional[str]
+    lighter_filled_qty: Decimal
+    lighter_filled_price: Optional[Decimal]
+    lighter_error: Optional[str]
+
+    # 并发执行指标
+    send_a_ts: float                              # Extended发送时间戳（毫秒）
+    send_b_ts: float                              # Lighter发送时间戳（毫秒）
+    send_gap_ms: float                            # 发送时间差（毫秒）
+    total_latency_ms: float                       # 总执行时间（毫秒）
+
+    # 成交状态
+    is_both_filled: bool                          # 双边都成交
+    is_legging: bool                              # 单腿持仓
+    is_both_failed: bool                          # 双边失败
+
+    def get_filled_ratio(self) -> tuple[Decimal, Decimal]:
+        """获取成交比例
+
+        Returns:
+            (extended_ratio, lighter_ratio) 成交比例（0-1）
+        """
+        # TODO: 实现成交比例计算 - 需要预期数量作为输入
+        return (Decimal('1') if self.extended_success else Decimal('0'),
+                Decimal('1') if self.lighter_success else Decimal('0'))
+
+
+@dataclass
+class LegRollbackEvent:
+    """单腿回滚事件
+
+    当一边订单成交而另一边失败时触发。
+    """
+    # 触发条件
+    trigger_time: float                           # 触发时间戳（毫秒）
+    legging_side: str                             # 'extended' 或 'lighter'（成交的一边）
+    legging_qty: Decimal                          # 成交数量
+    legging_price: Decimal                        # 成交价格
+
+    # 回滚操作
+    rollback_executed: bool                       # 是否执行回滚
+    rollback_start_ts: float                      # 回滚开始时间戳
+    rollback_complete_ts: float                   # 回滚完成时间戳
+    rollback_latency_ms: float                    # 回滚耗时（毫秒）
+
+    # 回滚结果
+    rollback_success: bool                        # 回滚是否成功
+    rollback_order_id: Optional[str]              # 回滚订单ID
+    rollback_filled_qty: Decimal                  # 回滚成交数量
+    rollback_error: Optional[str]                 # 回滚错误信息
+
+    # 风险敞口
+    exposure_time_ms: float                       # 风险敞口时间（毫秒）
+    price_slippage: Optional[Decimal]             # 价格滑点（如果亏损）
+
+    def is_within_sla(self) -> bool:
+        """检查回滚是否在SLA内（1秒）"""
+        return self.rollback_latency_ms <= 1000
+
+
+@dataclass
+class SimpleCloseDecision:
+    """极简平仓决策
+
+    只监控当前净价差，不考虑持仓时间等复杂因素。
+    """
+    # 决策输入
+    open_spread_rate: Decimal                     # 开仓时价差率
+    current_spread_rate: Decimal                   # 当前价差率
+    target_profit_rate: Decimal                    # 目标利润率
+    stop_loss_rate: Decimal                        # 止损阈值
+
+    # 决策输出
+    should_close: bool                            # 是否应该平仓
+    close_reason: str                             # 平仓原因 ('take_profit' 或 'stop_loss')
+    spread_delta: Decimal = field(init=False)    # 价差变化（当前-开仓）
+
+    # 盈亏估算
+    unrealized_pnl: Optional[Decimal] = None      # 未实现盈亏（USD）
+
+    def calculate_decision(self) -> None:
+        """计算平仓决策
+
+        止盈: current_spread <= open_spread - target_profit
+        止损: current_spread >= open_spread + stop_loss
+        """
+        self.spread_delta = self.current_spread_rate - self.open_spread_rate
+
+        if self.current_spread_rate <= (self.open_spread_rate - self.target_profit_rate):
+            self.should_close = True
+            self.close_reason = 'take_profit'
+        elif self.current_spread_rate >= (self.open_spread_rate + self.stop_loss_rate):
+            self.should_close = True
+            self.close_reason = 'stop_loss'
+        else:
+            self.should_close = False
+            self.close_reason = 'hold'
+
+
+# ============================================================================
+# 012-dual-leg-concurrency: 异常类
+# ============================================================================
+
+class ConcurrentExecutionError(Exception):
+    """并发执行异常"""
+    pass
+
+
+class LegRollbackError(Exception):
+    """单腿回滚异常"""
+    pass
+
+
+class IOCOrderError(Exception):
+    """IOC订单异常"""
+    pass
+
+
+class ProfitabilityError(Exception):
+    """利润不足异常"""
+    pass

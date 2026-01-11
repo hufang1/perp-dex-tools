@@ -37,6 +37,13 @@ from .websocket_manager import WebSocketManager
 from .concurrent_executor import ConcurrentExecutor
 from .ioc_order_manager import IocOrderManager
 from .risk_validator import RiskValidator
+
+# 012-dual-leg-concurrency: 单腿回滚处理
+from .leg_rollback_handler import LegRollbackHandler
+
+# 012-dual-leg-concurrency: 极简平仓策略
+from .simple_close_strategy import SimpleCloseStrategy
+
 from .models import (
     OrderBookSnapshot,
     TimingRecord,
@@ -44,6 +51,8 @@ from .models import (
     SlippageCheckResult,
     ProfitabilityCheckResult,
     TradeOperationRecord,
+    ConcurrentOrderResult,
+    LegRollbackEvent,
 )
 
 
@@ -275,6 +284,31 @@ class SpreadArbitrageBot:
         )
         self.logger.info("✅ 并发执行器已初始化")
 
+        # 012-dual-leg-concurrency: 初始化单腿回滚处理器（User Story 3）
+        if self.config.enable_leg_rollback:
+            self.leg_rollback_handler = LegRollbackHandler(
+                config=self.config,
+                monitor=self.performance_monitor,
+                extended_client=self.extended_client,
+                lighter_client=self.lighter_client,
+                logger=self.logger
+            )
+            self.logger.info("✅ 单腿回滚处理器已启用")
+        else:
+            self.leg_rollback_handler = None
+
+        # 012-dual-leg-concurrency: 初始化极简平仓策略（User Story 6）
+        if self.config.enable_simple_close:
+            self.simple_close_strategy = SimpleCloseStrategy(
+                config=self.config,
+                concurrent_executor=self.concurrent_executor,
+                ioc_order_manager=self.ioc_order_manager,
+                logger=self.logger
+            )
+            self.logger.info("✅ 极简平仓策略已启用")
+        else:
+            self.simple_close_strategy = None
+
         # ========================================================================
 
         # Extended 和 Lighter 客户端已经在外部初始化并连接
@@ -369,7 +403,23 @@ class SpreadArbitrageBot:
                 if extended_bid <= 0 or lighter_bid <= 0:
                     await asyncio.sleep(0.1)
                     continue
-                
+
+                # T064-T065: 数据新鲜度检查（User Story 5）
+                current_time = time.time() * 1000
+                ext_ts = self.extended_orderbook.get('timestamp_ms', current_time)
+                lit_ts = self.lighter_orderbook.get('timestamp_ms', current_time)
+
+                both_fresh, freshness_results = self.performance_monitor.check_both_data_freshness(
+                    extended_ts=ext_ts,
+                    lighter_ts=lit_ts,
+                    current_time=current_time
+                )
+
+                if not both_fresh:
+                    # 数据过期，跳过本次循环
+                    await asyncio.sleep(0.1)
+                    continue
+
                 # 计算价差机会
                 # 009-fix-spread-loss-fees: T029 - 使用真实价差计算（对手价）替代中间价
                 opportunity = self.calculator.calculate_real_spread_opportunity(
@@ -565,16 +615,76 @@ class SpreadArbitrageBot:
                 else:
                     self.logger.info("📊 当前无持仓")
 
-                # T074-T075: 使用新的优先级平仓系统
-                for pair in self.open_pairs[:]:  # 复制列表
-                    # 检查是否应该平仓（多级优先级）
-                    decision = self._should_close_position(
-                        pair,
-                        extended_bid,
-                        extended_ask,
-                        lighter_bid,
-                        lighter_ask
-                    )
+                # T074-T077: 极简平仓策略（User Story 6）
+                if self.simple_close_strategy is not None:
+                    for pair in self.open_pairs[:]:  # 复制列表
+                        # 使用SimpleCloseStrategy判断是否平仓
+                        decision = self.simple_close_strategy.should_close(
+                            pair=pair,
+                            current_extended_bid=extended_bid,
+                            current_extended_ask=extended_ask,
+                            current_lighter_bid=lighter_bid,
+                            current_lighter_ask=lighter_ask
+                        )
+
+                        # T077: 存储SimpleCloseDecision
+                        pair.simple_close_decision = decision
+
+                        if decision.should_close:
+                            self.simple_close_strategy.log_decision(decision, pair.pair_id)
+
+                            # 执行并发平仓
+                            extended_orderbook = {'bid': extended_bid, 'ask': extended_ask}
+                            lighter_orderbook = {'bid': lighter_bid, 'ask': lighter_ask}
+
+                            close_result = await self.simple_close_strategy.execute_close(
+                                pair=pair,
+                                extended_orderbook=extended_orderbook,
+                                lighter_orderbook=lighter_orderbook
+                            )
+
+                            if close_result.is_both_filled:
+                                # 更新套利对状态
+                                pair.close_extended_order_id = close_result.extended_order_id
+                                pair.close_lighter_order_id = close_result.lighter_order_id
+                                pair.close_extended_price = close_result.extended_filled_price
+                                pair.close_lighter_price = close_result.lighter_filled_price
+                                pair.is_closed = True
+                                pair.close_time = time.time()
+
+                                # 计算盈亏
+                                profit = pair.close(
+                                    close_extended_price=close_result.extended_filled_price,
+                                    close_lighter_price=close_result.lighter_filled_price
+                                )
+
+                                # 从open_pairs移除
+                                if pair in self.open_pairs:
+                                    self.open_pairs.remove(pair)
+                                self.closed_pairs.append(pair)
+
+                                # 更新统计
+                                self.stats['successful_closes'] += 1
+                                if profit >= 0:
+                                    self.stats['total_profit'] += float(profit)
+                                else:
+                                    self.stats['total_loss'] += abs(float(profit))
+
+                                self.logger.info(
+                                    f"✅ [平仓完成] pair_id={pair.pair_id}, "
+                                    f"盈亏: ${profit:.2f}, 持仓时间: {pair.holding_time:.0f}秒"
+                                )
+                else:
+                    # 使用原有的P1-P5优先级系统（T075: 保留作为备用）
+                    for pair in self.open_pairs[:]:  # 复制列表
+                        # 检查是否应该平仓（多级优先级）
+                        decision = self._should_close_position(
+                            pair,
+                            extended_bid,
+                            extended_ask,
+                            lighter_bid,
+                            lighter_ask
+                        )
 
                     if decision and decision.should_close:
                         self.logger.warning(
@@ -1055,6 +1165,20 @@ class SpreadArbitrageBot:
 
             self.logger.info(f"[001-fix-order-type] 使用Taker订单: side={opportunity['side']}, price=${extended_price:.4f}")
 
+            # ========================================================================
+            # 012-dual-leg-concurrency: 双腿并发下单（使用IOC订单）
+            # ========================================================================
+            if self.config.enable_dual_leg_concurrent:
+                return await self._open_new_pair_concurrent(
+                    opportunity=opportunity,
+                    extended_orderbook={'bid': extended_bid, 'ask': extended_ask},
+                    lighter_orderbook={'bid': lighter_bid, 'ask': lighter_ask},
+                    ext_ts=ext_ts,
+                    lit_ts=lit_ts,
+                    freshness_results=freshness_results
+                )
+
+            # ========== 以下是原有的串行执行逻辑（保留兼容性） ==========
             # T084: 记录Extended发送时间戳
             self.performance_monitor.record_timestamp('send_A')
 
@@ -1307,7 +1431,283 @@ class SpreadArbitrageBot:
                 self._trigger_circuit_breaker()
 
             return False
-    
+
+    # ========================================================================
+    # 012-dual-leg-concurrency: 双腿并发下单实现（User Story 1）
+    # ========================================================================
+    async def _open_new_pair_concurrent(
+        self,
+        opportunity: Dict[str, Any],
+        extended_orderbook: Dict[str, Decimal],
+        lighter_orderbook: Dict[str, Decimal],
+        ext_ts: Optional[float] = None,
+        lit_ts: Optional[float] = None,
+        freshness_results: Optional[List[DataFreshnessResult]] = None
+    ) -> bool:
+        """使用双腿并发下单开新套利对（T018-T022）
+
+        特性:
+        - 使用asyncio.gather同时发送两个订单（<5ms时间差）
+        - 使用IOC订单（立即成交或取消，无需等待）
+        - 完整的性能日志记录
+
+        Args:
+            opportunity: 机会字典
+            extended_orderbook: Extended订单簿 {'bid': Decimal, 'ask': Decimal}
+            lighter_orderbook: Lighter订单簿 {'bid': Decimal, 'ask': Decimal}
+            ext_ts: Extended数据时间戳
+            lit_ts: Lighter数据时间戳
+            freshness_results: 数据新鲜度检查结果
+
+        Returns:
+            bool: 是否成功开仓
+        """
+        # T084: 记录信号和计算时间戳
+        signal_ts = self.performance_monitor.get_latency('signal', 'data_A')
+        if signal_ts is None:
+            signal_ts = 0
+        self.performance_monitor.record_timestamp('calc')
+
+        try:
+            # 安全检查
+            if self.safety_monitor.should_pause_opening():
+                self.logger.warning(
+                    f"安全监控器禁止开仓: {self.safety_monitor.state.pause_reason}"
+                )
+                self.stats['opportunities_rejected'] += 1
+                return False
+
+            # 记录开仓机会检测
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.OPEN_ATTEMPT,
+                status=OperationStatus.PENDING,
+                exchange=ExchangeType.BOTH,
+                quantity=opportunity.get('quantity'),
+                spread_rate=opportunity.get('spread_rate')
+            ))
+
+            self.logger.info(
+                f"[双腿并发] 准备开仓: side={opportunity['side']}, "
+                f"quantity={opportunity['quantity']:.6f}"
+            )
+
+            # T056-T058: 增强利润风控检查（User Story 4）
+            if self.config.enable_enhanced_profit_check:
+                profit_check = self.risk_validator.validate_profitability(
+                    spread_rate=opportunity.get('spread_rate', Decimal('0'))
+                )
+
+                if not profit_check.is_profitable:
+                    # T057: 利润不足拒绝日志
+                    self.logger.warning(
+                        f"⚠️ [利润不足] 拒绝开仓 | "
+                        f"价差率: {profit_check.spread_rate:.4%} | "
+                        f"净利: {profit_check.net_profit_rate:.4%} | "
+                        f"最小净利: {profit_check.min_net_profit:.4%}"
+                    )
+                    self.stats['opportunities_rejected'] += 1
+                    return False
+
+                self.logger.info(
+                    f"✅ [利润检查] 通过 | 净利: {profit_check.net_profit_rate:.4%}"
+                )
+
+            # T018: 创建双腿IOC订单
+            extended_order, lighter_order = self.ioc_order_manager.create_dual_leg_orders(
+                opportunity=opportunity,
+                extended_orderbook=extended_orderbook,
+                lighter_orderbook=lighter_orderbook
+            )
+
+            # T019: 并发执行双腿订单
+            concurrent_result = await self.concurrent_executor.execute_dual_leg_orders(
+                extended_order=extended_order,
+                lighter_order=lighter_order,
+                opportunity=opportunity
+            )
+
+            # T021: 性能日志 - 发送时间差
+            if concurrent_result.send_gap_ms > 5:
+                self.logger.warning(
+                    f"⚠️ [并发性能] 发送时间差过大: {concurrent_result.send_gap_ms:.2f}ms (目标<5ms)"
+                )
+            else:
+                self.logger.info(
+                    f"✅ [并发性能] 发送时间差: {concurrent_result.send_gap_ms:.2f}ms"
+                )
+
+            # T022: 性能日志 - 总执行时间
+            if concurrent_result.total_latency_ms > 500:
+                self.logger.warning(
+                    f"⚠️ [并发性能] 总执行时间过长: {concurrent_result.total_latency_ms:.2f}ms (目标<500ms)"
+                )
+            else:
+                self.logger.info(
+                    f"✅ [并发性能] 总执行时间: {concurrent_result.total_latency_ms:.2f}ms"
+                )
+
+            # 处理执行结果
+            if concurrent_result.is_both_failed:
+                # 双边失败
+                self.stats['failed_opens'] += 1
+                self.consecutive_failures += 1
+                self.logger.error(
+                    f"❌ [双边失败] Extended: {concurrent_result.extended_error}, "
+                    f"Lighter: {concurrent_result.lighter_error}"
+                )
+                self.success_tracker.record_operation(SpreadOperationResult(
+                    timestamp=time.time(),
+                    operation_type=OperationType.OPEN_FAILED,
+                    status=OperationStatus.FAILED,
+                    exchange=ExchangeType.BOTH,
+                    failure_reason=FailureReason.NETWORK_TIMEOUT,
+                    error_message=f"双边失败: {concurrent_result.extended_error}, {concurrent_result.lighter_error}"
+                ))
+                return False
+
+            if concurrent_result.is_legging:
+                # 单腿持仓 - 触发紧急回滚（User Story 3: T045-T048）
+                legging_side = 'extended' if concurrent_result.extended_success else 'lighter'
+                self.logger.error(
+                    f"🚨 [单腿持仓] {legging_side}成交，触发紧急回滚！"
+                )
+
+                if self.leg_rollback_handler is not None:
+                    # 检测单腿持仓
+                    is_legging = self.leg_rollback_handler.detect_legging(concurrent_result)
+
+                    if is_legging:
+                        # 执行紧急平仓
+                        rollback_event = await self.leg_rollback_handler.execute_emergency_close(
+                            result=concurrent_result,
+                            pair_id=self.next_pair_id
+                        )
+
+                        # 存储回滚事件记录
+                        self.logger.warning(
+                            f"🔄 [回滚完成] pair_id={self.next_pair_id}, "
+                            f"latency={rollback_event.rollback_latency_ms:.2f}ms, "
+                            f"success={rollback_event.rollback_success}"
+                        )
+
+                        # 记录回滚事件到成功率追踪器
+                        if rollback_event.rollback_success:
+                            self.success_tracker.record_operation(SpreadOperationResult(
+                                timestamp=time.time(),
+                                operation_type=OperationType.OPEN_FAILED,
+                                status=OperationStatus.FAILED,
+                                exchange=ExchangeType.BOTH,
+                                failure_reason=FailureReason.POSITION_IMBALANCE,
+                                error_message=f"单腿持仓已回滚: {legging_side}"
+                            ))
+                        else:
+                            self.success_tracker.record_operation(SpreadOperationResult(
+                                timestamp=time.time(),
+                                operation_type=OperationType.OPEN_FAILED,
+                                status=OperationStatus.FAILED,
+                                exchange=ExchangeType.BOTH,
+                                failure_reason=FailureReason.UNKNOWN_ERROR,
+                                error_message=f"单腿持仓回滚失败: {rollback_event.rollback_error}"
+                            ))
+
+                self.stats['failed_opens'] += 1
+                return False
+
+            # 双腿成交成功
+            pair = SpreadPair(
+                pair_id=self.next_pair_id,
+                extended_side=opportunity['side'],
+                extended_price=concurrent_result.extended_filled_price,
+                extended_quantity=concurrent_result.extended_filled_qty,
+                lighter_price=concurrent_result.lighter_filled_price,
+                lighter_quantity=concurrent_result.lighter_filled_qty,
+                extended_order_id=concurrent_result.extended_order_id,
+                lighter_order_id=concurrent_result.lighter_order_id
+            )
+
+            # 存储并发执行结果（用于后续分析）
+            pair.concurrent_result = concurrent_result
+            pair.order_type = "IOC"
+
+            # 验证仓位一致性
+            if self.config.enable_position_consistency_check:
+                check_result = await self.validate_position_consistency(pair)
+                if not check_result.is_consistent:
+                    self.logger.warning(
+                        f"[双腿并发] 开仓后仓位不一致！\n"
+                        f"   套利对ID: {pair.pair_id}\n"
+                        f"   Extended: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}\n"
+                        f"   Lighter: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}\n"
+                        f"   差异: {check_result.difference:.4f} ({check_result.difference_rate:.2%})"
+                    )
+
+            self.next_pair_id += 1
+            self.open_pairs.append(pair)
+
+            # 更新统计
+            self.stats['successful_opens'] += 1
+            self.stats['opportunities_taken'] += 1
+            self.stats['max_open_pairs'] = max(self.stats['max_open_pairs'], len(self.open_pairs))
+            self.consecutive_failures = 0
+
+            # 记录开仓成功
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.OPEN_SUCCESS,
+                status=OperationStatus.SUCCESS,
+                exchange=ExchangeType.BOTH,
+                order_id=pair.open_extended_order_id,
+                quantity=pair.extended_quantity,
+                price=pair.extended_price,
+                pair_id=pair.pair_id,
+                spread_rate=pair.open_spread_rate
+            ))
+
+            # 创建TradeOperationRecord用于CSV导出
+            timestamps = self.performance_monitor._timestamps
+            decision_record = TradeOperationRecord(
+                timestamp=time.time(),
+                operation_type='OPEN',
+                exchange='BOTH',
+                signal_ts=timestamps.get('signal'),
+                data_ts_A=ext_ts,
+                data_ts_B=lit_ts,
+                calc_ts=timestamps.get('calc'),
+                send_A_ts=concurrent_result.send_a_ts,
+                send_B_ts=concurrent_result.send_b_ts,
+                spread_rate=opportunity.get('spread_rate'),
+                decision='ALLOWED',
+                status='SUCCESS',
+                send_gap_ms=concurrent_result.send_gap_ms
+            )
+            self.performance_monitor.record_decision(decision_record)
+
+            # 增强开仓日志
+            self.logger.info(
+                f"✅ [双腿并发] 开仓成功! 套利对 #{pair.pair_id}\n"
+                f"   方向: {pair.extended_side.upper()}\n"
+                f"   数量: {pair.extended_quantity:.4f}\n"
+                f"   Extended: 价格@${pair.extended_price:.2f} (订单ID: {pair.open_extended_order_id})\n"
+                f"   Lighter: 价格@${pair.lighter_price:.2f} (订单ID: {pair.open_lighter_order_id})\n"
+                f"   开仓价差: ${pair.open_spread:.2f} ({pair.open_spread_rate:.4%})\n"
+                f"   发送间隔: {concurrent_result.send_gap_ms:.2f}ms\n"
+                f"   总延迟: {concurrent_result.total_latency_ms:.2f}ms"
+            )
+
+            # 记录到交易日志
+            if not self.trade_logger.log_opening_trade(pair):
+                self.logger.warning(f"交易日志记录失败 (开仓) - 套利对 #{pair.pair_id}")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"[双腿并发] 开仓失败: {e}")
+            self.logger.error(traceback.format_exc())
+            self.stats['failed_opens'] += 1
+            self.consecutive_failures += 1
+            return False
+
     async def _close_pair(self, pair: SpreadPair, opportunity: Dict[str, Any]) -> bool:
         """平仓套利对"""
         try:

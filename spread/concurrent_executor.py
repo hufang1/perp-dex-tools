@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from spread.config import SpreadArbConfig
 from spread.performance_monitor import PerformanceMonitor
+from spread.models import ConcurrentOrderResult
 
 
 class ConcurrentExecutor:
@@ -138,6 +139,180 @@ class ConcurrentExecutor:
         )
 
         return ext_result, lit_result, send_gap_ms
+
+    # ========================================================================
+    # 012-dual-leg-concurrency: 双腿并发下单（扩展版本）
+    # ========================================================================
+
+    async def execute_dual_leg_orders(
+        self,
+        extended_order: Dict[str, Any],
+        lighter_order: Dict[str, Any],
+        opportunity: Dict[str, Any]
+    ) -> ConcurrentOrderResult:
+        """执行双腿并发订单（扩展版本）
+
+        Args:
+            extended_order: Extended订单字典（由IocOrderManager创建）
+            lighter_order: Lighter订单字典（由IocOrderManager创建）
+            opportunity: 套利机会字典（用于日志记录）
+
+        Returns:
+            ConcurrentOrderResult对象，包含：
+            - 双边订单执行结果
+            - 并发发送时间差
+            - 成交状态判断
+
+        Raises:
+            TimeoutError: 两个订单都超时（500ms）
+            ConnectionError: 网络连接失败
+
+        契约:
+            - send_gap_ms 必须 <= 5ms（否则警告）
+            - total_latency_ms 必须 <= 500ms（否则超时）
+            - 必须记录send_A_ts和send_B_ts时间戳
+        """
+        send_a_ts = None
+        send_b_ts = None
+        start_time = time.time() * 1000
+
+        async def place_extended():
+            nonlocal send_a_ts
+            send_a_ts = time.time() * 1000
+            try:
+                result = await asyncio.wait_for(
+                    self._place_order_extended(extended_order),
+                    timeout=self.config.order_timeout_ms / 1000
+                )
+                return {
+                    'success': True,
+                    'order_id': result.get('order_id'),
+                    'filled_qty': Decimal(result.get('executed_qty', 0)),
+                    'filled_price': Decimal(result.get('avg_price', 0)),
+                    'error': None
+                }
+            except asyncio.TimeoutError:
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'filled_qty': Decimal('0'),
+                    'filled_price': None,
+                    'error': 'timeout'
+                }
+            except Exception as e:
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'filled_qty': Decimal('0'),
+                    'filled_price': None,
+                    'error': str(e)
+                }
+
+        async def place_lighter():
+            nonlocal send_b_ts
+            send_b_ts = time.time() * 1000
+            try:
+                result = await asyncio.wait_for(
+                    self._place_order_lighter(lighter_order),
+                    timeout=self.config.order_timeout_ms / 1000
+                )
+                return {
+                    'success': True,
+                    'order_id': result.get('order_id'),
+                    'filled_qty': Decimal(result.get('executed_qty', 0)),
+                    'filled_price': Decimal(result.get('avg_price', 0)),
+                    'error': None
+                }
+            except asyncio.TimeoutError:
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'filled_qty': Decimal('0'),
+                    'filled_price': None,
+                    'error': 'timeout'
+                }
+            except Exception as e:
+                return {
+                    'success': False,
+                    'order_id': None,
+                    'filled_qty': Decimal('0'),
+                    'filled_price': None,
+                    'error': str(e)
+                }
+
+        # 并发执行
+        results = await asyncio.gather(
+            place_extended(),
+            place_lighter(),
+            return_exceptions=True
+        )
+
+        ext_result = results[0] if not isinstance(results[0], Exception) else {
+            'success': False, 'order_id': None, 'filled_qty': Decimal('0'),
+            'filled_price': None, 'error': str(results[0])
+        }
+        lit_result = results[1] if not isinstance(results[1], Exception) else {
+            'success': False, 'order_id': None, 'filled_qty': Decimal('0'),
+            'filled_price': None, 'error': str(results[1])
+        }
+
+        # 计算指标
+        send_gap_ms = abs(send_b_ts - send_a_ts) if (send_a_ts and send_b_ts) else 0
+        total_latency_ms = time.time() * 1000 - start_time
+
+        # 判断成交状态
+        is_both_filled = ext_result['success'] and lit_result['success']
+        is_legging = ext_result['success'] != lit_result['success']
+        is_both_failed = not ext_result['success'] and not lit_result['success']
+
+        # 构造结果对象
+        result = ConcurrentOrderResult(
+            extended_success=ext_result['success'],
+            extended_order_id=ext_result['order_id'],
+            extended_filled_qty=ext_result['filled_qty'],
+            extended_filled_price=ext_result['filled_price'],
+            extended_error=ext_result['error'],
+            lighter_success=lit_result['success'],
+            lighter_order_id=lit_result['order_id'],
+            lighter_filled_qty=lit_result['filled_qty'],
+            lighter_filled_price=lit_result['filled_price'],
+            lighter_error=lit_result['error'],
+            send_a_ts=send_a_ts or 0,
+            send_b_ts=send_b_ts or 0,
+            send_gap_ms=send_gap_ms,
+            total_latency_ms=total_latency_ms,
+            is_both_filled=is_both_filled,
+            is_legging=is_legging,
+            is_both_failed=is_both_failed
+        )
+
+        # 记录到性能监控
+        if send_a_ts and send_b_ts:
+            self.monitor.record_concurrent_send_gap(send_a_ts, send_b_ts)
+
+        # 日志记录
+        if is_both_filled:
+            self.logger.info(
+                f"✅ [双腿成交] Extended: {ext_result['order_id']}, "
+                f"Lighter: {lit_result['order_id']}, "
+                f"间隔: {send_gap_ms:.2f}ms, 延迟: {total_latency_ms:.2f}ms"
+            )
+        elif is_legging:
+            self.logger.warning(
+                f"⚠️ [单腿持仓] {'Extended' if ext_result['success'] else 'Lighter'}: "
+                f"{'成交' if ext_result['success'] else '成交'}, "
+                f"{'Lighter' if lit_result['success'] else 'Extended'}: "
+                f"{'失败' if not lit_result['success'] else '失败'}, "
+                f"间隔: {send_gap_ms:.2f}ms"
+            )
+        else:
+            self.logger.error(
+                f"❌ [双边失败] Extended: {ext_result['error']}, "
+                f"Lighter: {lit_result['error']}, "
+                f"间隔: {send_gap_ms:.2f}ms"
+            )
+
+        return result
 
     # ========================================================================
     # 并发平仓

@@ -143,8 +143,27 @@ class SpreadArbConfig:
     # IOC订单配置
     use_ioc_orders: bool = True                                   # 是否使用IOC订单（默认True）
     ioc_slippage_tolerance_rate: Decimal = Decimal('0.0005')      # IOC滑点容忍度（默认0.05%）
+    ioc_slippage_min_rate: Decimal = Decimal('0.0003')            # IOC滑点容忍度最小值（默认0.03%）
+    ioc_slippage_max_rate: Decimal = Decimal('0.0005')            # IOC滑点容忍度最大值（默认0.05%）
     order_timeout_ms: int = 500                                   # 订单超时时间（毫秒，默认500ms）
     emergency_close_timeout_ms: int = 1000                        # 紧急平仓超时时间（毫秒，默认1000ms）
+
+    # ==================== 012-dual-leg-concurrency: 双腿并发交易配置 ====================
+    # 并发执行配置
+    enable_dual_leg_concurrent: bool = True                       # 启用双腿并发执行（默认True）
+
+    # 单腿回滚配置
+    enable_leg_rollback: bool = True                              # 启用单腿回滚（默认True）
+    rollback_timeout_ms: float = 500.0                            # 回滚超时时间（毫秒，默认500ms）
+    rollback_max_retries: int = 3                                 # 回滚最大重试次数（默认3）
+
+    # 极简平仓配置
+    enable_simple_close: bool = True                              # 启用极简平仓（默认True）
+    simple_close_target_profit_rate: Decimal = Decimal('0.0002')  # 极简平仓目标利润率（默认0.02%）
+    simple_close_stop_loss_rate: Decimal = Decimal('0.0010')      # 极简平仓止损阈值（默认0.10%）
+
+    # 增强利润检查配置
+    enable_enhanced_profit_check: bool = True                     # 启用增强利润检查（默认True）
 
     # 利润与风控配置
     min_net_profit_rate: Decimal = Decimal('0.0002')              # 最低净利要求（默认0.02%）
@@ -257,6 +276,29 @@ class SpreadArbConfig:
 
         if self.reduced_min_spread_rate <= self.reduced_min_close_profit_rate:
             raise ValueError("reduced_min_spread_rate 必须大于 reduced_min_close_profit_rate（确保盈利空间）")
+
+        # 012-dual-leg-concurrency: 验证IOC滑点配置
+        if self.ioc_slippage_min_rate <= 0:
+            raise ValueError("ioc_slippage_min_rate 必须大于 0")
+
+        if self.ioc_slippage_max_rate <= 0:
+            raise ValueError("ioc_slippage_max_rate 必须大于 0")
+
+        if self.ioc_slippage_min_rate > self.ioc_slippage_max_rate:
+            raise ValueError("ioc_slippage_min_rate 必须小于或等于 ioc_slippage_max_rate")
+
+        if not (self.ioc_slippage_min_rate <= self.ioc_slippage_tolerance_rate <= self.ioc_slippage_max_rate):
+            raise ValueError("ioc_slippage_tolerance_rate 必须在 ioc_slippage_min_rate 和 ioc_slippage_max_rate 之间")
+
+    def validate_ioc_slippage(self) -> bool:
+        """验证IOC滑点配置是否在有效范围内
+
+        Returns:
+            True if configuration is valid, False otherwise
+        """
+        return (
+            self.ioc_slippage_min_rate <= self.ioc_slippage_tolerance_rate <= self.ioc_slippage_max_rate
+        )
 
     @property
     def effective_min_spread(self) -> Decimal:

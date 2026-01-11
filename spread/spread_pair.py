@@ -4,9 +4,13 @@
 
 import time
 from decimal import Decimal
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, TYPE_CHECKING
 
 from spread.models import SpreadChange
+
+# 012-dual-leg-concurrency: 导入新数据模型（避免循环导入）
+if TYPE_CHECKING:
+    from spread.models import ConcurrentOrderResult, LegRollbackEvent, SimpleCloseDecision
 
 
 class SpreadPair:
@@ -76,6 +80,12 @@ class SpreadPair:
         self.close_extended_price: Optional[Decimal] = None
         self.close_lighter_price: Optional[Decimal] = None
         self.realized_pnl: Optional[Decimal] = None
+
+        # ==================== 012-dual-leg-concurrency: 并发执行相关 ====================
+        self.concurrent_result: Optional['ConcurrentOrderResult'] = None  # 并发订单执行结果
+        self.rollback_event: Optional['LegRollbackEvent'] = None      # 单腿回滚事件
+        self.simple_close_decision: Optional['SimpleCloseDecision'] = None  # 极简平仓决策
+        self.order_type: str = "IOC"  # 订单类型标记（默认IOC）
     
     @property
     def lighter_side(self) -> str:

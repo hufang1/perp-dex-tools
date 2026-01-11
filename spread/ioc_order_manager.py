@@ -202,6 +202,76 @@ class IocOrderManager:
                 f"均价: ${result['avg_price']}"
             )
 
+    # ========================================================================
+    # 012-dual-leg-concurrency: 双腿并发订单创建
+    # ========================================================================
+
+    def create_dual_leg_orders(
+        self,
+        opportunity: Dict[str, Any],
+        extended_orderbook: Dict,
+        lighter_orderbook: Dict
+    ) -> tuple[Dict, Dict]:
+        """创建双腿IOC订单
+
+        Args:
+            opportunity: 套利机会字典
+                - 'side': 'buy' or 'sell' (Extended方向)
+                - 'quantity': Decimal (下单数量)
+            extended_orderbook: Extended订单簿
+                - 'bid': Decimal
+                - 'ask': Decimal
+            lighter_orderbook: Lighter订单簿
+                - 'bid': Decimal
+                - 'ask': Decimal
+
+        Returns:
+            (extended_order, lighter_order) 订单字典元组
+
+        Note:
+            - Extended订单使用timeInForce参数
+            - Lighter订单使用time_in_force参数（下划线）
+            - 买入价 = ask * (1 + SLIPPAGE_TOLERANCE)
+            - 卖出价 = bid * (1 - SLIPPAGE_TOLERANCE)
+        """
+        side = opportunity['side']
+        quantity = opportunity.get('quantity', Decimal('0.01'))
+
+        # Extended订单
+        if side == 'buy':
+            extended_price = extended_orderbook['ask']  # 买入用ask
+        else:
+            extended_price = extended_orderbook['bid']  # 卖出用bid
+
+        extended_order = self.create_ioc_order(
+            exchange='extended',
+            side=side,
+            price=extended_price,
+            quantity=quantity
+        )
+
+        # Lighter订单（方向相反）
+        lighter_side = 'sell' if side == 'buy' else 'buy'
+        if lighter_side == 'buy':
+            lighter_price = lighter_orderbook['ask']  # 买入用ask
+        else:
+            lighter_price = lighter_orderbook['bid']  # 卖出用bid
+
+        lighter_order = self.create_ioc_order(
+            exchange='lighter',
+            side=lighter_side,
+            price=lighter_price,
+            quantity=quantity
+        )
+
+        self.logger.info(
+            f"📝 [双腿订单创建] "
+            f"Extended: {side} @ {extended_price}, "
+            f"Lighter: {lighter_side} @ {lighter_price}"
+        )
+
+        return extended_order, lighter_order
+
     def log_no_fill_warning(self, exchange: str, expected_qty: Decimal) -> None:
         """记录完全未成交警告
 

@@ -56,6 +56,7 @@ class PerformanceMonitor:
             'concurrent_gaps': [],
             'data_ages_extended': [],
             'data_ages_lighter': [],
+            'rollback_latencies': [],  # 012-dual-leg-concurrency: 回滚延迟统计
         }
 
         # T085: 交易操作记录存储 (CSV导出)
@@ -212,6 +213,32 @@ class PerformanceMonitor:
         msg = f"🔄 [并发发送] Extended→Lighter间隔: {gap_ms:.2f}ms {status} | 阈值: {threshold}ms"
 
         if is_within_threshold or self.config.enable_console_warnings:
+            self.logger.info(msg)
+        self.perf_logger.info(msg)
+
+    def record_rollback_latency(self, rollback_latency_ms: float) -> None:
+        """记录回滚延迟（012-dual-leg-concurrency: User Story 3）
+
+        Args:
+            rollback_latency_ms: 回滚延迟（毫秒）
+
+        副作用:
+            - 更新统计数据
+            - 如果延迟超过1000ms，输出警告
+
+        Example:
+            monitor.record_rollback_latency(850.0)
+            # 输出: 🔄 [紧急回滚] 延迟: 850.00ms ✅ | SLA: 1000ms
+        """
+        self._stats['rollback_latencies'].append(rollback_latency_ms)
+
+        sla_threshold_ms = 1000
+        is_within_sla = rollback_latency_ms <= sla_threshold_ms
+
+        status = "✅" if is_within_sla else "❌"
+        msg = f"🔄 [紧急回滚] 延迟: {rollback_latency_ms:.2f}ms {status} | SLA: {sla_threshold_ms}ms"
+
+        if is_within_sla or self.config.enable_console_warnings:
             self.logger.info(msg)
         self.perf_logger.info(msg)
 
