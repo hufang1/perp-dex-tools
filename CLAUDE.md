@@ -129,9 +129,9 @@ cat data/spreads_YYYY_MM_DD.csv
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 013-fix-order-timeout: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses
 - 011-fix-lighter-hedge: Added Python 3.10+ (primarily using 3.11+ features)
 - 001-fix-order-type: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv
-- 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
 
 ### 001-fix-order-type: 订单类型修复和成功率统计（2026-01-11）
 **核心修复**: 强制使用taker订单，移除maker订单逻辑，实现成功率统计和仓位一致性验证
