@@ -452,8 +452,9 @@ class SpreadRecorder:
         Returns:
             str: 格式化的拒绝理由
         """
-        # 获取配置的阈值
-        min_spread_rate = float(self.config.min_spread_rate)
+        # 获取配置的有效阈值（包含延迟缓冲）
+        # 注意：机器人实际开仓使用 effective_min_spread，这里保持一致
+        min_spread_rate = float(self.config.effective_min_spread)
         min_spread_pct = min_spread_rate * 100
 
         # 获取价差率
@@ -487,7 +488,7 @@ class SpreadRecorder:
             return (
                 f"❌ 价差率不足: {direction}\n"
                 f"   公式: {formula}\n"
-                f"   当前价差率: {spread_pct:.4f}% < 阈值: {min_spread_pct:.4f}%\n"
+                f"   当前价差率: {spread_pct:.4f}% < 有效阈值: {min_spread_pct:.4f}% (含0.01%延迟缓冲)\n"
                 f"   净收益率 = {spread_pct:.4f}% - {cost_rate:.4f}% (成本) = {spread_pct - cost_rate:.4f}% < 0\n"
                 f"   结论: 扣除点差成本后为负收益，不开仓"
             )
@@ -504,7 +505,7 @@ class SpreadRecorder:
                 f"   结论: 扣除点差成本后无利润或亏损，不开仓"
             )
 
-        return f"✅ 价差满足开仓条件: {direction} {spread_pct:.4f}% ≥ {min_spread_pct:.4f}%"
+        return f"✅ 价差满足开仓条件: {direction} {spread_pct:.4f}% ≥ 有效阈值{min_spread_pct:.4f}% (含0.01%延迟缓冲)"
 
     def _format_long_spread_formula(self, record: SpreadRecord) -> str:
         """格式化做多价差计算公式
