@@ -60,16 +60,18 @@ class WebSocketManager:
         # 重连任务
         self._reconnect_tasks: List[asyncio.Task] = []
 
-        # WebSocket URL配置
+        # WebSocket URL配置（需要在exchanges模块中配置）
         self.ws_urls = {
-            'extended': 'wss://api.starknet.extended.exchange/stream.extended.exchange',  # 修复: 从SDK获取正确URL
-            'lighter': 'wss://mainnet.zklighter.elliot.ai/stream'
+            'extended': 'wss://starknet.app.extended.exchange/stream.extended.exchange',  # 需要从配置获取
+            'lighter': 'wss://mainnet.zklighter.elliot.ai/stream'  # 已知URL
         }
 
         # 订阅的交易对
         self._symbol: Optional[str] = None
 
-
+    # ========================================================================
+    # 连接管理
+    # ========================================================================
 
     async def connect_extended(self) -> None:
         """连接到Extended交易所WebSocket
@@ -89,13 +91,11 @@ class WebSocketManager:
             # 导入websockets
             import websockets
 
-            # 准备认证头
-
             self.ws_extended = await websockets.connect(
                 url,
                 ping_interval=20,
                 ping_timeout=20,
-                close_timeout=10,
+                close_timeout=10
             )
 
             self._connected_extended = True
