@@ -19,6 +19,8 @@ Auto-generated from all feature plans. Last updated: 2026-01-10
 - **Python 3.11+ + dataclasses + csv** (009-fix-spread-loss-fees: 核心修复)
 - Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库) (001-spread-recorder)
 - 本地CSV文件系统存储 (001-spread-recorder)
+- Python 3.10.19 + websockets 12.0+, x10-python-trading-starknet 0.0.10, lighter-sdk 0.1.4, pytest, decimal.Decimal (010-fix-position-imbalance)
+- 内存状态存储 + 文件日志（logs/trade.log） + CSV导出（data/） (010-fix-position-imbalance)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -109,6 +111,7 @@ cat data/spreads_YYYY_MM_DD.csv
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 010-fix-position-imbalance: Added Python 3.10.19 + websockets 12.0+, x10-python-trading-starknet 0.0.10, lighter-sdk 0.1.4, pytest, decimal.Decimal
 - 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
 
 ### 001-spread-recorder: 价差实时记录器（2026-01-10）
@@ -180,7 +183,6 @@ cat data/spreads_YYYY_MM_DD.csv
    - TradeAnalyzer: 胜率、盈亏比、每日报告
 
 - 001-fix-spread-close: Added 市价平仓逻辑
-- 001-fix-spread-loss: Added Python 3.10+
 
 ### Phase 4-7: 价差套利平仓逻辑全面修复（2026-01-10）
 **重大改进**: 实现完整的市价平仓、价差收敛检查和增强诊断日志

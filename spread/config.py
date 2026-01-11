@@ -105,6 +105,13 @@ class SpreadArbConfig:
     spread_recorder_log_level: str = "INFO"                # 日志级别
     spread_recorder_flush_interval: int = 60               # 缓冲刷新间隔（秒）
 
+    # ==================== P0: 安全监控配置 ====================
+    safety_enabled: bool = True                                    # 启用安全监控
+    safety_hedge_failure_threshold: Decimal = Decimal('0.3')       # 对冲失败率阈值（30%）
+    safety_position_imbalance_threshold: Decimal = Decimal('0.5')  # 仓位失衡率阈值（50%）
+    safety_failure_window: int = 10                                # 失败率统计窗口（最近N次）
+    safety_pause_duration: int = 3600                              # 安全暂停时长（秒，默认1小时）
+
     def __post_init__(self):
         """验证配置"""
         # 验证价差率
@@ -172,6 +179,16 @@ class SpreadArbConfig:
 
         if self.spread_recorder_log_level not in ["DEBUG", "INFO", "WARNING", "ERROR"]:
             raise ValueError("spread_recorder_log_level 必须是 DEBUG/INFO/WARNING/ERROR 之一")
+
+        # 验证安全配置
+        if self.safety_hedge_failure_threshold < 0 or self.safety_hedge_failure_threshold > 1:
+            raise ValueError("safety_hedge_failure_threshold 必须在 [0, 1] 范围内")
+
+        if self.safety_position_imbalance_threshold < 0 or self.safety_position_imbalance_threshold > 1:
+            raise ValueError("safety_position_imbalance_threshold 必须在 [0, 1] 范围内")
+
+        if self.safety_failure_window < 1:
+            raise ValueError("safety_failure_window 必须大于 0")
 
     @property
     def effective_min_spread(self) -> Decimal:

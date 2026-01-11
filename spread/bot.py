@@ -21,6 +21,7 @@ from .models import SpreadChange, CloseDecision, PositionBalance, SpreadSnapshot
 from .data_collector import DataCollector
 from .trade_analyzer import TradeAnalyzer
 from .spread_recorder import SpreadRecorder
+from .safety_monitor import SafetyMonitor
 
 
 class SpreadArbitrageBot:
@@ -76,6 +77,11 @@ class SpreadArbitrageBot:
         if config.enable_spread_recorder:
             self.spread_recorder = SpreadRecorder(config)
             self.logger.info("价差记录器已启用")
+
+        # P0: 安全监控器（010-fix-position-imbalance）
+        self.safety_monitor = SafetyMonitor(config, self.logger)
+        if config.safety_enabled:
+            self.logger.info("安全监控器已启用")
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -403,15 +409,18 @@ class SpreadArbitrageBot:
                         if p.extended_side == 'buy'
                     )
 
+                    # P0: 更新安全监控器的仓位失衡率（010-fix-position-imbalance）
+                    self.safety_monitor.update_position_imbalance(
+                        extended_qty=extended_total_qty,
+                        lighter_qty=lighter_total_qty
+                    )
+
                     # 创建仓位平衡对象
                     position_balance = PositionBalance(
+                        timestamp=time.time(),
                         extended_total_qty=abs(extended_total_qty),
                         lighter_total_qty=abs(lighter_total_qty),
-                        diff_qty=abs(extended_total_qty - lighter_total_qty),
-                        diff_rate=Decimal('0'),  # 将在__post_init__中计算
-                        is_imbalanced=False,  # 将在__post_init__中计算
-                        warning_level="OK",  # 将在__post_init__中计算
-                        timestamp=time.time()
+                        diff_qty=abs(extended_total_qty - lighter_total_qty)
                     )
 
                     # 记录仓位平衡（仅在有失衡时）
@@ -484,6 +493,22 @@ class SpreadArbitrageBot:
                 if len(self.hedge_attempts) >= 5:
                     _, failure_rate = self._check_hedge_failure_rate()
                     self.logger.info(f"  对冲失败率: {failure_rate:.2%} ({len(self.hedge_attempts)} 次尝试)")
+
+                # P0: 显示安全监控状态（010-fix-position-imbalance）
+                safety_state = self.safety_monitor.get_safety_state()
+                circuit_level, reason = self.safety_monitor.check_circuit_breaker()
+
+                self.logger.info(f"  🛡️ 安全监控:")
+                self.logger.info(f"     熔断级别: {circuit_level} ({reason})")
+                self.logger.info(
+                    f"     对冲失败率: {safety_state.hedge_failure_rate:.2%} "
+                    f"({safety_state.total_hedge_failures}/{safety_state.total_hedge_attempts})"
+                )
+                self.logger.info(
+                    f"     仓位失衡率: {safety_state.position_imbalance_rate:.2%}"
+                )
+                if safety_state.is_paused:
+                    self.logger.error(f"     ⚠️ 系统已暂停: {safety_state.pause_reason}")
 
                 # 🔴 显示未对冲仓位警告
                 if len(self.unhedged_positions) > 0:
@@ -767,6 +792,22 @@ class SpreadArbitrageBot:
     async def _open_new_pair(self, opportunity: Dict[str, Any]) -> bool:
         """开新的套利对"""
         try:
+            # P0: 安全检查（010-fix-position-imbalance）
+            if self.safety_monitor.should_pause_opening():
+                self.logger.warning(
+                    f"安全监控器禁止开仓: {self.safety_monitor.state.pause_reason}"
+                )
+                self.stats['opportunities_rejected'] += 1
+                return False
+
+            circuit_level, reason = self.safety_monitor.check_circuit_breaker()
+            if circuit_level >= 2:
+                self.logger.warning(
+                    f"熔断器级别{circuit_level}禁止开仓: {reason}"
+                )
+                self.stats['opportunities_rejected'] += 1
+                return False
+
             self.logger.info(f"开仓套利对...")
             self.logger.info(
                 f"[DEBUG] 机会详情: type={opportunity['type']}, "
@@ -931,7 +972,13 @@ class SpreadArbitrageBot:
                 expected_price=opportunity['lighter_price']
             )
 
-            # 🆕 记录对冲尝试结果
+            # P0: 记录对冲尝试结果到安全监控器（010-fix-position-imbalance）
+            await self.safety_monitor.record_hedge_attempt(
+                success=hedge_result['success'],
+                failure_reason=hedge_result.get('error')
+            )
+
+            # 保留旧的对冲记录方法以保持兼容性
             self._record_hedge_attempt(hedge_result['success'])
 
             if not hedge_result['success']:
@@ -2072,6 +2119,14 @@ class SpreadArbitrageBot:
         # 只保留最近的N次记录
         if len(self.hedge_attempts) > self.config.hedge_failure_window:
             self.hedge_attempts.pop(0)
+
+    def reset_circuit_breaker(self):
+        """手动重置熔断器
+
+        用于用户确认问题解决后恢复交易
+        """
+        self.safety_monitor.reset_circuit_breaker()
+        self.logger.info("熔断器已手动重置")
 
     def _check_hedge_failure_rate(self) -> tuple[bool, Decimal]:
         """检查对冲失败率
