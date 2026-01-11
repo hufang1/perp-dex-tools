@@ -25,26 +25,42 @@ def config():
 @pytest.fixture
 def mock_extended_client():
     """模拟Extended客户端"""
+    from exchanges.base import OrderResult
     client = MagicMock()
-    client.place_order = AsyncMock(return_value={
-        'success': True,
-        'order_id': 'ext_rollback_123',
-        'executed_qty': '0.01',
-        'avg_price': '3000.0'
-    })
+    client.contract_id = 'ETH-PERP'
+    client.config = MagicMock()
+    client.config.contract_id = 'ETH-PERP'
+    # Mock place_close_order (用于紧急平仓)
+    client.place_close_order = AsyncMock(return_value=OrderResult(
+        success=True,
+        order_id='ext_rollback_123',
+        side='sell',
+        size=Decimal('0.01'),
+        price=Decimal('3000.0'),
+        status='FILLED',
+        filled_size=Decimal('0.01')
+    ))
     return client
 
 
 @pytest.fixture
 def mock_lighter_client():
     """模拟Lighter客户端"""
+    from exchanges.base import OrderResult
     client = MagicMock()
-    client.place_order = AsyncMock(return_value={
-        'success': True,
-        'order_id': 'lit_rollback_456',
-        'executed_qty': '0.01',
-        'avg_price': '2998.0'
-    })
+    client.contract_id = '0'
+    client.config = MagicMock()
+    client.config.contract_id = '0'
+    # Mock place_close_order (用于紧急平仓)
+    client.place_close_order = AsyncMock(return_value=OrderResult(
+        success=True,
+        order_id='lit_rollback_456',
+        side='buy',
+        size=Decimal('0.01'),
+        price=Decimal('2998.0'),
+        status='FILLED',
+        filled_size=Decimal('0.01')
+    ))
     return client
 
 
@@ -223,6 +239,7 @@ class TestEmergencyClose:
     @pytest.mark.asyncio
     async def test_rollback_retry_on_failure(self, leg_rollback_handler, mock_extended_client):
         """T038: 测试失败重试机制"""
+        from exchanges.base import OrderResult
         # 模拟前两次失败，第三次成功
         call_count = 0
 
@@ -230,15 +247,21 @@ class TestEmergencyClose:
             nonlocal call_count
             call_count += 1
             if call_count < 3:
-                return {'success': False, 'error': 'temporary_error'}
-            return {
-                'success': True,
-                'order_id': 'ext_rollback_123',
-                'executed_qty': '0.01',
-                'avg_price': '3000.0'
-            }
+                return OrderResult(
+                    success=False,
+                    error_message='temporary_error'
+                )
+            return OrderResult(
+                success=True,
+                order_id='ext_rollback_123',
+                side='sell',
+                size=Decimal('0.01'),
+                price=Decimal('3000.0'),
+                status='FILLED',
+                filled_size=Decimal('0.01')
+            )
 
-        mock_extended_client.place_order = AsyncMock(side_effect=failing_place_order)
+        mock_extended_client.place_close_order = AsyncMock(side_effect=failing_place_order)
 
         result = ConcurrentOrderResult(
             extended_success=True,

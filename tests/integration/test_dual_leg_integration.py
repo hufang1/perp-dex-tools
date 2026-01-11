@@ -112,20 +112,30 @@ async def test_legging_rollback_flow(mock_config):
     from spread.models import ConcurrentOrderResult
     from spread.leg_rollback_handler import LegRollbackHandler
     from spread.performance_monitor import PerformanceMonitor
+    from exchanges.base import OrderResult
 
     monitor = PerformanceMonitor(mock_config)
 
     # 模拟Extended客户端
     extended_client = MagicMock()
-    extended_client.place_order = AsyncMock(return_value={
-        'success': True,
-        'order_id': 'ext_rollback_123',
-        'executed_qty': '0.01',
-        'avg_price': '3000.0'
-    })
+    extended_client.contract_id = 'ETH-PERP'
+    extended_client.config = MagicMock()
+    extended_client.config.contract_id = 'ETH-PERP'
+    extended_client.place_close_order = AsyncMock(return_value=OrderResult(
+        success=True,
+        order_id='ext_rollback_123',
+        side='sell',
+        size=Decimal('0.01'),
+        price=Decimal('3000.0'),
+        status='FILLED',
+        filled_size=Decimal('0.01')
+    ))
 
     # 模拟Lighter客户端
     lighter_client = MagicMock()
+    lighter_client.contract_id = '0'
+    lighter_client.config = MagicMock()
+    lighter_client.config.contract_id = '0'
 
     rollback_handler = LegRollbackHandler(
         config=mock_config,

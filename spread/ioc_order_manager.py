@@ -210,7 +210,8 @@ class IocOrderManager:
         self,
         opportunity: Dict[str, Any],
         extended_orderbook: Dict,
-        lighter_orderbook: Dict
+        lighter_orderbook: Dict,
+        order_type: str = 'OPEN'
     ) -> tuple[Dict, Dict]:
         """创建双腿IOC订单
 
@@ -224,6 +225,7 @@ class IocOrderManager:
             lighter_orderbook: Lighter订单簿
                 - 'bid': Decimal
                 - 'ask': Decimal
+            order_type: 'OPEN' 或 'CLOSE'，默认为'OPEN'
 
         Returns:
             (extended_order, lighter_order) 订单字典元组
@@ -233,6 +235,7 @@ class IocOrderManager:
             - Lighter订单使用time_in_force参数（下划线）
             - 买入价 = ask * (1 + SLIPPAGE_TOLERANCE)
             - 卖出价 = bid * (1 - SLIPPAGE_TOLERANCE)
+            - order_type='CLOSE'时，会使用place_close_order而不是place_open_order
         """
         side = opportunity['side']
         quantity = opportunity.get('quantity', Decimal('0.01'))
@@ -249,6 +252,8 @@ class IocOrderManager:
             price=extended_price,
             quantity=quantity
         )
+        # 添加order_type字段
+        extended_order['order_type'] = order_type
 
         # Lighter订单（方向相反）
         lighter_side = 'sell' if side == 'buy' else 'buy'
@@ -263,11 +268,14 @@ class IocOrderManager:
             price=lighter_price,
             quantity=quantity
         )
+        # 添加order_type字段
+        lighter_order['order_type'] = order_type
 
         self.logger.info(
             f"📝 [双腿订单创建] "
             f"Extended: {side} @ {extended_price}, "
-            f"Lighter: {lighter_side} @ {lighter_price}"
+            f"Lighter: {lighter_side} @ {lighter_price}, "
+            f"订单类型: {order_type}"
         )
 
         return extended_order, lighter_order

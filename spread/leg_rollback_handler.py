@@ -146,10 +146,12 @@ class LegRollbackHandler:
         for attempt in range(1, max_retries + 1):
             try:
                 # 使用市价单（Extended原生支持，Lighter用极端限价）
+                # 传入价格用于平仓
                 order = {
                     'side': side,
                     'quantity': str(quantity),
-                    'type': 'MARKET',  # 市价单确保成交
+                    'price': str(price),  # 传入持仓价格作为参考
+                    'order_type': 'CLOSE',  # 标记为平仓订单
                     'symbol': self.config.ticker
                 }
 
@@ -232,48 +234,144 @@ class LegRollbackHandler:
         """Extended下单适配器
 
         Args:
-            order: 订单字典
+            order: 订单字典，包含:
+                - side: 'buy' 或 'sell'
+                - quantity: 数量（字符串或Decimal）
+                - price: 价格（用于平仓）
+                - type: 'MARKET' 表示市价单（用于紧急平仓）
 
         Returns:
-            订单结果字典
+            订单结果字典，包含:
+                - success: bool
+                - order_id: str 或 None
+                - executed_qty: 成交数量
+                - avg_price: 成交均价
+                - error: str 或 None
         """
-        # 这里需要根据实际的Extended客户端API调整
-        return await self.extended_client.place_order(
-            symbol=order.get('symbol', self.config.ticker),
-            side=order['side'],
-            quantity=Decimal(order['quantity']),
-            price=Decimal(order.get('price', 0)),
-            order_type=order.get('type', 'MARKET')
-        )
+        # 获取contract_id
+        contract_id = getattr(self.extended_client, 'contract_id', None)
+        if not contract_id:
+            contract_id = getattr(self.extended_client.config, 'contract_id', None)
+
+        if not contract_id:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': 'Missing contract_id'
+            }
+
+        # 解析参数
+        side = order.get('side')  # 'buy' 或 'sell'
+        quantity = Decimal(order['quantity'])
+
+        # 对于紧急平仓，使用订单簿中的对手价
+        # 这里简化处理：使用传入的价格或获取当前对手价
+        price = Decimal(order.get('price', 0))
+        if price == 0:
+            # 如果没有指定价格，尝试获取当前对手价
+            # 这里简化处理，实际应该从订单簿获取
+            self.logger.warning("未指定平仓价格，使用默认值0")
+            price = Decimal('0')
+
+        try:
+            # 紧急平仓总是使用place_close_order
+            result = await self.extended_client.place_close_order(
+                contract_id=contract_id,
+                quantity=quantity,
+                price=price,
+                side=side
+            )
+
+            # 映射OrderResult到字典格式
+            return {
+                'success': result.success,
+                'order_id': result.order_id,
+                'executed_qty': str(result.filled_size or result.size or '0'),
+                'avg_price': str(result.price or '0'),
+                'error': result.error_message
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': str(e)
+            }
 
     async def _place_order_lighter(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """Lighter下单适配器
 
         Args:
-            order: 订单字典
+            order: 订单字典，包含:
+                - side: 'buy' 或 'sell'
+                - quantity: 数量（字符串或Decimal）
+                - price: 价格（用于平仓）
+                - type: 'MARKET' 表示市价单（用于紧急平仓）
 
         Returns:
-            订单结果字典
+            订单结果字典，包含:
+                - success: bool
+                - order_id: str 或 None
+                - executed_qty: 成交数量
+                - avg_price: 成交均价
+                - error: str 或 None
         """
-        # Lighter可能不支持市价单，使用极端限价模拟
-        if order.get('type') == 'MARKET':
-            # 获取当前对手价作为极端价格
-            # 买入：使用远高于市场的价格
-            # 卖出：使用远低于市场的价格
-            # 这里简化处理，实际应该从订单簿获取
-            if order['side'] == 'buy':
-                # 买入用高价
-                extreme_price = Decimal('999999')
-            else:
-                # 卖出用低价
-                extreme_price = Decimal('0.01')
-            order['price'] = str(extreme_price)
-            order['type'] = 'LIMIT'
+        # 获取contract_id
+        contract_id = getattr(self.lighter_client, 'contract_id', None)
+        if not contract_id:
+            contract_id = getattr(self.lighter_client.config, 'contract_id', None)
 
-        return await self.lighter_client.place_order(
-            symbol=order.get('symbol', self.config.ticker),
-            side=order['side'],
-            quantity=Decimal(order['quantity']),
-            price=Decimal(order.get('price', 0)),
-            order_type=order.get('type', 'LIMIT')
-        )
+        if not contract_id:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': 'Missing contract_id'
+            }
+
+        # 解析参数
+        side = order.get('side')  # 'buy' 或 'sell'
+        quantity = Decimal(order['quantity'])
+
+        # 对于紧急平仓，使用极端价格确保成交
+        price = Decimal(order.get('price', 0))
+        if price == 0 or order.get('type') == 'MARKET':
+            # 使用极端限价模拟市价单
+            if side == 'buy':
+                # 买入使用极端高价确保成交
+                price = Decimal('999999')
+            else:
+                # 卖出使用极端低价确保成交
+                price = Decimal('0.01')
+
+        try:
+            # 紧急平仓总是使用place_close_order
+            result = await self.lighter_client.place_close_order(
+                contract_id=contract_id,
+                quantity=quantity,
+                price=price,
+                side=side
+            )
+
+            # 映射OrderResult到字典格式
+            return {
+                'success': result.success,
+                'order_id': result.order_id,
+                'executed_qty': str(result.filled_size or result.size or '0'),
+                'avg_price': str(result.price or '0'),
+                'error': result.error_message
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': str(e)
+            }

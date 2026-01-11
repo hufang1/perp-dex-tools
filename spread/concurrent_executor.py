@@ -363,7 +363,7 @@ class ConcurrentExecutor:
             order = {
                 'side': side,
                 'quantity': str(quantity),
-                'type': 'MARKET',  # 使用市价单
+                'order_type': 'CLOSE',  # 标记为平仓订单
                 'symbol': self.config.ticker
             }
 
@@ -401,36 +401,145 @@ class ConcurrentExecutor:
         """Extended下单适配器
 
         Args:
-            order: 订单字典
+            order: 订单字典，包含:
+                - side: 'buy' 或 'sell'
+                - quantity: 数量（字符串或Decimal）
+                - price: 价格（可选，用于平仓）
+                - order_type: 'OPEN' 或 'CLOSE'（默认OPEN）
 
         Returns:
-            订单结果字典
+            订单结果字典，包含:
+                - success: bool
+                - order_id: str 或 None
+                - executed_qty: 成交数量
+                - avg_price: 成交均价
+                - error: str 或 None
         """
-        # 这里需要根据实际的Extended客户端API调整
-        # 示例实现：
-        return await self.extended_client.place_order(
-            symbol=order.get('symbol', self.config.ticker),
-            side=order['side'],
-            quantity=Decimal(order['quantity']),
-            price=Decimal(order.get('price', 0)),
-            order_type=order.get('type', 'LIMIT')
-        )
+        # 获取contract_id
+        contract_id = getattr(self.extended_client, 'contract_id', None)
+        if not contract_id:
+            contract_id = getattr(self.extended_client.config, 'contract_id', None)
+
+        if not contract_id:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': 'Missing contract_id'
+            }
+
+        # 解析参数
+        direction = order.get('side')  # 'buy' 或 'sell'
+        quantity = Decimal(order['quantity'])
+        order_type = order.get('order_type', 'OPEN')  # 默认开仓
+
+        try:
+            if order_type == 'CLOSE':
+                # 平仓订单
+                price = Decimal(order.get('price', 0))
+                result = await self.extended_client.place_close_order(
+                    contract_id=contract_id,
+                    quantity=quantity,
+                    price=price,
+                    side=direction
+                )
+            else:
+                # 开仓订单
+                result = await self.extended_client.place_open_order(
+                    contract_id=contract_id,
+                    quantity=quantity,
+                    direction=direction,
+                    post_only=False  # IOC订单总是taker
+                )
+
+            # 映射OrderResult到字典格式
+            return {
+                'success': result.success,
+                'order_id': result.order_id,
+                'executed_qty': str(result.filled_size or result.size or '0'),
+                'avg_price': str(result.price or '0'),
+                'error': result.error_message
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': str(e)
+            }
 
     async def _place_order_lighter(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """Lighter下单适配器
 
         Args:
-            order: 订单字典
+            order: 订单字典，包含:
+                - side: 'buy' 或 'sell'
+                - quantity: 数量（字符串或Decimal）
+                - price: 价格（可选，用于平仓）
+                - order_type: 'OPEN' 或 'CLOSE'（默认OPEN）
 
         Returns:
-            订单结果字典
+            订单结果字典，包含:
+                - success: bool
+                - order_id: str 或 None
+                - executed_qty: 成交数量
+                - avg_price: 成交均价
+                - error: str 或 None
         """
-        # 这里需要根据实际的Lighter客户端API调整
-        # 示例实现：
-        return await self.lighter_client.place_order(
-            symbol=order.get('symbol', self.config.ticker),
-            side=order['side'],
-            quantity=Decimal(order['quantity']),
-            price=Decimal(order.get('price', 0)),
-            order_type=order.get('type', 'LIMIT')
-        )
+        # 获取contract_id
+        contract_id = getattr(self.lighter_client, 'contract_id', None)
+        if not contract_id:
+            contract_id = getattr(self.lighter_client.config, 'contract_id', None)
+
+        if not contract_id:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': 'Missing contract_id'
+            }
+
+        # 解析参数
+        direction = order.get('side')  # 'buy' 或 'sell'
+        quantity = Decimal(order['quantity'])
+        order_type = order.get('order_type', 'OPEN')  # 默认开仓
+
+        try:
+            if order_type == 'CLOSE':
+                # 平仓订单
+                price = Decimal(order.get('price', 0))
+                result = await self.lighter_client.place_close_order(
+                    contract_id=contract_id,
+                    quantity=quantity,
+                    price=price,
+                    side=direction
+                )
+            else:
+                # 开仓订单
+                result = await self.lighter_client.place_open_order(
+                    contract_id=contract_id,
+                    quantity=quantity,
+                    direction=direction
+                )
+
+            # 映射OrderResult到字典格式
+            return {
+                'success': result.success,
+                'order_id': result.order_id,
+                'executed_qty': str(result.filled_size or result.size or '0'),
+                'avg_price': str(result.price or '0'),
+                'error': result.error_message
+            }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'order_id': None,
+                'executed_qty': '0',
+                'avg_price': '0',
+                'error': str(e)
+            }

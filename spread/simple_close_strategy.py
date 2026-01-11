@@ -144,7 +144,8 @@ class SimpleCloseStrategy:
         extended_order, lighter_order = self.ioc_order_manager.create_dual_leg_orders(
             opportunity=opportunity,
             extended_orderbook=extended_orderbook,
-            lighter_orderbook=lighter_orderbook
+            lighter_orderbook=lighter_orderbook,
+            order_type='CLOSE'  # 标记为平仓订单
         )
 
         self.logger.info(
