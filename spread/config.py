@@ -88,7 +88,7 @@ class SpreadArbConfig:
     # ==================== Maker/Taker策略配置 ====================
     maker_timeout_seconds: int = 5                         # Maker单超时时间 (秒)
     maker_timeout_action: str = "convert_to_taker"          # 超时后动作: "convert_to_taker" 或 "cancel"
-    use_maker_orders: bool = True                            # 是否使用maker单 (True=使用maker节省手续费)
+    use_maker_orders: bool = False                           # 是否使用maker单 (False=统一使用taker避免超时转换错误)
     maker_price_tick: Decimal = Decimal('0.01')             # Maker价格精度 (美元) - Extended价格最小单位
     min_profit_threshold: Decimal = Decimal('0.0002')       # 最小盈利阈值 (0.02%) - Maker转换条件
 
