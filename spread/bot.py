@@ -528,12 +528,20 @@ class SpreadArbitrageBot:
                                 self.is_opening = True
                                 try:
                                     # T085: 传递时间戳和新鲜度结果用于TradeOperationRecord
-                                    await self._open_new_pair(
+                                    result = await self._open_new_pair(
                                         opportunity,
                                         ext_ts=ext_ts,
                                         lit_ts=lit_ts,
                                         freshness_results=freshness_results
                                     )
+                                    # 🔴 FIX: 检查返回值，如果安全检查失败则跳过
+                                    if not result:
+                                        self.logger.warning(
+                                            "⚠️ 开仓被安全检查拒绝，跳过此机会"
+                                        )
+                                        # 短暂暂停，避免立即重试
+                                        await asyncio.sleep(1.0)
+                                        continue
                                 finally:
                                     self.is_opening = False
                         else:
@@ -1556,6 +1564,11 @@ class SpreadArbitrageBot:
                     f"❌ [双边失败] Extended: {concurrent_result.extended_error}, "
                     f"Lighter: {concurrent_result.lighter_error}"
                 )
+                # 🔴 FIX: 记录对冲失败到安全监控器
+                await self.safety_monitor.record_hedge_attempt(
+                    success=False,
+                    failure_reason=f"双边失败: {concurrent_result.extended_error}, {concurrent_result.lighter_error}"
+                )
                 self.success_tracker.record_operation(SpreadOperationResult(
                     timestamp=time.time(),
                     operation_type=OperationType.OPEN_FAILED,
@@ -1571,6 +1584,11 @@ class SpreadArbitrageBot:
                 legging_side = 'extended' if concurrent_result.extended_success else 'lighter'
                 self.logger.error(
                     f"🚨 [单腿持仓] {legging_side}成交，触发紧急回滚！"
+                )
+                # 🔴 FIX: 记录单腿失败到安全监控器
+                await self.safety_monitor.record_hedge_attempt(
+                    success=False,
+                    failure_reason=f"单腿持仓: {legging_side}成交, {legging_side}失败"
                 )
 
                 if self.leg_rollback_handler is not None:
@@ -1615,6 +1633,8 @@ class SpreadArbitrageBot:
                 return False
 
             # 双腿成交成功
+            # 🔴 FIX: 记录对冲成功到安全监控器
+            await self.safety_monitor.record_hedge_attempt(success=True)
             pair = SpreadPair(
                 pair_id=self.next_pair_id,
                 extended_side=opportunity['side'],

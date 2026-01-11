@@ -338,15 +338,50 @@ class LighterClient(BaseExchangeClient):
                 status=self.current_order.status
             )
         else:
-            # No WebSocket update yet - return based on order_result
-            return OrderResult(
-                success=True,  # Order was submitted successfully
-                order_id=order_result.order_id,
-                side=direction,
-                size=quantity,
-                price=order_price,
-                status='OPEN'  # IOC orders execute immediately
-            )
+            # No WebSocket update yet - query order status to verify if filled
+            # IOC orders should either fill immediately or be cancelled
+            try:
+                # Query the order status from the exchange
+                active_orders = await self.get_active_orders(contract_id)
+                filled_order = None
+                for order in active_orders:
+                    if order.order_id == order_result.order_id:
+                        filled_order = order
+                        break
+
+                if filled_order and filled_order.status == 'FILLED':
+                    # Order was filled but WebSocket callback was delayed
+                    return OrderResult(
+                        success=True,
+                        order_id=filled_order.order_id,
+                        side=direction,
+                        size=quantity,
+                        price=order_price,
+                        status='FILLED'
+                    )
+                else:
+                    # IOC order was not filled - it was rejected or cancelled
+                    # Return failure so the bot can handle it properly
+                    return OrderResult(
+                        success=False,  # FIX: Return False for unfilled IOC orders
+                        order_id=order_result.order_id,
+                        side=direction,
+                        size=Decimal('0'),  # No fill
+                        price=order_price,
+                        status='CANCELLED',
+                        error_message='IOC order not filled within 0.5s'
+                    )
+            except Exception as e:
+                # If query fails, assume order failed for safety
+                return OrderResult(
+                    success=False,
+                    order_id=order_result.order_id,
+                    side=direction,
+                    size=Decimal('0'),
+                    price=order_price,
+                    status='FAILED',
+                    error_message=f'Failed to query order status: {str(e)}'
+                )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
         """Get active close orders for a contract using official SDK."""
