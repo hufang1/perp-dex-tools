@@ -69,21 +69,7 @@ class WebSocketManager:
         # 订阅的交易对
         self._symbol: Optional[str] = None
 
-        # Extended API认证
-        self._extended_api_key: Optional[str] = None
 
-    # ========================================================================
-    # 连接管理
-    # ========================================================================
-
-    def set_extended_api_key(self, api_key: str) -> None:
-        """设置Extended API密钥（用于WebSocket认证）
-
-        Args:
-            api_key: Extended API密钥
-        """
-        self._extended_api_key = api_key
-        self.logger.debug("Extended API密钥已设置")
 
     async def connect_extended(self) -> None:
         """连接到Extended交易所WebSocket
@@ -104,19 +90,12 @@ class WebSocketManager:
             import websockets
 
             # 准备认证头
-            extra_headers = None
-            if self._extended_api_key:
-                extra_headers = [("X-API-Key", self._extended_api_key)]
-                self.logger.debug("使用X-API-Key认证头连接Extended WebSocket")
-            else:
-                self.logger.warning("未设置Extended API密钥，可能导致403错误")
 
             self.ws_extended = await websockets.connect(
                 url,
                 ping_interval=20,
                 ping_timeout=20,
                 close_timeout=10,
-                extra_headers=extra_headers  # 添加认证头
             )
 
             self._connected_extended = True
