@@ -162,15 +162,12 @@ class TestPositionBalanceLogging:
         """
         trade_logger = TradeLogger(log_file_path="logs/test_trade.log")
 
-        # 创建仓位平衡状态
+        # 创建仓位平衡状态（修复：timestamp在前，其他字段自动计算）
         balance = PositionBalance(
+            timestamp=1234567890.0,
             extended_total_qty=Decimal('1.0'),
             lighter_total_qty=Decimal('0.95'),
-            diff_qty=Decimal('0.05'),
-            diff_rate=Decimal('0.0526'),
-            is_imbalanced=True,
-            warning_level="WARN",
-            timestamp=1234567890.0
+            diff_qty=Decimal('0.05')
         )
 
         # 测试日志记录
@@ -189,15 +186,12 @@ class TestPositionBalanceLogging:
         """测试仓位平衡OK状态"""
         trade_logger = TradeLogger(log_file_path="logs/test_trade.log")
 
-        # 创建平衡状态
+        # 创建平衡状态（修复：timestamp在前，其他字段自动计算）
         balance = PositionBalance(
+            timestamp=1234567890.0,
             extended_total_qty=Decimal('1.0'),
             lighter_total_qty=Decimal('0.99'),
-            diff_qty=Decimal('0.01'),
-            diff_rate=Decimal('0.0101'),
-            is_imbalanced=False,
-            warning_level="OK",
-            timestamp=1234567890.0
+            diff_qty=Decimal('0.01')
         )
 
         # 测试日志记录
@@ -210,15 +204,12 @@ class TestPositionBalanceLogging:
         """测试仓位平衡CRITICAL状态"""
         trade_logger = TradeLogger(log_file_path="logs/test_trade.log")
 
-        # 创建严重失衡状态
+        # 创建严重失衡状态（修复：timestamp在前，其他字段自动计算）
         balance = PositionBalance(
+            timestamp=1234567890.0,
             extended_total_qty=Decimal('1.0'),
             lighter_total_qty=Decimal('0.5'),
-            diff_qty=Decimal('0.5'),
-            diff_rate=Decimal('1.0'),
-            is_imbalanced=True,
-            warning_level="CRITICAL",
-            timestamp=1234567890.0
+            diff_qty=Decimal('0.5')
         )
 
         # 测试日志记录
