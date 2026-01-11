@@ -22,6 +22,7 @@ from .data_collector import DataCollector
 from .trade_analyzer import TradeAnalyzer
 from .spread_recorder import SpreadRecorder
 from .safety_monitor import SafetyMonitor
+from .adaptive_threshold_manager import AdaptiveThresholdManager
 
 
 class SpreadArbitrageBot:
@@ -82,6 +83,12 @@ class SpreadArbitrageBot:
         self.safety_monitor = SafetyMonitor(config, self.logger)
         if config.safety_enabled:
             self.logger.info("安全监控器已启用")
+
+        # P1: 动态阈值管理器（010-fix-position-imbalance）
+        self.adaptive_threshold_manager: Optional[AdaptiveThresholdManager] = None
+        if config.adaptive_threshold_enabled:
+            self.adaptive_threshold_manager = AdaptiveThresholdManager(config, self.safety_monitor)
+            self.logger.info("动态阈值管理器已启用")
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -301,9 +308,14 @@ class SpreadArbitrageBot:
                         )
 
                         if is_sufficient:
+                            # P1: 使用动态阈值（010-fix-position-imbalance）
+                            if self.adaptive_threshold_manager:
+                                threshold = self.adaptive_threshold_manager.get_effective_min_spread_rate()
+                            else:
+                                threshold = self.config.effective_min_spread
+
                             # T030: DEBUG级别日志记录真实价差计算过程
                             # T086: 添加阈值对比日志
-                            threshold = self.config.effective_min_spread
                             self.logger.debug(
                                 f"📊 [真实价差详情] direction={opportunity.get('direction', 'N/A')}, "
                                 f"extended_price={opportunity['extended_price']:.4f}, "
