@@ -345,10 +345,21 @@ class LighterClient(BaseExchangeClient):
                     status=self.current_order.status
                 )
             else:
-                # order_id为None，记录警告并继续查询API
+                # 🔴 FIX: 013-fix-order-timeout - order_id为None是无效状态
+                # 问题: 之前的代码继续执行，最终可能返回success=True, order_id=None
+                # 解决: 直接返回失败，不继续查询API（使用临时ID查询不到真正的订单）
                 self.logger.log(
-                    f"[警告] current_order存在但order_id为None，status={self.current_order.status}，将查询API验证",
+                    f"[警告] current_order存在但order_id为None，status={self.current_order.status}，直接返回失败",
                     level="WARNING"
+                )
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    side=direction,
+                    size=Decimal('0'),
+                    price=order_price,
+                    status='FAILED',
+                    error_message='No order_id in callback - cannot verify order status'
                 )
         else:
             # No WebSocket update yet - query order status to verify if filled

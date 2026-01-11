@@ -268,17 +268,25 @@ class ExtendedClient(BaseExchangeClient):
 
                 self.logger.log(f"[DEBUG] spread={spread}, post_only={post_only}", level="INFO")
 
-                # set timeout to 9 seconds for open orders to avoid orders being filled right when trading_bot hit 10s timeout and call cancel_order
-                # Place the order using official SDK
-                order_result = await self.perpetual_trading_client.place_order(
-                    market_name=contract_id,
-                    amount_of_synthetic=quantity,
-                    price=rounded_price,
-                    side=side,
-                    time_in_force=TimeInForce.GTT,
-                    post_only=post_only,
-                    expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
-                )
+                # 🔴 FIX: 013-fix-order-timeout - SDK调用本身超时
+                # 问题: perpetual_trading_client.place_order()耗时>500ms导致并发执行器超时
+                # 解决: 使用asyncio.wait_for包装SDK调用，400ms超时
+                try:
+                    order_result = await asyncio.wait_for(
+                        self.perpetual_trading_client.place_order(
+                            market_name=contract_id,
+                            amount_of_synthetic=quantity,
+                            price=rounded_price,
+                            side=side,
+                            time_in_force=TimeInForce.GTT,
+                            post_only=post_only,
+                            expire_time = utc_now() + timedelta(days=1), # SDK 1 hour default
+                        ),
+                        timeout=0.4  # 400ms超时 - 在500ms并发执行器超时前返回
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.log(f"[DEBUG] SDK调用超时(400ms)，返回失败", level="ERROR")
+                    return OrderResult(success=False, error_message='SDK call timeout')
 
                 self.logger.log(f"[DEBUG] SDK返回: status={order_result.status if order_result else 'None'}", level="INFO")
 
