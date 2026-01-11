@@ -180,20 +180,8 @@ cat data/spreads_YYYY_MM_DD.csv
    - 清理时导出CSV数据
 
 **测试覆盖**:
-- tests/test_order_manager.py: Taker订单测试（TestTakerOrderEnforcement）
-- tests/test_hedge_manager.py: Taker订单对冲测试
-- tests/test_position_consistency.py: 仓位一致性验证测试
-- tests/test_success_tracker.py: 成功率追踪器测试
-- tests/integration/test_taker_order_integration.py: Taker订单集成测试
-- tests/integration/test_position_consistency_integration.py: 仓位一致性集成测试
-- tests/integration/test_success_tracking_integration.py: 成功率统计集成测试
 
 **配置项** (spread/config.py):
-- position_consistency_threshold: 0.001 ETH（仓位差异数量阈值）
-- position_consistency_rate_threshold: 10%（差异率阈值）
-- enable_position_consistency_check: True（启用仓位一致性检查）
-- enable_success_tracking: True（启用成功率追踪）
-- stats_export_interval: 3600秒（统计导出间隔）
 
 ### 010-fix-position-imbalance: 修复仓位失衡和优化开仓标准（2026-01-11）
 **重大修复**: 修复Extended 0.21 ETH vs Lighter 0.02 ETH的严重仓位失衡问题，实现安全监控和动态阈值
@@ -235,7 +223,6 @@ cat data/spreads_YYYY_MM_DD.csv
    - reduced_profit_target_rate: 0.02%
 
 **P2 - 优化平仓策略**:
-- profit_target_rate: 0.05% → 0.02%
 
 **测试覆盖**:
 

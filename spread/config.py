@@ -133,6 +133,36 @@ class SpreadArbConfig:
     enable_success_tracking: bool = True                          # 启用成功率追踪（默认启用）
     stats_export_interval: int = 3600                             # 统计导出间隔（秒，默认1小时）
 
+    # ==================== 011-async-ws-ioc-trading: 异步重构配置 ====================
+    # 性能延迟配置
+    max_tick_to_trade_latency_ms: float = 10.0                   # 行情处理最大延迟（毫秒，默认10ms）
+    max_execution_latency_ms: float = 300.0                       # 执行最大延迟（毫秒，默认300ms）
+    max_data_age_ms: float = 500.0                                # 数据最大有效期（毫秒，默认500ms）
+    concurrent_order_send_threshold_ms: float = 5.0               # 并发订单发送时间差阈值（毫秒，默认5ms）
+
+    # IOC订单配置
+    use_ioc_orders: bool = True                                   # 是否使用IOC订单（默认True）
+    ioc_slippage_tolerance_rate: Decimal = Decimal('0.0005')      # IOC滑点容忍度（默认0.05%）
+    order_timeout_ms: int = 500                                   # 订单超时时间（毫秒，默认500ms）
+    emergency_close_timeout_ms: int = 1000                        # 紧急平仓超时时间（毫秒，默认1000ms）
+
+    # 利润与风控配置
+    min_net_profit_rate: Decimal = Decimal('0.0002')              # 最低净利要求（默认0.02%）
+    expected_slippage_cost_rate: Decimal = Decimal('0.0001')      # 预期滑点成本（默认0.01%）
+    max_slippage_warning_rate: Decimal = Decimal('0.002')         # 最大滑点警告阈值（默认0.2%）
+    stop_loss_threshold_rate: Decimal = Decimal('0.005')          # 止损阈值（默认0.5%）
+    single_leg_warning_seconds: int = 2                           # 单腿持仓警告时间（秒，默认2秒）
+
+    # 日志配置
+    enable_enhanced_logging: bool = True                          # 启用增强日志（默认True）
+    log_all_timestamps: bool = True                               # 记录所有时间戳（默认True）
+    enable_console_warnings: bool = True                          # 启用控制台高亮警告（默认True）
+
+    # 风控配置
+    enable_leg_risk_guard: bool = True                            # 启用原子性风控（默认True）
+    enable_profitability_check: bool = True                       # 启用利润率检查（默认True）
+    enable_data_freshness_check: bool = True                      # 启用数据新鲜度检查（默认True）
+
     def __post_init__(self):
         """验证配置"""
         # 验证价差率

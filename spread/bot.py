@@ -31,6 +31,21 @@ from .models import (
     OperationType, OperationStatus, ExchangeType, FailureReason
 )
 
+# 011-async-ws-ioc-trading: 异步重构模块
+from .performance_monitor import PerformanceMonitor
+from .websocket_manager import WebSocketManager
+from .concurrent_executor import ConcurrentExecutor
+from .ioc_order_manager import IocOrderManager
+from .risk_validator import RiskValidator
+from .models import (
+    OrderBookSnapshot,
+    TimingRecord,
+    DataFreshnessResult,
+    SlippageCheckResult,
+    ProfitabilityCheckResult,
+    TradeOperationRecord,
+)
+
 
 class SpreadArbitrageBot:
     """价差套利主引擎"""
@@ -100,7 +115,34 @@ class SpreadArbitrageBot:
         # 001-fix-order-type: 成功率追踪器
         self.success_tracker = SuccessTracker(output_dir="data")
         self.logger.info("成功率追踪器已初始化")
-        
+
+        # ========================================================================
+        # 011-async-ws-ioc-trading: 异步重构模块初始化
+        # ========================================================================
+
+        # 性能监控器 - 所有异步功能的核心
+        self.performance_monitor = PerformanceMonitor(config, self.logger)
+        self.logger.info("性能监控器已初始化")
+
+        # WebSocket管理器 - 实时订单簿数据
+        self.websocket_manager: Optional[WebSocketManager] = None
+        # WebSocket将在_initialize中连接，避免在__init__中执行异步操作
+
+        # 并发执行器 - 双腿并发交易
+        self.concurrent_executor: Optional[ConcurrentExecutor] = None
+        # 将在WebSocket连接后初始化，需要传入exchange clients
+
+        # IOC订单管理器 - IOC订单创建和定价
+        self.ioc_order_manager = IocOrderManager(config, self.logger)
+        if config.use_ioc_orders:
+            self.logger.info("IOC订单管理器已启用")
+
+        # 风控验证器 - 开仓前综合验证
+        self.risk_validator = RiskValidator(config, self.performance_monitor, self.logger)
+        self.logger.info("风控验证器已初始化")
+
+        # ========================================================================
+
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
             'bids': {},
@@ -199,15 +241,50 @@ class SpreadArbitrageBot:
     async def _initialize(self):
         """初始化连接和客户端"""
         self.logger.info("初始化中...")
-        
+
+        # ========================================================================
+        # 011-async-ws-ioc-trading: 初始化WebSocket管理器
+        # ========================================================================
+        self.websocket_manager = WebSocketManager(self.config, self.logger)
+
+        # 设置订单簿回调
+        self.websocket_manager.set_orderbook_callback(self._handle_websocket_orderbook)
+
+        # 连接WebSocket（如果启用了）
+        try:
+            self.logger.info("连接WebSocket...")
+            await self.websocket_manager.connect_all()
+
+            # 订阅订单簿
+            symbol = f"{self.config.ticker}-USD"
+            await self.websocket_manager.subscribe_orderbook('extended', symbol)
+            await self.websocket_manager.subscribe_orderbook('lighter', symbol)
+
+            self.logger.info("✅ WebSocket已连接并订阅订单簿")
+        except Exception as e:
+            self.logger.warning(f"⚠️ WebSocket连接失败: {e}，将使用现有订单簿更新机制")
+            # WebSocket失败不影响原有功能，继续使用原有的订单簿更新机制
+
+        # 初始化并发执行器
+        self.concurrent_executor = ConcurrentExecutor(
+            config=self.config,
+            monitor=self.performance_monitor,
+            extended_client=self.extended_client,
+            lighter_client=self.lighter_client,
+            logger=self.logger
+        )
+        self.logger.info("✅ 并发执行器已初始化")
+
+        # ========================================================================
+
         # Extended 和 Lighter 客户端已经在外部初始化并连接
         # 这里只需要等待订单簿数据就绪
-        
+
         # 设置订单更新回调
         self.extended_client.setup_order_update_handler(
             self._handle_extended_order_update
         )
-        
+
         # 等待订单簿就绪
         self.logger.info("等待订单簿数据...")
         timeout = 30
@@ -352,6 +429,35 @@ class SpreadArbitrageBot:
                                 f"(阈值: {threshold:.4%})"
                             )
 
+                            # ========================================================================
+                            # T084: 011-async-ws-ioc-trading 时间戳记录
+                            # ========================================================================
+                            # 记录信号时间戳
+                            self.performance_monitor.record_timestamp('signal')
+
+                            # 获取数据时间戳
+                            ext_ts, lit_ts = self._get_orderbook_timestamps()
+                            if ext_ts:
+                                self.performance_monitor.record_timestamp('data_A')
+                            if lit_ts:
+                                self.performance_monitor.record_timestamp('data_B')
+
+                            # 数据新鲜度检查
+                            both_fresh = True
+                            freshness_results = []
+                            if self.config.enable_data_freshness_check:
+                                # 如果有WebSocket时间戳，使用它们进行验证
+                                if ext_ts and lit_ts:
+                                    both_fresh, freshness_results = self.risk_validator.validate_data_freshness(ext_ts, lit_ts)
+                                    if not both_fresh:
+                                        self.logger.warning(
+                                            f"⚠️ 数据过期，跳过此机会"
+                                        )
+                                        self.stats['opportunities_rejected'] += 1
+                                        await asyncio.sleep(0.1)
+                                        continue
+                            # ========================================================================
+
                             # 🔴 关键修复：检查是否正在开仓，防止并发
                             if self.is_opening:
                                 self.logger.warning(
@@ -371,7 +477,13 @@ class SpreadArbitrageBot:
 
                                 self.is_opening = True
                                 try:
-                                    await self._open_new_pair(opportunity)
+                                    # T085: 传递时间戳和新鲜度结果用于TradeOperationRecord
+                                    await self._open_new_pair(
+                                        opportunity,
+                                        ext_ts=ext_ts,
+                                        lit_ts=lit_ts,
+                                        freshness_results=freshness_results
+                                    )
                                 finally:
                                     self.is_opening = False
                         else:
@@ -826,8 +938,29 @@ class SpreadArbitrageBot:
             lighter_close_price=lighter_close_price
         )
     
-    async def _open_new_pair(self, opportunity: Dict[str, Any]) -> bool:
-        """开新的套利对"""
+    async def _open_new_pair(
+        self,
+        opportunity: Dict[str, Any],
+        ext_ts: Optional[float] = None,
+        lit_ts: Optional[float] = None,
+        freshness_results: Optional[List[DataFreshnessResult]] = None
+    ) -> bool:
+        """开新的套利对
+
+        Args:
+            opportunity: 机会字典
+            ext_ts: Extended数据时间戳
+            lit_ts: Lighter数据时间戳
+            freshness_results: 数据新鲜度检查结果
+        """
+        # T084: 获取信号时间戳
+        signal_ts = self.performance_monitor.get_latency('signal', 'data_A')
+        if signal_ts is None:
+            signal_ts = 0  # 使用时间戳记录中的值
+
+        # T084: 记录计算时间戳
+        self.performance_monitor.record_timestamp('calc')
+
         try:
             # P0: 安全检查（010-fix-position-imbalance）
             if self.safety_monitor.should_pause_opening():
@@ -922,6 +1055,9 @@ class SpreadArbitrageBot:
 
             self.logger.info(f"[001-fix-order-type] 使用Taker订单: side={opportunity['side']}, price=${extended_price:.4f}")
 
+            # T084: 记录Extended发送时间戳
+            self.performance_monitor.record_timestamp('send_A')
+
             # 1. Extended 下单（强制post_only=False使用taker）
             order = await self.order_manager.place_spread_maker_order(
                 side=opportunity['side'],
@@ -929,6 +1065,9 @@ class SpreadArbitrageBot:
                 quantity=opportunity['quantity'],
                 post_only=False  # 001-fix-order-type: 强制taker订单
             )
+
+            # T084: 记录Extended ACK时间戳（订单ID返回即视为ACK）
+            self.performance_monitor.record_timestamp('ack_A')
 
             self.logger.info(f"[DEBUG] 下单返回: success={order['success']}, order_id={order.get('order_id')}")
 
@@ -958,7 +1097,10 @@ class SpreadArbitrageBot:
                 self.stats['failed_opens'] += 1
                 self.consecutive_failures += 1
                 return False
-            
+
+            # T084: 记录Lighter发送时间戳
+            self.performance_monitor.record_timestamp('send_B')
+
             # 3. 执行对冲
             hedge_side = 'sell' if opportunity['side'] == 'buy' else 'buy'
             hedge_result = await self.hedge_manager.execute_hedge(
@@ -966,6 +1108,9 @@ class SpreadArbitrageBot:
                 quantity=fill_result['filled_quantity'],
                 expected_price=opportunity['lighter_price']
             )
+
+            # T084: 记录Lighter ACK时间戳
+            self.performance_monitor.record_timestamp('ack_B')
 
             # P0: 记录对冲尝试结果到安全监控器（010-fix-position-imbalance）
             await self.safety_monitor.record_hedge_attempt(
@@ -1086,6 +1231,26 @@ class SpreadArbitrageBot:
                 pair_id=pair.pair_id,
                 spread_rate=pair.open_spread_rate
             ))
+
+            # T085: 创建TradeOperationRecord用于CSV导出
+            timestamps = self.performance_monitor._timestamps
+            decision_record = TradeOperationRecord(
+                timestamp=time.time(),
+                operation_type='OPEN',
+                exchange='BOTH',
+                signal_ts=timestamps.get('signal'),
+                data_ts_A=ext_ts,
+                data_ts_B=lit_ts,
+                calc_ts=timestamps.get('calc'),
+                send_A_ts=timestamps.get('send_A'),
+                send_B_ts=timestamps.get('send_B'),
+                ack_A_ts=timestamps.get('ack_A'),
+                ack_B_ts=timestamps.get('ack_B'),
+                spread_rate=opportunity.get('spread_rate'),
+                decision='ALLOWED',
+                status='SUCCESS',
+            )
+            self.performance_monitor.record_decision(decision_record)
 
             # T041: 增强开仓日志 (包含交易所、方向、价格、数量、时间戳、订单ID)
             self.logger.info(
@@ -2164,10 +2329,75 @@ class SpreadArbitrageBot:
 
         return (extended_bid, extended_ask, lighter_bid, lighter_ask)
 
+    # ========================================================================
+    # 011-async-ws-ioc-trading: WebSocket订单簿回调
+    # ========================================================================
+
+    def _handle_websocket_orderbook(self, exchange: str, orderbook: Dict[str, Any]) -> None:
+        """处理WebSocket订单簿更新回调
+
+        Args:
+            exchange: 'extended' 或 'lighter'
+            orderbook: 订单簿数据 {'bid': Decimal, 'ask': Decimal, 'bid_qty': Decimal, 'ask_qty': Decimal, 'timestamp': float}
+        """
+        try:
+            # 更新本地订单簿数据（保持与现有格式兼容）
+            if exchange == 'extended':
+                if orderbook.get('bid') and orderbook.get('bid'):
+                    self.extended_orderbook['bids'] = {orderbook['bid']: orderbook.get('bid_qty', Decimal('1'))}
+                if orderbook.get('ask') and orderbook.get('ask'):
+                    self.extended_orderbook['asks'] = {orderbook['ask']: orderbook.get('ask_qty', Decimal('1'))}
+                self.extended_orderbook_ready = True
+            elif exchange == 'lighter':
+                if orderbook.get('bid') and orderbook.get('bid'):
+                    self.lighter_orderbook['bids'] = {orderbook['bid']: orderbook.get('bid_qty', Decimal('1'))}
+                if orderbook.get('ask') and orderbook.get('ask'):
+                    self.lighter_orderbook['asks'] = {orderbook['ask']: orderbook.get('ask_qty', Decimal('1'))}
+                self.lighter_orderbook_ready = True
+
+            # 调试日志
+            if self.config.log_all_timestamps:
+                self.logger.debug(
+                    f"[WebSocket订单簿] {exchange}: bid={orderbook.get('bid')}, "
+                    f"ask={orderbook.get('ask')}, ts={orderbook.get('timestamp'):.0f}"
+                )
+
+        except Exception as e:
+            self.logger.error(f"处理WebSocket订单簿更新错误 ({exchange}): {e}")
+
+    def _get_orderbook_timestamps(self) -> tuple[Optional[float], Optional[float]]:
+        """获取订单簿时间戳（用于数据新鲜度检查）
+
+        Returns:
+            (extended_timestamp_ms, lighter_timestamp_ms)
+        """
+        ext_ts = None
+        lit_ts = None
+
+        if self.websocket_manager:
+            ext_ts = self.websocket_manager.get_orderbook_timestamp('extended')
+            lit_ts = self.websocket_manager.get_orderbook_timestamp('lighter')
+
+        return ext_ts, lit_ts
+
+    # ========================================================================
+
     async def _cleanup(self):
         """清理资源"""
         self.logger.info("清理资源...")
         self.stop_flag = True
+
+        # ========================================================================
+        # 011-async-ws-ioc-trading: 断开WebSocket连接
+        # ========================================================================
+        if self.websocket_manager:
+            self.logger.info("断开WebSocket连接...")
+            await self.websocket_manager.disconnect_all()
+
+        # 导出性能监控统计
+        if self.config.enable_enhanced_logging:
+            self.performance_monitor.log_stats_summary()
+        # ========================================================================
 
         # 停止价差记录器
         if self.spread_recorder:
@@ -2192,6 +2422,15 @@ class SpreadArbitrageBot:
         summary_file = self.success_tracker.export_summary_csv()
         if summary_file:
             self.logger.info(f"  成功率汇总已导出: {summary_file}")
+
+        # T086: 011-async-ws-ioc-trading - 导出性能数据和决策记录
+        performance_file = self.performance_monitor.export_performance_data()
+        if performance_file:
+            self.logger.info(f"  性能数据已导出: {performance_file}")
+
+        decisions_file = self.performance_monitor.export_decision_records()
+        if decisions_file:
+            self.logger.info(f"  决策记录已导出: {decisions_file}")
 
         # 🔴 显示未对冲仓位警告
         if len(self.unhedged_positions) > 0:

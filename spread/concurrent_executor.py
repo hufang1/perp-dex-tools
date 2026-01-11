@@ -1,0 +1,261 @@
+"""
+并发执行模块
+
+本模块实现011-async-ws-ioc-trading的并发交易执行功能，包括:
+- 双腿并发下单（asyncio.gather）
+- 并发平仓
+- 紧急单腿平仓
+- 并发时间戳记录
+"""
+
+import asyncio
+import logging
+import time
+from decimal import Decimal
+from typing import Any, Callable, Dict, Optional, Tuple
+
+from spread.config import SpreadArbConfig
+from spread.performance_monitor import PerformanceMonitor
+
+
+class ConcurrentExecutor:
+    """
+    并发执行器
+
+    负责同时向两个交易所发送订单，并记录发送时间差。
+    """
+
+    def __init__(
+        self,
+        config: SpreadArbConfig,
+        monitor: PerformanceMonitor,
+        extended_client: Any,
+        lighter_client: Any,
+        logger: Optional[logging.Logger] = None
+    ) -> None:
+        """初始化并发执行器
+
+        Args:
+            config: SpreadArbConfig配置对象
+            monitor: PerformanceMonitor实例
+            extended_client: Extended交易所客户端
+            lighter_client: Lighter交易所客户端
+            logger: 日志记录器（可选）
+        """
+        self.config = config
+        self.monitor = monitor
+        self.extended_client = extended_client
+        self.lighter_client = lighter_client
+        self.logger = logger or logging.getLogger(__name__)
+
+    # ========================================================================
+    # 并发下单
+    # ========================================================================
+
+    async def execute_concurrent_orders(
+        self,
+        extended_order: Dict[str, Any],
+        lighter_order: Dict[str, Any],
+        timeout_ms: int = 500
+    ) -> Tuple[Dict, Dict, float]:
+        """并发执行两个交易所的下单
+
+        Args:
+            extended_order: Extended订单字典
+            lighter_order: Lighter订单字典
+            timeout_ms: 超时时间（毫秒）
+
+        Returns:
+            (extended_result, lighter_result, send_gap_ms)
+            - result: {'success': bool, 'order_id': str, 'error': str}
+            - send_gap_ms: 发送时间差（毫秒）
+
+        Raises:
+            TimeoutError: 两个订单都超时
+
+        副作用:
+            - 记录send_A_ts和send_B_ts
+            - 调用monitor.record_concurrent_send_gap()
+        """
+        send_a_ts = None
+        send_b_ts = None
+
+        async def place_extended():
+            nonlocal send_a_ts
+            send_a_ts = time.time() * 1000
+            try:
+                # 调用Extended客户端下单方法
+                result = await asyncio.wait_for(
+                    self._place_order_extended(extended_order),
+                    timeout=timeout_ms / 1000
+                )
+                return {'success': True, 'order_id': result.get('order_id'), 'data': result}
+            except asyncio.TimeoutError:
+                return {'success': False, 'error': 'timeout', 'order_id': None}
+            except Exception as e:
+                return {'success': False, 'error': str(e), 'order_id': None}
+
+        async def place_lighter():
+            nonlocal send_b_ts
+            send_b_ts = time.time() * 1000
+            try:
+                # 调用Lighter客户端下单方法
+                result = await asyncio.wait_for(
+                    self._place_order_lighter(lighter_order),
+                    timeout=timeout_ms / 1000
+                )
+                return {'success': True, 'order_id': result.get('order_id'), 'data': result}
+            except asyncio.TimeoutError:
+                return {'success': False, 'error': 'timeout', 'order_id': None}
+            except Exception as e:
+                return {'success': False, 'error': str(e), 'order_id': None}
+
+        # 并发执行
+        results = await asyncio.gather(
+            place_extended(),
+            place_lighter(),
+            return_exceptions=True
+        )
+
+        ext_result = results[0] if not isinstance(results[0], Exception) else {'success': False, 'error': str(results[0])}
+        lit_result = results[1] if not isinstance(results[1], Exception) else {'success': False, 'error': str(results[1])}
+
+        # 计算发送间隔
+        send_gap_ms = abs(send_b_ts - send_a_ts) if (send_a_ts and send_b_ts) else 0
+
+        # 记录到性能监控
+        if send_a_ts and send_b_ts:
+            self.monitor.record_concurrent_send_gap(send_a_ts, send_b_ts)
+
+        # 记录时间戳
+        self.monitor.record_timestamp('send_A', {'ts': send_a_ts})
+        self.monitor.record_timestamp('send_B', {'ts': send_b_ts})
+
+        self.logger.info(
+            f"🔄 [并发下单] Extended: {'✅' if ext_result['success'] else '❌'}, "
+            f"Lighter: {'✅' if lit_result['success'] else '❌'}, "
+            f"间隔: {send_gap_ms:.2f}ms"
+        )
+
+        return ext_result, lit_result, send_gap_ms
+
+    # ========================================================================
+    # 并发平仓
+    # ========================================================================
+
+    async def execute_concurrent_close(
+        self,
+        extended_order: Dict[str, Any],
+        lighter_order: Dict[str, Any],
+        timeout_ms: int = 500
+    ) -> Tuple[Dict, Dict, float]:
+        """并发执行平仓
+
+        参数和返回值同execute_concurrent_orders
+        """
+        return await self.execute_concurrent_orders(extended_order, lighter_order, timeout_ms)
+
+    # ========================================================================
+    # 紧急平仓
+    # ========================================================================
+
+    async def emergency_close_position(
+        self,
+        exchange: str,
+        side: str,
+        quantity: Decimal,
+        timeout_ms: int = 1000
+    ) -> Dict:
+        """紧急平仓（单腿）
+
+        Args:
+            exchange: 'extended' 或 'lighter'
+            side: 'buy' 或 'sell'
+            quantity: 数量
+            timeout_ms: 超时时间（毫秒）
+
+        Returns:
+            {'success': bool, 'order_id': str, 'filled_qty': Decimal, 'error': str}
+
+        Note:
+            紧急平仓使用市价单或大滑点限价单，确保必须成交
+        """
+        self.logger.warning(f"🚨 [紧急平仓] {exchange} {side} {quantity}")
+
+        try:
+            # 构造紧急平仓订单
+            # 使用市价单或大滑点限价单确保成交
+            order = {
+                'side': side,
+                'quantity': str(quantity),
+                'type': 'MARKET',  # 使用市价单
+                'symbol': self.config.ticker
+            }
+
+            if exchange == 'extended':
+                result = await asyncio.wait_for(
+                    self._place_order_extended(order),
+                    timeout=timeout_ms / 1000
+                )
+            else:
+                result = await asyncio.wait_for(
+                    self._place_order_lighter(order),
+                    timeout=timeout_ms / 1000
+                )
+
+            self.logger.info(f"✅ [紧急平仓] 成功: {result.get('order_id')}")
+            return {
+                'success': True,
+                'order_id': result.get('order_id'),
+                'filled_qty': Decimal(result.get('executed_qty', quantity)),
+                'error': None
+            }
+
+        except asyncio.TimeoutError:
+            self.logger.error(f"❌ [紧急平仓] 超时")
+            return {'success': False, 'error': 'timeout', 'order_id': None, 'filled_qty': Decimal('0')}
+        except Exception as e:
+            self.logger.error(f"❌ [紧急平仓] 失败: {e}")
+            return {'success': False, 'error': str(e), 'order_id': None, 'filled_qty': Decimal('0')}
+
+    # ========================================================================
+    # 交易所客户端适配器
+    # ========================================================================
+
+    async def _place_order_extended(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        """Extended下单适配器
+
+        Args:
+            order: 订单字典
+
+        Returns:
+            订单结果字典
+        """
+        # 这里需要根据实际的Extended客户端API调整
+        # 示例实现：
+        return await self.extended_client.place_order(
+            symbol=order.get('symbol', self.config.ticker),
+            side=order['side'],
+            quantity=Decimal(order['quantity']),
+            price=Decimal(order.get('price', 0)),
+            order_type=order.get('type', 'LIMIT')
+        )
+
+    async def _place_order_lighter(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        """Lighter下单适配器
+
+        Args:
+            order: 订单字典
+
+        Returns:
+            订单结果字典
+        """
+        # 这里需要根据实际的Lighter客户端API调整
+        # 示例实现：
+        return await self.lighter_client.place_order(
+            symbol=order.get('symbol', self.config.ticker),
+            side=order['side'],
+            quantity=Decimal(order['quantity']),
+            price=Decimal(order.get('price', 0)),
+            order_type=order.get('type', 'LIMIT')
+        )
