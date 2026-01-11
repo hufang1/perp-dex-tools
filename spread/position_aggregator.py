@@ -218,7 +218,7 @@ class PositionAggregator:
                 lighter_total += pair.lighter_quantity
 
         # 修复：使用相减计算差异数量
-        diff_qty = abs(extended_total - lighter_total)
+        diff_qty = abs(extended_total + lighter_total)
 
         # 创建仓位汇总
         summary = PositionSummary(
