@@ -1403,6 +1403,9 @@ class SpreadArbitrageBot:
 
         当maker订单可能被拒绝时，需要验证taker订单的利润是否足够。
 
+        注意：opportunity['expected_profit_rate'] 已经是扣除taker手续费后的利润
+        （在RealSpreadCalculator中计算的），所以这里不需要再扣手续费。
+
         Args:
             opportunity: 机会字典
             extended_bid: Extended买一价
@@ -1413,24 +1416,18 @@ class SpreadArbitrageBot:
         Returns:
             bool: True=可以开仓, False=利润不足
         """
-        # 计算使用taker的期望收益率
-        # taker需要支付双边手续费
-        taker_fees = self.config.extended_taker_fee_rate * 2
+        # 获取期望收益率（已经扣除taker手续费和点差成本）
         expected_profit = opportunity.get('expected_profit_rate', Decimal('0'))
-
-        # 减去额外手续费成本（maker本来可以是0手续费）
-        expected_profit_with_taker = expected_profit - taker_fees
 
         # 检查是否仍满足最小盈利阈值
         min_threshold = self.config.min_profit_threshold
 
         self.logger.debug(
-            f"[Taker利润检查] 期望收益率={expected_profit:.4%}, "
-            f"taker后={expected_profit_with_taker:.4%}, "
+            f"[Taker利润检查] Taker期望利润={expected_profit:.4%}, "
             f"阈值={min_threshold:.4%}"
         )
 
-        return expected_profit_with_taker >= min_threshold
+        return expected_profit >= min_threshold
 
     def detect_divergence_signal(
         self,
