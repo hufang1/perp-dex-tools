@@ -6,11 +6,13 @@
 - SpreadChange: 价差变化
 - CloseDecision: 平仓决策
 - PositionBalance: 仓位平衡状态
+- 成功率追踪相关枚举和数据类
 """
 
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Optional
+from enum import Enum
 
 
 @dataclass
@@ -202,3 +204,67 @@ class SpreadRecord:
     lighter_spread_cost: Decimal  # Lighter点差成本率
     total_cost_rate: Decimal      # 总成本率 (extended + lighter)
     status: str                   # 数据状态 ("VALID" 或 "INVALID")
+
+
+# ============================================================================
+# 001-fix-order-type: 成功率追踪相关枚举和数据类
+# ============================================================================
+
+class OperationType(Enum):
+    """操作类型枚举 - 定义所有可能的交易操作"""
+    OPEN_ATTEMPT = "open_attempt"           # 开仓尝试（识别到机会）
+    OPEN_SUCCESS = "open_success"           # 开仓成功
+    OPEN_FAILED = "open_failed"             # 开仓失败
+    CLOSE_ATTEMPT = "close_attempt"         # 平仓尝试
+    CLOSE_SUCCESS = "close_success"         # 平仓成功
+    CLOSE_FAILED = "close_failed"           # 平仓失败
+
+
+class OperationStatus(Enum):
+    """操作状态枚举 - 定义操作的执行结果"""
+    SUCCESS = "success"                     # 成功
+    FAILED = "failed"                       # 失败
+    POSITION_LIMIT = "position_limit"       # 仓位上限（特殊标识）
+    PENDING = "pending"                     # 进行中
+
+
+class ExchangeType(Enum):
+    """交易所类型枚举"""
+    EXTENDED = "extended"
+    LIGHTER = "lighter"
+    BOTH = "both"
+
+
+class FailureReason(Enum):
+    """失败原因枚举 - 定义所有可能的失败原因"""
+    INSUFFICIENT_BALANCE = "insufficient_balance"       # 余额不足
+    ORDER_REJECTED = "order_rejected"                   # 订单被拒绝
+    NETWORK_TIMEOUT = "network_timeout"                 # 网络超时
+    PRICE_SLIPPAGE = "price_slippage"                   # 价格滑点过大
+    PARTIAL_FILL = "partial_fill"                       # 部分成交
+    POSITION_IMBALANCE = "position_imbalance"           # 仓位不一致
+    UNKNOWN_ERROR = "unknown_error"                     # 未知错误
+
+
+@dataclass
+class PositionConsistencyCheck:
+    """
+    仓位一致性检查结果
+
+    用于验证开仓后Extended和Lighter仓位数量是否一致
+    """
+    is_consistent: bool                    # 仓位是否一致
+    extended_quantity: Decimal             # Extended仓位数量
+    lighter_quantity: Decimal              # Lighter仓位数量
+    difference: Decimal                    # 差异数量（绝对值）
+    difference_rate: float                 # 差异率（百分比）
+    threshold_exceeded: bool               # 是否超过阈值
+
+    def __str__(self) -> str:
+        """格式化输出"""
+        status = "✅ 一致" if self.is_consistent else "⚠️ 不一致"
+        return (
+            f"{status}: Extended={self.extended_quantity:.4f}, "
+            f"Lighter={self.lighter_quantity:.4f}, "
+            f"差异={self.difference:.4f}, 差异率={self.difference_rate:.2%}"
+        )

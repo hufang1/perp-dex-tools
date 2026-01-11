@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict, Optional, TYPE_CHECKING
 
 from .spread_pair import SpreadPair
-from .models import SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance
+from .models import SpreadSnapshot, SpreadChange, CloseDecision, PositionBalance, PositionConsistencyCheck
 
 # TYPE_CHECKING导入避免循环依赖
 if TYPE_CHECKING:
@@ -579,6 +579,79 @@ class TradeLogger:
             f"状态: {warning_display}",
             f"失衡: {'是' if balance.is_imbalanced else '否'}",
             "==================="
+        ]
+
+        return '\n'.join(lines)
+
+    # ========================================================================
+    # 001-fix-order-type: 仓位一致性日志记录
+    # ========================================================================
+
+    def log_position_consistency(
+        self,
+        pair: SpreadPair,
+        check_result: PositionConsistencyCheck
+    ) -> bool:
+        """
+        T037: 记录仓位一致性检查结果
+
+        记录单个套利对开仓后的仓位一致性验证结果。
+
+        Args:
+            pair: SpreadPair对象
+            check_result: PositionConsistencyCheck对象
+
+        Returns:
+            True if logging succeeded, False otherwise
+        """
+        if self.logger is None:
+            return False
+
+        try:
+            entry = self._format_position_consistency(pair, check_result)
+            # 根据一致性状态选择日志级别
+            if check_result.is_consistent:
+                self.logger.info(entry)
+            else:
+                self.logger.warning(entry)
+            return True
+        except Exception as e:
+            logging.error(f"Failed to log position consistency: {e}")
+            return False
+
+    def _format_position_consistency(
+        self,
+        pair: SpreadPair,
+        check_result: PositionConsistencyCheck
+    ) -> str:
+        """
+        T037: 格式化仓位一致性日志
+
+        包含套利对ID、仓位详情、差异计算和阈值检查结果。
+        """
+        timestamp = datetime.fromtimestamp(pair.open_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+        direction = "做多" if pair.extended_side == 'buy' else "做空"
+
+        status_display = "✅ 一致" if check_result.is_consistent else "⚠️ 不一致"
+
+        lines = [
+            "=== 仓位一致性检查 ===",
+            f"时间戳: {timestamp}",
+            f"套利对ID: {pair.pair_id}",
+            f"方向: {direction}",
+            "",
+            "开仓仓位:",
+            f"  Extended: {float(check_result.extended_quantity):.4f} @ ${float(pair.extended_price):.2f}",
+            f"  Lighter: {float(check_result.lighter_quantity):.4f} @ ${float(pair.lighter_price):.2f}",
+            "",
+            "差异分析:",
+            f"  差异数量: {float(check_result.difference):.4f}",
+            f"  差异率: {check_result.difference_rate:.2%}",
+            f"  阈值检查: {'通过' if not check_result.threshold_exceeded else '超出阈值'}",
+            "",
+            f"结论: {status_display}",
+            "======================="
         ]
 
         return '\n'.join(lines)

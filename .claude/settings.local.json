@@ -26,7 +26,10 @@
       "Bash(pip show:*)",
       "Bash(bash:*)",
       "Bash(sort:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(cd:*)",
+      "Bash(git stash drop:*)",
+      "Bash(git -C /Users/hufang/Desktop/web3 project/perp/hufangperp status --porcelain)"
     ]
   }
 }

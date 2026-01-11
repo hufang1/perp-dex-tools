@@ -24,6 +24,13 @@ from .spread_recorder import SpreadRecorder
 from .safety_monitor import SafetyMonitor
 from .adaptive_threshold_manager import AdaptiveThresholdManager
 
+# 001-fix-order-type: 成功率追踪器
+from .success_tracker import SuccessTracker, SpreadOperationResult
+from .models import (
+    SpreadChange, CloseDecision, PositionBalance, SpreadSnapshot,
+    OperationType, OperationStatus, ExchangeType, FailureReason
+)
+
 
 class SpreadArbitrageBot:
     """价差套利主引擎"""
@@ -89,6 +96,10 @@ class SpreadArbitrageBot:
         if config.adaptive_threshold_enabled:
             self.adaptive_threshold_manager = AdaptiveThresholdManager(config, self.safety_monitor)
             self.logger.info("动态阈值管理器已启用")
+
+        # 001-fix-order-type: 成功率追踪器
+        self.success_tracker = SuccessTracker(output_dir="data")
+        self.logger.info("成功率追踪器已初始化")
         
         # WebSocket 订单簿数据
         self.extended_orderbook: Dict[str, Dict[Decimal, Decimal]] = {
@@ -554,6 +565,20 @@ class SpreadArbitrageBot:
                         self.logger.info(f"  平均盈利: ${analysis['avg_profit']:.2f}")
                         self.logger.info(f"  平均亏损: ${analysis['avg_loss']:.2f}")
 
+                # 001-fix-order-type: T058 - 显示成功率统计
+                summary = self.success_tracker.get_stats_summary()
+                if summary['open_attempts'] > 0 or summary['close_attempts'] > 0:
+                    self.logger.info("")
+                    self.logger.info("📊 成功率统计:")
+                    if summary['open_attempts'] > 0:
+                        self.logger.info(f"  开仓成功率: {summary['open_success_rate']:.2%} "
+                                       f"({summary['open_successes']}/{summary['open_attempts']})")
+                    if summary['close_attempts'] > 0:
+                        self.logger.info(f"  平仓成功率: {summary['close_success_rate']:.2%} "
+                                       f"({summary['close_successes']}/{summary['close_attempts']})")
+                    if summary['failure_reasons']:
+                        self.logger.info(f"  主要失败原因: {list(summary['failure_reasons'].keys())[0].value}")
+
                 # T117: 定期导出交易数据
                 if len(self.closed_pairs) > 0:
                     trades_file = self.data_collector.export_trades_csv(self.closed_pairs)
@@ -829,6 +854,16 @@ class SpreadArbitrageBot:
                 f"quantity={opportunity['quantity']:.6f}"
             )
 
+            # 001-fix-order-type: T048 - 记录开仓机会检测
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.OPEN_ATTEMPT,
+                status=OperationStatus.PENDING,
+                exchange=ExchangeType.BOTH,
+                quantity=opportunity.get('quantity'),
+                spread_rate=opportunity.get('spread_rate')
+            ))
+
             # 获取当前价格（用于T042价差快照）
             extended_bid = max(self.extended_orderbook['bids'].keys()) if self.extended_orderbook['bids'] else Decimal('0')
             extended_ask = min(self.extended_orderbook['asks'].keys()) if self.extended_orderbook['asks'] else Decimal('999999')
@@ -874,42 +909,25 @@ class SpreadArbitrageBot:
                 f"可对冲{safe_quantity:.4f} @ ${avg_price:.2f}"
             )
 
-            # T041: 决定是否使用maker订单
-            use_maker = self.calculator.should_use_maker(
-                spread_rate=opportunity.get('spread_rate', Decimal('0')),
-                expected_profit_rate=opportunity.get('expected_profit_rate', Decimal('0'))
-            )
+            # ========================================================================
+            # 001-fix-order-type: 强制使用taker订单，禁用maker逻辑
+            # ========================================================================
+            use_maker = False  # 强制使用taker订单
 
-            # T103: 如果使用maker，验证taker利润是否足够（防止maker被拒绝后亏损）
-            if use_maker:
-                # 检查taker利润是否足够
-                taker_profit_ok = self._should_open_with_taker(
-                    opportunity, extended_bid, extended_ask, lighter_bid, lighter_ask
-                )
-                if not taker_profit_ok:
-                    self.logger.warning(
-                        f"[Maker风险检查] Maker转taker后利润不足，跳过此机会"
-                    )
-                    self.stats['opportunities_rejected'] += 1
-                    return False
-
-            # T042: 计算maker订单价格（如果使用maker）
-            if use_maker:
-                extended_price = self.calculator.calculate_maker_price(
-                    side=opportunity['side'],
-                    bid=extended_bid,
-                    ask=extended_ask
-                )
-                self.logger.info(f"使用Maker定价: ${extended_price:.4f}")
+            # 使用对手价作为taker订单价格
+            if opportunity['side'] == 'buy':
+                extended_price = extended_ask  # 买单使用ask价格（对手价）
             else:
-                extended_price = opportunity['extended_price']
+                extended_price = extended_bid  # 卖单使用bid价格（对手价）
 
-            # 1. Extended 下单（T043: 传递post_only参数）
+            self.logger.info(f"[001-fix-order-type] 使用Taker订单: side={opportunity['side']}, price=${extended_price:.4f}")
+
+            # 1. Extended 下单（强制post_only=False使用taker）
             order = await self.order_manager.place_spread_maker_order(
                 side=opportunity['side'],
                 price=extended_price,
                 quantity=opportunity['quantity'],
-                post_only=use_maker  # T043: True=maker单(post_only), False=taker单
+                post_only=False  # 001-fix-order-type: 强制taker订单
             )
 
             self.logger.info(f"[DEBUG] 下单返回: success={order['success']}, order_id={order.get('order_id')}")
@@ -919,57 +937,22 @@ class SpreadArbitrageBot:
                 self.consecutive_failures += 1
                 return False
 
-            # 2. 等待成交（如果是maker订单，使用超时等待）
-            if use_maker:
-                # 使用maker超时等待
-                fill_result = await self.order_manager.maker_timeout_wait(
-                    order_id=order['order_id'],
-                    timeout=self.config.maker_timeout_seconds
-                )
+            # ========================================================================
+            # 001-fix-order-type: 简化taker订单等待逻辑（移除maker超时转换）
+            # ========================================================================
+            # taker订单直接等待成交
+            fill_result = await self.order_manager.wait_for_fill(
+                order_id=order['order_id'],
+                timeout=self.config.extended_fill_timeout,
+                allow_partial=self.config.enable_partial_fill
+            )
 
-                # 如果超时且未成交，转换为taker订单
-                if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
-                    self.logger.warning(f"Maker订单超时，转换为Taker订单...")
-                    taker_order = await self.order_manager.convert_to_taker(
-                        side=opportunity['side'],
-                        quantity=opportunity['quantity'],
-                        original_order_id=order['order_id']
-                    )
-
-                    if not taker_order['success']:
-                        self.stats['failed_opens'] += 1
-                        self.consecutive_failures += 1
-                        return False
-
-                    # 等待taker订单成交
-                    fill_result = await self.order_manager.wait_for_fill(
-                        order_id=taker_order['order_id'],
-                        timeout=self.config.extended_fill_timeout,
-                        allow_partial=self.config.enable_partial_fill
-                    )
-
-                    if fill_result['filled_quantity'] == 0:
-                        self.stats['failed_opens'] += 1
-                        self.consecutive_failures += 1
-                        return False
-
-                elif fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] > 0:
-                    # 部分成交，取消剩余部分
-                    await self.order_manager.cancel_order(order['order_id'])
-            else:
-                # taker订单直接等待成交
-                fill_result = await self.order_manager.wait_for_fill(
-                    order_id=order['order_id'],
-                    timeout=self.config.extended_fill_timeout,
-                    allow_partial=self.config.enable_partial_fill
-                )
-
-                if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
-                    # 完全未成交,取消订单
-                    await self.order_manager.cancel_order(order['order_id'])
-                    self.stats['failed_opens'] += 1
-                    self.consecutive_failures += 1
-                    return False
+            if fill_result['status'] == 'TIMEOUT' and fill_result['filled_quantity'] == 0:
+                # 完全未成交,取消订单
+                await self.order_manager.cancel_order(order['order_id'])
+                self.stats['failed_opens'] += 1
+                self.consecutive_failures += 1
+                return False
 
             if fill_result['filled_quantity'] == 0:
                 self.stats['failed_opens'] += 1
@@ -1023,6 +1006,23 @@ class SpreadArbitrageBot:
                     f"   未对冲仓位总数: {len(self.unhedged_positions)}"
                 )
 
+                # 001-fix-order-type: T052 - 记录对冲失败（Lighter端）
+                error_msg = hedge_result.get('error', 'Unknown')
+                failure_reason = FailureReason.NETWORK_TIMEOUT  # 默认网络超时
+                if 'insufficient' in error_msg.lower() or 'balance' in error_msg.lower():
+                    failure_reason = FailureReason.INSUFFICIENT_BALANCE
+                elif 'rejected' in error_msg.lower():
+                    failure_reason = FailureReason.ORDER_REJECTED
+
+                self.success_tracker.record_operation(SpreadOperationResult(
+                    timestamp=time.time(),
+                    operation_type=OperationType.OPEN_FAILED,
+                    status=OperationStatus.FAILED,
+                    exchange=ExchangeType.LIGHTER,
+                    failure_reason=failure_reason,
+                    error_message=error_msg
+                ))
+
                 # 🔴 触发紧急熔断：立即暂停，防止继续开仓
                 self.is_paused = True
                 self.pause_until = time.time() + 3600  # 暂停1小时
@@ -1045,6 +1045,26 @@ class SpreadArbitrageBot:
                 lighter_order_id=hedge_result.get('order_id')  # T040: 记录 Lighter 开仓订单ID
             )
 
+            # ========================================================================
+            # 001-fix-order-type: 验证仓位一致性
+            # ========================================================================
+            if self.config.enable_position_consistency_check:
+                check_result = await self.validate_position_consistency(pair)
+
+                # 如果仓位不一致，记录警告并继续（暂不强制清理）
+                if not check_result.is_consistent:
+                    self.logger.warning(
+                        f"[001-fix-order-type] 开仓后仓位不一致！\n"
+                        f"   套利对ID: {pair.pair_id}\n"
+                        f"   Extended: {pair.extended_quantity:.4f} @ ${pair.extended_price:.2f}\n"
+                        f"   Lighter: {pair.lighter_quantity:.4f} @ ${pair.lighter_price:.2f}\n"
+                        f"   差异: {check_result.difference:.4f} ({check_result.difference_rate:.2%})\n"
+                        f"   阈值: 数量<{self.config.position_consistency_threshold}, "
+                        f"比率<{self.config.position_consistency_rate_threshold:.0%}"
+                    )
+                    # TODO: 可以在这里添加自动清理逻辑（T036）
+                    # 暂时仅记录警告，不强制清理
+
             self.next_pair_id += 1
             self.open_pairs.append(pair)
 
@@ -1053,6 +1073,19 @@ class SpreadArbitrageBot:
             self.stats['opportunities_taken'] += 1
             self.stats['max_open_pairs'] = max(self.stats['max_open_pairs'], len(self.open_pairs))
             self.consecutive_failures = 0
+
+            # 001-fix-order-type: T051 - 记录开仓成功
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.OPEN_SUCCESS,
+                status=OperationStatus.SUCCESS,
+                exchange=ExchangeType.BOTH,
+                order_id=pair.open_extended_order_id,
+                quantity=pair.extended_quantity,
+                price=pair.extended_price,
+                pair_id=pair.pair_id,
+                spread_rate=pair.open_spread_rate
+            ))
 
             # T041: 增强开仓日志 (包含交易所、方向、价格、数量、时间戳、订单ID)
             self.logger.info(
@@ -1093,11 +1126,21 @@ class SpreadArbitrageBot:
             self.logger.error(traceback.format_exc())
             self.stats['failed_opens'] += 1
             self.consecutive_failures += 1
-            
+
+            # 001-fix-order-type: T052 - 记录开仓失败
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.OPEN_FAILED,
+                status=OperationStatus.FAILED,
+                exchange=ExchangeType.BOTH,
+                failure_reason=FailureReason.UNKNOWN_ERROR,
+                error_message=str(e)
+            ))
+
             # 触发断路器
             if self.consecutive_failures >= self.config.max_consecutive_failures:
                 self._trigger_circuit_breaker()
-            
+
             return False
     
     async def _close_pair(self, pair: SpreadPair, opportunity: Dict[str, Any]) -> bool:
@@ -1515,6 +1558,15 @@ class SpreadArbitrageBot:
         try:
             self.logger.info(f"[市价平仓] 开始平仓套利对 #{pair.pair_id}")
 
+            # 001-fix-order-type: T053 - 记录平仓尝试
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.CLOSE_ATTEMPT,
+                status=OperationStatus.PENDING,
+                exchange=ExchangeType.BOTH,
+                pair_id=pair.pair_id
+            ))
+
             # 1. 防止重复平仓
             if getattr(pair, 'is_closing', False):
                 self.logger.warning(f"套利对 #{pair.pair_id} 正在平仓中，跳过")
@@ -1554,7 +1606,29 @@ class SpreadArbitrageBot:
             if not success:
                 self.logger.error(f"市价平仓失败！套利对 #{pair.pair_id} 仍持仓")
                 pair.is_closing = False  # 重置标志，允许重试
+
+                # 001-fix-order-type: T055 - 记录平仓失败
+                self.success_tracker.record_operation(SpreadOperationResult(
+                    timestamp=time.time(),
+                    operation_type=OperationType.CLOSE_FAILED,
+                    status=OperationStatus.FAILED,
+                    exchange=ExchangeType.BOTH,
+                    pair_id=pair.pair_id,
+                    failure_reason=FailureReason.UNKNOWN_ERROR,
+                    error_message="市价平仓失败"
+                ))
+
                 return False
+
+            # 001-fix-order-type: T054 - 记录平仓成功
+            self.success_tracker.record_operation(SpreadOperationResult(
+                timestamp=time.time(),
+                operation_type=OperationType.CLOSE_SUCCESS,
+                status=OperationStatus.SUCCESS,
+                exchange=ExchangeType.BOTH,
+                pair_id=pair.pair_id,
+                price=close_extended_price  # Extended平仓价格
+            ))
 
             # T043: 记录平仓分析
             # 创建价差变化对象
@@ -2110,6 +2184,15 @@ class SpreadArbitrageBot:
         net_pnl = self.stats['total_profit'] - self.stats['total_loss']
         self.logger.info(f"  净盈亏: ${net_pnl:.2f}")
 
+        # 001-fix-order-type: T056-T057 - 导出成功率统计数据
+        operations_file = self.success_tracker.export_operations_csv()
+        if operations_file:
+            self.logger.info(f"  操作记录已导出: {operations_file}")
+
+        summary_file = self.success_tracker.export_summary_csv()
+        if summary_file:
+            self.logger.info(f"  成功率汇总已导出: {summary_file}")
+
         # 🔴 显示未对冲仓位警告
         if len(self.unhedged_positions) > 0:
             self.logger.error("")
@@ -2132,6 +2215,52 @@ class SpreadArbitrageBot:
         # 只保留最近的N次记录
         if len(self.hedge_attempts) > self.config.hedge_failure_window:
             self.hedge_attempts.pop(0)
+
+    # ========================================================================
+    # 001-fix-order-type: 仓位一致性验证方法
+    # ========================================================================
+
+    async def validate_position_consistency(
+        self,
+        pair,
+        threshold: Decimal = None,
+        rate_threshold: float = None
+    ):
+        """
+        001-fix-order-type: 验证开仓后仓位一致性
+
+        Args:
+            pair: 套利对对象
+            threshold: 差异数量阈值（从配置读取，默认0.001 ETH）
+            rate_threshold: 差异率阈值（从配置读取，默认10%）
+
+        Returns:
+            PositionConsistencyCheck: 一致性检查结果
+        """
+        # 从配置读取阈值
+        if threshold is None:
+            threshold = self.config.position_consistency_threshold
+        if rate_threshold is None:
+            rate_threshold = self.config.position_consistency_rate_threshold
+
+        # 调用position_aggregator的检查方法
+        check_result = self.position_aggregator.get_position_balance_for_pair(
+            pair=pair,
+            threshold=threshold,
+            rate_threshold=rate_threshold
+        )
+
+        # 记录日志
+        if check_result.is_consistent:
+            self.logger.info(
+                f"[001-fix-order-type] 仓位一致性检查通过: {check_result}"
+            )
+        else:
+            self.logger.warning(
+                f"[001-fix-order-type] 仓位不一致警告: {check_result}"
+            )
+
+        return check_result
 
     def reset_circuit_breaker(self):
         """手动重置熔断器

@@ -368,36 +368,28 @@ class SpreadCalculator:
         ask: Decimal
     ) -> Decimal:
         """
-        T040: 计算maker订单价格（使用price_tick偏移）
+        [001-fix-order-type: 已废弃] 计算maker订单价格
 
-        算法:
-        - 买单: price = bid - price_tick (低于买一价，确保成为maker)
-        - 卖单: price = ask + price_tick (高于卖一价，确保成为maker)
+        ⚠️ 001-fix-order-type: 此方法已废弃，所有开仓使用对手价taker订单
+        保留此方法仅为向后兼容
+
+        原始功能：使用price_tick偏移定价确保maker订单不会立即成交
 
         Args:
             side: 'buy' 或 'sell'
             bid: 当前买一价
             ask: 当前卖一价
-            price_tick: 价格精度（从config读取）
 
         Returns:
-            Decimal: maker订单价格
+            Decimal: 对手价（买单返回ask，卖单返回bid）
         """
-        price_tick = self.config.maker_price_tick
-
+        # 001-fix-order-type: 返回对手价而非maker定价
         if side == 'buy':
-            # 买单：价格低于买一价，确保不会立即成交
-            maker_price = bid - price_tick
+            # 买单返回ask价格（对手价）
+            return ask
         else:  # sell
-            # 卖单：价格高于卖一价，确保不会立即成交
-            maker_price = ask + price_tick
-
-        self.logger.debug(
-            f"[Maker定价] side={side}, bid={bid:.4f}, ask={ask:.4f}, "
-            f"price_tick={price_tick:.2f}, maker_price={maker_price:.4f}"
-        )
-
-        return maker_price
+            # 卖单返回bid价格（对手价）
+            return bid
 
     def should_use_maker(
         self,
@@ -405,9 +397,12 @@ class SpreadCalculator:
         expected_profit_rate: Decimal
     ) -> bool:
         """
-        T041: 决定是否使用maker订单
+        [001-fix-order-type: 已废弃] 决定是否使用maker订单
 
-        决策逻辑:
+        ⚠️ 001-fix-order-type: 此方法已废弃，所有开仓强制使用taker订单
+        保留此方法仅为向后兼容，返回值始终为False
+
+        原始决策逻辑:
         1. 检查配置是否启用maker订单
         2. 检查期望收益率是否足够高（覆盖maker拒绝风险）
         3. 如果期望收益率太低，使用taker确保成交
@@ -417,23 +412,8 @@ class SpreadCalculator:
             expected_profit_rate: 期望收益率（扣除成本后）
 
         Returns:
-            bool: True=使用maker, False=使用taker
+            bool: 始终返回False（强制使用taker）
         """
-        # 检查配置
-        if not self.config.use_maker_orders:
-            return False
-
-        # 检查最小盈利阈值
-        # 如果期望收益率太低，使用taker确保成交
-        if expected_profit_rate < self.config.min_profit_threshold:
-            self.logger.debug(
-                f"[Maker决策] 期望收益率{expected_profit_rate:.4%}低于阈值"
-                f"{self.config.min_profit_threshold:.4%}，使用taker"
-            )
-            return False
-
-        # 收益率足够，可以尝试maker节省手续费
-        self.logger.debug(
-            f"[Maker决策] 期望收益率{expected_profit_rate:.4%}足够，使用maker"
-        )
-        return True
+        # 001-fix-order-type: 强制使用taker订单
+        self.logger.debug("[001-fix-order-type] 强制使用taker订单（should_use_maker已废弃）")
+        return False

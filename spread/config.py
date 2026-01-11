@@ -124,6 +124,15 @@ class SpreadArbConfig:
     reduced_profit_target_rate: Decimal = Decimal('0.0002')         # 降低后的盈利目标（0.02%）
     reduced_min_close_profit_rate: Decimal = Decimal('0.0003')      # 降低后的平仓阈值（0.03%）
 
+    # ==================== 001-fix-order-type: 仓位验证配置 ====================
+    position_consistency_threshold: Decimal = Decimal('0.001')     # 仓位差异数量阈值（ETH，默认0.001 ETH）
+    position_consistency_rate_threshold: float = 0.1              # 仓位差异率阈值（百分比，默认10%）
+    enable_position_consistency_check: bool = True                # 启用仓位一致性检查
+
+    # ==================== 001-fix-order-type: 成功率追踪配置 ====================
+    enable_success_tracking: bool = True                          # 启用成功率追踪（默认启用）
+    stats_export_interval: int = 3600                             # 统计导出间隔（秒，默认1小时）
+
     def __post_init__(self):
         """验证配置"""
         # 验证价差率

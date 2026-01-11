@@ -8,6 +8,7 @@ from typing import List, Dict, Optional, Tuple
 import time
 
 from .spread_pair import SpreadPair
+from .models import PositionConsistencyCheck
 
 
 # T058: PositionSummary数据类
@@ -265,3 +266,58 @@ class PositionAggregator:
             return 'WARN'
         else:
             return 'CRITICAL'
+
+    # ========================================================================
+    # 001-fix-order-type: 单个套利对仓位一致性检查
+    # ========================================================================
+
+    def get_position_balance_for_pair(
+        self,
+        pair: SpreadPair,
+        threshold: Decimal = Decimal('0.001'),
+        rate_threshold: float = 0.1
+    ) -> PositionConsistencyCheck:
+        """
+        001-fix-order-type: 获取单个套利对的仓位一致性检查结果
+
+        验证开仓后Extended和Lighter仓位数量是否一致。
+
+        Args:
+            pair: 套利对对象
+            threshold: 差异数量阈值（默认0.001 ETH）
+            rate_threshold: 差异率阈值（默认10%）
+
+        Returns:
+            PositionConsistencyCheck: 一致性检查结果
+        """
+        # 获取仓位数量
+        extended_qty = pair.extended_quantity
+        lighter_qty = pair.lighter_quantity
+
+        # 计算差异数量（绝对值）
+        difference = abs(extended_qty - lighter_qty)
+
+        # 计算差异率
+        total_exposure = (abs(extended_qty) + abs(lighter_qty)) / 2
+        if total_exposure > 0:
+            difference_rate = float(difference / total_exposure)
+        else:
+            difference_rate = 0.0
+
+        # 检查是否超过阈值
+        threshold_exceeded = (
+            difference > threshold or
+            difference_rate > rate_threshold
+        )
+
+        # 判断是否一致
+        is_consistent = not threshold_exceeded
+
+        return PositionConsistencyCheck(
+            is_consistent=is_consistent,
+            extended_quantity=extended_qty,
+            lighter_quantity=lighter_qty,
+            difference=difference,
+            difference_rate=difference_rate,
+            threshold_exceeded=threshold_exceeded
+        )

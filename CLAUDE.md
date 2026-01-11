@@ -21,6 +21,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-11
 - 本地CSV文件系统存储 (001-spread-recorder)
 - Python 3.10.19 + websockets 12.0+, x10-python-trading-starknet 0.0.10, lighter-sdk 0.1.4, pytest, decimal.Decimal (010-fix-position-imbalance)
 - 内存状态存储 + 文件日志（logs/trade.log） + CSV导出（data/） (010-fix-position-imbalance)
+- Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv (001-fix-order-type)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -51,7 +52,8 @@ spread/                    # 价差套利模块
 ├── data_collector.py      # 数据收集器（CSV导出）
 ├── trade_analyzer.py      # 交易分析器
 ├── safety_monitor.py      # [NEW] 安全监控器（010-fix-position-imbalance）
-└── adaptive_threshold_manager.py # [NEW] 动态阈值管理器（010-fix-position-imbalance）
+├── adaptive_threshold_manager.py # [NEW] 动态阈值管理器（010-fix-position-imbalance）
+└── success_tracker.py     # [NEW] 成功率追踪器（001-fix-order-type）
 
 exchanges/                 # 交易所客户端
 ├── extended.py           # Extended交易所客户端
@@ -126,7 +128,72 @@ cat data/spreads_YYYY_MM_DD.csv
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 001-fix-order-type: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv
 - 001-spread-recorder: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, csv (Python标准库)
+
+### 001-fix-order-type: 订单类型修复和成功率统计（2026-01-11）
+**核心修复**: 强制使用taker订单，移除maker订单逻辑，实现成功率统计和仓位一致性验证
+
+**User Story 1 - 强制Taker订单**:
+1. **订单类型强制** (spread/bot.py)
+   - 开仓强制使用taker订单（post_only=False）
+   - 使用对手价：买单用ask，卖单用bid
+   - 移除maker订单超时等待和convert_to_taker逻辑
+
+2. **配置更新** (spread/config.py)
+   - use_maker_orders=False（确认默认值）
+   - 保留maker相关配置但不再使用
+
+3. **日志记录** (spread/trade_logger.py)
+   - 记录订单类型（order_type, post_only, is_rejected）
+   - 记录"使用taker订单"日志
+
+**User Story 2 - 仓位一致性验证**:
+1. **PositionConsistencyCheck模型** (spread/models.py)
+   - 验证开仓后Extended和Lighter仓位数量一致性
+   - 计算差异数量（绝对值）和差异率
+   - 支持可配置阈值（默认0.001 ETH，10%）
+
+2. **验证方法** (spread/position_aggregator.py)
+   - get_position_balance_for_pair方法
+   - 返回一致性检查结果（is_consistent, difference, difference_rate）
+
+3. **Bot集成** (spread/bot.py)
+   - 开仓后自动验证仓位一致性
+   - 记录仓位一致性状态到日志
+
+**User Story 3 - 成功率统计**:
+1. **SuccessTracker模块** (spread/success_tracker.py)
+   - 记录每次操作结果（OPEN_ATTEMPT/SUCCESS/FAILED, CLOSE_ATTEMPT/SUCCESS/FAILED）
+   - 统计成功率和失败原因分布
+   - 导出双语CSV（operations_YYYY_MM_DD.csv, success_stats_YYYY_MM_DD.csv）
+
+2. **操作类型枚举** (spread/models.py)
+   - OperationType: OPEN_ATTEMPT, OPEN_SUCCESS, OPEN_FAILED, CLOSE_ATTEMPT, CLOSE_SUCCESS, CLOSE_FAILED
+   - OperationStatus: PENDING, SUCCESS, FAILED, POSITION_LIMIT
+   - ExchangeType: EXTENDED, LIGHTER, BOTH
+   - FailureReason: NETWORK_TIMEOUT, INSUFFICIENT_BALANCE, ORDER_REJECTED, POSITION_IMBALANCE, UNKNOWN_ERROR
+
+3. **Bot集成** (spread/bot.py)
+   - 开仓/平仓时记录操作结果
+   - 统计报告中显示成功率
+   - 清理时导出CSV数据
+
+**测试覆盖**:
+- tests/test_order_manager.py: Taker订单测试（TestTakerOrderEnforcement）
+- tests/test_hedge_manager.py: Taker订单对冲测试
+- tests/test_position_consistency.py: 仓位一致性验证测试
+- tests/test_success_tracker.py: 成功率追踪器测试
+- tests/integration/test_taker_order_integration.py: Taker订单集成测试
+- tests/integration/test_position_consistency_integration.py: 仓位一致性集成测试
+- tests/integration/test_success_tracking_integration.py: 成功率统计集成测试
+
+**配置项** (spread/config.py):
+- position_consistency_threshold: 0.001 ETH（仓位差异数量阈值）
+- position_consistency_rate_threshold: 10%（差异率阈值）
+- enable_position_consistency_check: True（启用仓位一致性检查）
+- enable_success_tracking: True（启用成功率追踪）
+- stats_export_interval: 3600秒（统计导出间隔）
 
 ### 010-fix-position-imbalance: 修复仓位失衡和优化开仓标准（2026-01-11）
 **重大修复**: 修复Extended 0.21 ETH vs Lighter 0.02 ETH的严重仓位失衡问题，实现安全监控和动态阈值
@@ -169,14 +236,8 @@ cat data/spreads_YYYY_MM_DD.csv
 
 **P2 - 优化平仓策略**:
 - profit_target_rate: 0.05% → 0.02%
-- min_close_profit_rate: 0.05% → 0.03%
 
 **测试覆盖**:
-- test_position_balance_fix.py: 7个测试
-- test_safety_monitor.py: 13个测试
-- test_adaptive_threshold_manager.py: 8个测试
-- test_circuit_breaker_integration.py: 5个集成测试
-- 总计33个测试全部通过
 
 ### 001-spread-recorder: 价差实时记录器（2026-01-10）
 **新功能**: 定期采样价差数据并记录到CSV文件，支持数据分析和透明度
@@ -246,7 +307,6 @@ cat data/spreads_YYYY_MM_DD.csv
    - CSV导出：trades_YYYY_MM_DD.csv, orders_YYYY_MM_DD.csv
    - TradeAnalyzer: 胜率、盈亏比、每日报告
 
-- 001-fix-spread-close: Added 市价平仓逻辑
 
 ### Phase 4-7: 价差套利平仓逻辑全面修复（2026-01-10）
 **重大改进**: 实现完整的市价平仓、价差收敛检查和增强诊断日志
