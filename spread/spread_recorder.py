@@ -446,6 +446,10 @@ class SpreadRecorder:
     def _format_rejection_reason(self, record: SpreadRecord) -> str:
         """格式化不开仓理由（包含数学公式说明）
 
+        使用与机器人完全一致的判断逻辑：
+        expected_profit_rate = spread_rate - taker_fees - spread_costs
+        判断: expected_profit_rate >= effective_min_spread
+
         Args:
             record: 价差记录对象
 
@@ -460,7 +464,11 @@ class SpreadRecorder:
         # 获取价差率
         long_rate = float(record.long_spread_rate)
         short_rate = float(record.short_spread_rate)
-        cost_rate = float(record.total_cost_rate)
+        spread_cost_rate = float(record.total_cost_rate)
+
+        # 计算taker手续费（双边：Extended开仓+Lighter对冲）
+        taker_fees_rate = float(self.config.extended_taker_fee_rate * 2)  # 双边taker手续费
+        taker_fees_pct = taker_fees_rate * 100
 
         # 判断哪个方向的价差更大
         if abs(long_rate) >= abs(short_rate):
@@ -475,6 +483,12 @@ class SpreadRecorder:
             formula = f"做空价差 = extended_bid - lighter_ask = {record.extended_bid} - {record.lighter_ask}"
 
         spread_pct = abs(spread_rate) * 100
+        spread_cost_pct = spread_cost_rate * 100
+
+        # 计算期望收益率（与RealSpreadCalculator完全一致）
+        # expected_profit_rate = spread_rate - taker_fees - spread_costs
+        expected_profit_rate = abs(spread_rate) - taker_fees_rate - spread_cost_rate
+        expected_profit_pct = expected_profit_rate * 100
 
         # 构建拒绝理由
         if record.status == "INVALID":
@@ -483,29 +497,20 @@ class SpreadRecorder:
         if spread_pct <= 0:
             return f"❌ 价差为负（{direction}价差=${spread_value:.4f}），无套利空间"
 
-        # 检查是否低于阈值
-        if spread_pct < min_spread_pct:
+        # 检查期望收益率是否满足阈值（与机器人实际判断逻辑一致）
+        if expected_profit_pct < min_spread_pct:
             return (
-                f"❌ 价差率不足: {direction}\n"
-                f"   公式: {formula}\n"
-                f"   当前价差率: {spread_pct:.4f}% < 有效阈值: {min_spread_pct:.4f}% (含0.01%延迟缓冲)\n"
-                f"   净收益率 = {spread_pct:.4f}% - {cost_rate:.4f}% (成本) = {spread_pct - cost_rate:.4f}% < 0\n"
-                f"   结论: 扣除点差成本后为负收益，不开仓"
-            )
-
-        # 检查扣除成本后是否为正
-        net_return = spread_pct - cost_rate
-        if net_return <= 0:
-            return (
-                f"❌ 扣除成本后无利润: {direction}\n"
+                f"❌ 期望收益率不足: {direction}\n"
                 f"   公式: {formula}\n"
                 f"   价差率: {spread_pct:.4f}%\n"
-                f"   点差成本: {cost_rate:.4f}%\n"
-                f"   净收益率 = {spread_pct:.4f}% - {cost_rate:.4f}% = {net_return:.4f}% ≤ 0\n"
-                f"   结论: 扣除点差成本后无利润或亏损，不开仓"
+                f"   减去手续费: -{taker_fees_pct:.4f}% (双边taker)\n"
+                f"   减去点差成本: -{spread_cost_pct:.4f}%\n"
+                f"   期望收益率: {spread_pct:.4f}% - {taker_fees_pct:.4f}% - {spread_cost_pct:.4f}% = {expected_profit_pct:.4f}%\n"
+                f"   有效阈值: {min_spread_pct:.4f}% (含0.01%延迟缓冲)\n"
+                f"   结论: 期望收益率 {expected_profit_pct:.4f}% < 阈值 {min_spread_pct:.4f}%，不开仓"
             )
 
-        return f"✅ 价差满足开仓条件: {direction} {spread_pct:.4f}% ≥ 有效阈值{min_spread_pct:.4f}% (含0.01%延迟缓冲)"
+        return f"✅ 价差满足开仓条件: {direction} 期望收益率{expected_profit_pct:.4f}% ≥ 有效阈值{min_spread_pct:.4f}% (价差率{spread_pct:.4f}% - 手续费{taker_fees_pct:.4f}% - 点差{spread_cost_pct:.4f}%)"
 
     def _format_long_spread_formula(self, record: SpreadRecord) -> str:
         """格式化做多价差计算公式
