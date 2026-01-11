@@ -447,8 +447,9 @@ class SpreadRecorder:
         """格式化不开仓理由（包含数学公式说明）
 
         使用与机器人完全一致的判断逻辑：
-        expected_profit_rate = spread_rate - taker_fees - spread_costs
-        判断: expected_profit_rate >= effective_min_spread
+        - 分别计算做多和做空的expected_profit
+        - 选择expected_profit更大的方向
+        - 判断该方向的expected_profit >= effective_min_spread
 
         Args:
             record: 价差记录对象
@@ -457,7 +458,6 @@ class SpreadRecorder:
             str: 格式化的拒绝理由
         """
         # 获取配置的有效阈值（包含延迟缓冲）
-        # 注意：机器人实际开仓使用 effective_min_spread，这里保持一致
         min_spread_rate = float(self.config.effective_min_spread)
         min_spread_pct = min_spread_rate * 100
 
@@ -467,35 +467,43 @@ class SpreadRecorder:
         spread_cost_rate = float(record.total_cost_rate)
 
         # 计算taker手续费（双边：Extended开仓+Lighter对冲）
-        taker_fees_rate = float(self.config.extended_taker_fee_rate * 2)  # 双边taker手续费
+        taker_fees_rate = float(self.config.extended_taker_fee_rate * 2)
         taker_fees_pct = taker_fees_rate * 100
 
-        # 判断哪个方向的价差更大
-        if abs(long_rate) >= abs(short_rate):
+        # 计算两个方向的期望收益率（与RealSpreadCalculator完全一致）
+        long_expected_profit = long_rate - taker_fees_rate - spread_cost_rate
+        short_expected_profit = short_rate - taker_fees_rate - spread_cost_rate
+
+        # 选择期望收益更高的方向（与calculate_best_opportunity逻辑一致）
+        if long_expected_profit >= short_expected_profit:
             direction = "做多"
             spread_rate = long_rate
             spread_value = record.long_spread
+            expected_profit_rate = long_expected_profit
             formula = f"做多价差 = lighter_bid - extended_ask = {record.lighter_bid} - {record.extended_ask}"
         else:
             direction = "做空"
             spread_rate = short_rate
             spread_value = record.short_spread
+            expected_profit_rate = short_expected_profit
             formula = f"做空价差 = extended_bid - lighter_ask = {record.extended_bid} - {record.lighter_ask}"
 
-        spread_pct = abs(spread_rate) * 100
+        spread_pct = spread_rate * 100
         spread_cost_pct = spread_cost_rate * 100
-
-        # 计算期望收益率（与RealSpreadCalculator完全一致）
-        # expected_profit_rate = spread_rate - taker_fees - spread_costs
-        expected_profit_rate = abs(spread_rate) - taker_fees_rate - spread_cost_rate
         expected_profit_pct = expected_profit_rate * 100
 
         # 构建拒绝理由
         if record.status == "INVALID":
             return "❌ 数据无效（价格缺失或异常）"
 
-        if spread_pct <= 0:
-            return f"❌ 价差为负（{direction}价差=${spread_value:.4f}），无套利空间"
+        # 价差率必须为正才有效
+        if spread_rate <= 0:
+            return (
+                f"❌ 价差为负: {direction}\n"
+                f"   公式: {formula}\n"
+                f"   计算: {spread_value:.4f} (负数)\n"
+                f"   结论: {direction}价差为负，无套利空间"
+            )
 
         # 检查期望收益率是否满足阈值（与机器人实际判断逻辑一致）
         if expected_profit_pct < min_spread_pct:
