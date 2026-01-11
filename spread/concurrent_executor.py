@@ -301,16 +301,22 @@ class ConcurrentExecutor:
             # 🔴 FIX: 修复日志格式bug，正确显示成交/失败状态
             success_side = 'Extended' if ext_result['success'] else 'Lighter'
             fail_side = 'Lighter' if ext_result['success'] else 'Extended'
+            # 🔴 FIX: 显示实际的错误消息
+            ext_error_msg = ext_result.get('error', 'unknown')
+            lit_error_msg = lit_result.get('error', 'unknown')
             self.logger.warning(
                 f"⚠️ [单腿持仓] {success_side}: 成交, {fail_side}: 失败, "
                 f"间隔: {send_gap_ms:.2f}ms | "
-                f"Extended: success={ext_result['success']}, order_id={ext_result['order_id']}, "
-                f"Lighter: success={lit_result['success']}, order_id={lit_result['order_id']}"
+                f"Extended: success={ext_result['success']}, order_id={ext_result['order_id']}, error={ext_error_msg} | "
+                f"Lighter: success={lit_result['success']}, order_id={lit_result['order_id']}, error={lit_error_msg}"
             )
         else:
+            # 🔴 FIX: 显示更详细的双边失败信息
+            ext_error_msg = ext_result.get('error', 'unknown')
+            lit_error_msg = lit_result.get('error', 'unknown')
             self.logger.error(
-                f"❌ [双边失败] Extended: {ext_result['error']}, "
-                f"Lighter: {lit_result['error']}, "
+                f"❌ [双边失败] Extended: success={ext_result['success']}, error={ext_error_msg} | "
+                f"Lighter: success={lit_result['success']}, error={lit_error_msg} | "
                 f"间隔: {send_gap_ms:.2f}ms"
             )
 

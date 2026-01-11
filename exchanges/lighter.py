@@ -333,14 +333,23 @@ class LighterClient(BaseExchangeClient):
 
         # Return immediately - IOC order is either filled or cancelled
         if self.current_order is not None:
-            return OrderResult(
-                success=(self.current_order.status == 'FILLED'),
-                order_id=self.current_order.order_id,
-                side=direction,
-                size=quantity,
-                price=order_price,
-                status=self.current_order.status
-            )
+            # 🔴 FIX: 只有当order_id存在时，才认为订单有效
+            # 如果order_id为None，说明WebSocket回调可能有问题，应该查询API验证
+            if self.current_order.order_id is not None:
+                return OrderResult(
+                    success=(self.current_order.status == 'FILLED'),
+                    order_id=self.current_order.order_id,
+                    side=direction,
+                    size=quantity,
+                    price=order_price,
+                    status=self.current_order.status
+                )
+            else:
+                # order_id为None，记录警告并继续查询API
+                self.logger.log(
+                    f"[警告] current_order存在但order_id为None，status={self.current_order.status}，将查询API验证",
+                    level="WARNING"
+                )
         else:
             # No WebSocket update yet - query order status to verify if filled
             # IOC orders should either fill immediately or be cancelled

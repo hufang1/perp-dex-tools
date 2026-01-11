@@ -294,7 +294,21 @@ class ExtendedClient(BaseExchangeClient):
 
                 self.logger.log(f"[DEBUG] 订单已提交: order_id={order_id}", level="INFO")
 
-                # Check order status after a short delay to see if it was rejected
+                # 🔴 FIX: 对于IOC订单（post_only=False），不查询订单状态，避免阻塞
+                # IOC订单应该立即成交或取消，查询状态会导致超时
+                if not post_only:
+                    # IOC订单：直接返回成功，让上层逻辑通过WebSocket或其他方式确认成交
+                    self.logger.log(f"[DEBUG] IOC订单已提交，立即返回成功", level="INFO")
+                    return OrderResult(
+                        success=True,
+                        order_id=order_id,
+                        side=side.value,
+                        size=quantity,
+                        price=rounded_price,
+                        status='OPEN'  # IOC订单状态未知，使用OPEN作为占位
+                    )
+
+                # Post-Only订单：查询订单状态，检查是否被拒绝
                 await asyncio.sleep(0.01)
                 order_info = await self.get_order_info(order_id)
                 self.logger.log(f"[DEBUG] 订单状态查询结果: order_info.status={order_info.status if order_info else 'None'}", level="INFO")
