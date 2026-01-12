@@ -23,6 +23,7 @@ Auto-generated from all feature plans. Last updated: 2026-01-11
 - 内存状态存储 + 文件日志（logs/trade.log） + CSV导出（data/） (010-fix-position-imbalance)
 - Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv (001-fix-order-type)
 - Python 3.10+ (primarily using 3.11+ features) (011-fix-lighter-hedge)
+- Python 3.10.19 (asyncio) (003-fix-lighter-sdk)
 
 - **Python 3.11+**: 主要编程语言
 - **asyncio**: 异步编程框架
@@ -129,9 +130,9 @@ cat data/spreads_YYYY_MM_DD.csv
 - **错误处理**: 不抛出异常，通过返回值传递错误信息
 
 ## Recent Changes
+- 003-fix-lighter-sdk: Added Python 3.10.19 (asyncio)
+- 001-fix-lighter-trading: Added Python 3.11+
 - 013-fix-order-timeout: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses
-- 011-fix-lighter-hedge: Added Python 3.10+ (primarily using 3.11+ features)
-- 001-fix-order-type: Added Python 3.11+ + asyncio, websockets, decimal.Decimal, logging, pytest, dataclasses, csv
 
 ### 001-fix-order-type: 订单类型修复和成功率统计（2026-01-11）
 **核心修复**: 强制使用taker订单，移除maker订单逻辑，实现成功率统计和仓位一致性验证

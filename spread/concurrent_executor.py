@@ -57,7 +57,7 @@ class ConcurrentExecutor:
         self,
         extended_order: Dict[str, Any],
         lighter_order: Dict[str, Any],
-        timeout_ms: int = 500
+        timeout_ms: int = 8000  # 002-fix-lighter-ws: 增加到8秒，Lighter SDK需要5秒+
     ) -> Tuple[Dict, Dict, float]:
         """并发执行两个交易所的下单
 
@@ -90,7 +90,8 @@ class ConcurrentExecutor:
                     self._place_order_extended(extended_order),
                     timeout=timeout_ms / 1000
                 )
-                return {'success': True, 'order_id': result.get('order_id'), 'data': result}
+                # 🔴 FIX: 使用返回的 success 值，而不是无条件设置为 True
+                return {'success': result.get('success', False), 'order_id': result.get('order_id'), 'data': result}
             except asyncio.TimeoutError:
                 return {'success': False, 'error': 'timeout', 'order_id': None}
             except Exception as e:
@@ -105,7 +106,8 @@ class ConcurrentExecutor:
                     self._place_order_lighter(lighter_order),
                     timeout=timeout_ms / 1000
                 )
-                return {'success': True, 'order_id': result.get('order_id'), 'data': result}
+                # 🔴 FIX: 使用返回的 success 值，而不是无条件设置为 True
+                return {'success': result.get('success', False), 'order_id': result.get('order_id'), 'data': result}
             except asyncio.TimeoutError:
                 return {'success': False, 'error': 'timeout', 'order_id': None}
             except Exception as e:
@@ -184,12 +186,13 @@ class ConcurrentExecutor:
                     self._place_order_extended(extended_order),
                     timeout=self.config.order_timeout_ms / 1000
                 )
+                # 🔴 FIX: 使用返回的 success 值，而不是无条件设置为 True
                 return {
-                    'success': True,
+                    'success': result.get('success', False),  # 修复: 使用实际 success 值
                     'order_id': result.get('order_id'),
                     'filled_qty': Decimal(result.get('executed_qty', 0)),
-                    'filled_price': Decimal(result.get('avg_price', 0)),
-                    'error': None
+                    'filled_price': Decimal(result.get('avg_price', 0)) if result.get('avg_price') not in [None, '0', ''] else None,
+                    'error': result.get('error')
                 }
             except asyncio.TimeoutError:
                 return {
@@ -216,12 +219,13 @@ class ConcurrentExecutor:
                     self._place_order_lighter(lighter_order),
                     timeout=self.config.order_timeout_ms / 1000
                 )
+                # 🔴 FIX: 使用返回的 success 值，而不是无条件设置为 True
                 return {
-                    'success': True,
+                    'success': result.get('success', False),  # 修复: 使用实际 success 值
                     'order_id': result.get('order_id'),
                     'filled_qty': Decimal(result.get('executed_qty', 0)),
-                    'filled_price': Decimal(result.get('avg_price', 0)),
-                    'error': None
+                    'filled_price': Decimal(result.get('avg_price', 0)) if result.get('avg_price') not in [None, '0', ''] else None,
+                    'error': result.get('error')
                 }
             except asyncio.TimeoutError:
                 return {
@@ -387,11 +391,12 @@ class ConcurrentExecutor:
                 )
 
             self.logger.info(f"✅ [紧急平仓] 成功: {result.get('order_id')}")
+            # 🔴 FIX: 使用返回的 success 值，而不是无条件设置为 True
             return {
-                'success': True,
+                'success': result.get('success', False),  # 修复: 使用实际 success 值
                 'order_id': result.get('order_id'),
                 'filled_qty': Decimal(result.get('executed_qty', quantity)),
-                'error': None
+                'error': result.get('error')
             }
 
         except asyncio.TimeoutError:
@@ -497,12 +502,18 @@ class ConcurrentExecutor:
                 - avg_price: 成交均价
                 - error: str 或 None
         """
-        # 获取contract_id
+        # 获取contract_id（注意：Lighter的market_id可能是0，所以要用is None判断）
         contract_id = getattr(self.lighter_client, 'contract_id', None)
-        if not contract_id:
+
+        if contract_id is None:
             contract_id = getattr(self.lighter_client.config, 'contract_id', None)
 
-        if not contract_id:
+        if contract_id is None:
+            # 尝试从 market_index 获取
+            contract_id = getattr(self.lighter_client.config, 'market_index', None)
+
+        if contract_id is None:
+            self.logger.error(f"[DEBUG] contract_id 获取失败！lighter_client 类型: {type(self.lighter_client)}")
             return {
                 'success': False,
                 'order_id': None,
@@ -516,23 +527,30 @@ class ConcurrentExecutor:
         quantity = Decimal(order['quantity'])
         order_type = order.get('order_type', 'OPEN')  # 默认开仓
 
+        start = time.time()
+        self.logger.info(f"[Lighter下单开始] side={direction}, qty={quantity}, contract_id={contract_id}")
+
         try:
             if order_type == 'CLOSE':
                 # 平仓订单
                 price = Decimal(order.get('price', 0))
+                self.logger.info(f"[Lighter平仓] 调用 place_close_order 前，已耗时 {time.time() - start:.2f}s")
                 result = await self.lighter_client.place_close_order(
                     contract_id=contract_id,
                     quantity=quantity,
                     price=price,
                     side=direction
                 )
+                self.logger.info(f"[Lighter平仓] place_close_order 完成，总耗时 {time.time() - start:.2f}s")
             else:
                 # 开仓订单
+                self.logger.info(f"[Lighter开仓] 调用 place_open_order 前，已耗时 {time.time() - start:.2f}s")
                 result = await self.lighter_client.place_open_order(
                     contract_id=contract_id,
                     quantity=quantity,
                     direction=direction
                 )
+                self.logger.info(f"[Lighter开仓] place_open_order 完成，总耗时 {time.time() - start:.2f}s")
 
             # 映射OrderResult到字典格式
             return {
@@ -544,10 +562,14 @@ class ConcurrentExecutor:
             }
 
         except Exception as e:
+            # 添加详细的错误日志
+            import traceback
+            self.logger.error(f"[Lighter下单异常] 已耗时 {time.time() - start:.2f}s, {type(e).__name__}: {e}")
+            self.logger.error(f"[Lighter下单堆栈] {traceback.format_exc()}")
             return {
                 'success': False,
                 'order_id': None,
                 'executed_qty': '0',
                 'avg_price': '0',
-                'error': str(e)
+                'error': f"{type(e).__name__}: {str(e)}"
             }
