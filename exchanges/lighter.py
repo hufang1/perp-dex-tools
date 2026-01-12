@@ -8,6 +8,7 @@ import time
 import logging
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass, field
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
@@ -28,6 +29,34 @@ logging.getLogger('lighter').setLevel(logging.WARNING)
 root_logger = logging.getLogger()
 if root_logger.level == logging.DEBUG:
     root_logger.setLevel(logging.WARNING)
+
+
+# ========================================================================
+# 003-fix-lighter-sdk: SDK健康状态数据类
+# ========================================================================
+
+@dataclass
+class SDKHealthStatus:
+    """SDK健康状态
+
+    003-fix-lighter-sdk US3: 健康状态数据类
+    """
+    healthy: bool                    # SDK是否健康可用
+    errors: List[str]                # 错误消息列表
+    timestamp: float = field(default_factory=time.time)  # 检查时间戳
+
+    def is_healthy(self) -> bool:
+        """检查SDK是否健康"""
+        return self.healthy and len(self.errors) == 0
+
+    def get_error_summary(self) -> str:
+        """获取错误摘要"""
+        return "; ".join(self.errors) if self.errors else "No errors"
+
+
+# ========================================================================
+# End 003-fix-lighter-sdk data classes
+# ========================================================================
 
 
 class LighterClient(BaseExchangeClient):
@@ -105,9 +134,24 @@ class LighterClient(BaseExchangeClient):
             raise
 
     async def _initialize_lighter_client(self):
-        """Initialize the Lighter client using official SDK."""
+        """Initialize the Lighter client using official SDK.
+
+        001-fix-lighter-trading: 修复代理配置和SDK初始化问题
+        - 确保rest_client.proxy正确设置
+        - 添加健壮性检查处理延迟创建的rest_client
+        - 增强错误日志记录
+        """
         if self.lighter_client is None:
             try:
+                # 获取代理设置
+                https_proxy = os.getenv('https_proxy') or os.getenv('HTTPS_PROXY')
+                http_proxy = os.getenv('http_proxy') or os.getenv('HTTP_PROXY')
+                proxy_url = https_proxy or http_proxy
+
+                if proxy_url:
+                    self.logger.log(f"Configuring proxy for SignerClient: {proxy_url}", "INFO")
+
+                # 创建SignerClient（会在内部创建ApiClient和RESTClient）
                 self.lighter_client = SignerClient(
                     url=self.base_url,
                     private_key=self.api_key_private_key,
@@ -115,22 +159,275 @@ class LighterClient(BaseExchangeClient):
                     api_key_index=self.api_key_index,
                 )
 
-                # Check client
+                # 001-fix-lighter-trading T014: 添加rest_client.proxy设置的健壮性检查
+                if proxy_url and hasattr(self.lighter_client, 'api_client'):
+                    # 003-fix-lighter-sdk T015: 先检查api_client是否为None，避免AttributeError
+                    if self.lighter_client.api_client is not None:
+                        # 先设置configuration.proxy
+                        self.lighter_client.api_client.configuration.proxy = proxy_url
+
+                        # 检查rest_client是否存在
+                        if hasattr(self.lighter_client.api_client, 'rest_client') and self.lighter_client.api_client.rest_client is not None:
+                            # rest_client已创建，直接设置proxy
+                            self.lighter_client.api_client.rest_client.proxy = proxy_url
+                            self.logger.log(f"[LIGHTER] Proxy configured on rest_client: {proxy_url}", "INFO")
+                        else:
+                            # rest_client尚未创建，延迟设置
+                            # 注意：这可能导致首次请求时代理不生效，但后续请求会使用代理
+                            import asyncio
+                            await asyncio.sleep(0.1)
+                            if hasattr(self.lighter_client.api_client, 'rest_client') and self.lighter_client.api_client.rest_client is not None:
+                                self.lighter_client.api_client.rest_client.proxy = proxy_url
+                                self.logger.log(f"[LIGHTER] Proxy configured after delay: {proxy_url}", "INFO")
+                            else:
+                                self.logger.log(f"[LIGHTER] WARNING: rest_client not available, proxy may not be active until next request", "WARNING")
+                    else:
+                        # 003-fix-lighter-sdk: api_client为None，这是SDK初始化失败的症状
+                        self.logger.log(f"[LIGHTER] ERROR: api_client is None after SignerClient initialization!", "ERROR")
+                        self.logger.log(f"[LIGHTER] This indicates the SDK did not initialize properly. Proxy may have caused the issue.", "ERROR")
+
+                # 001-fix-lighter-trading T016: 验证check_client()返回None表示成功并添加日志记录
                 err = self.lighter_client.check_client()
                 if err is not None:
+                    self.logger.log(f"[LIGHTER] CheckClient failed: {err}", "ERROR")
                     raise Exception(f"CheckClient error: {err}")
 
-                self.logger.log("Lighter client initialized successfully", "INFO")
+                self.logger.log("[LIGHTER] CheckClient passed: SDK initialized successfully", "INFO")
+
+                # 003-fix-lighter-sdk US1 T012-T016: 验证SDK关键对象已正确初始化
+                if not self._validate_sdk_objects():
+                    raise Exception("SDK validation failed: one or more critical objects are None")
+
             except Exception as e:
-                self.logger.log(f"Failed to initialize Lighter client: {e}", "ERROR")
+                # 001-fix-lighter-trading T017: 添加代理连接失败的fallback处理
+                # 记录详细错误信息但不中断程序（除非是关键错误）
+                self.logger.log(f"[LIGHTER] Failed to initialize Lighter client: {type(e).__name__}: {str(e)}", "ERROR")
+
+                # 如果是代理相关错误，提供fallback建议
+                if proxy_url and ('proxy' in str(e).lower() or 'connection' in str(e).lower()):
+                    self.logger.log(f"[LIGHTER] WARNING: Proxy connection failed. Consider checking proxy settings or trying without proxy.", "WARNING")
+
+                # 重新抛出异常让上层处理
                 raise
+
         return self.lighter_client
+
+    # ========================================================================
+    # 003-fix-lighter-sdk: SDK对象验证和健康检查
+    # ========================================================================
+
+    def _validate_sdk_objects(self) -> bool:
+        """验证SDK关键对象已正确初始化
+
+        Returns:
+            bool: True if all objects are valid, False otherwise
+
+        003-fix-lighter-sdk US1: 验证lighter_client、api_client、rest_client存在性
+        """
+        errors = []
+
+        # 检查lighter_client
+        if self.lighter_client is None:
+            errors.append("lighter_client is None")
+        elif not hasattr(self.lighter_client, 'api_client'):
+            errors.append("lighter_client.api_client attribute does not exist")
+        elif self.lighter_client.api_client is None:
+            errors.append("api_client is None")
+        elif not hasattr(self.lighter_client.api_client, 'rest_client'):
+            errors.append("api_client.rest_client attribute does not exist")
+        elif self.lighter_client.api_client.rest_client is None:
+            errors.append("rest_client is None")
+
+        if errors:
+            # 003-fix-lighter-sdk US1 T015-T016: 记录详细的错误消息和对象状态
+            self.logger.log(f"[LIGHTER] SDK validation failed: {', '.join(errors)}", "ERROR")
+            self._log_sdk_object_states()
+            return False
+
+        self.logger.log("[LIGHTER] SDK validation passed: all objects initialized", "INFO")
+        self._log_sdk_object_states()
+        return True
+
+    def _get_sdk_object_state(self) -> Dict[str, Dict[str, Any]]:
+        """获取SDK对象状态快照
+
+        Returns:
+            Dict[str, Dict[str, Any]]: 包含每个对象状态的字典
+
+        003-fix-lighter-sdk US1 T013: 获取对象状态快照
+        """
+        state = {}
+
+        # 检查lighter_client状态
+        if self.lighter_client is None:
+            state['lighter_client'] = {'exists': False, 'type': None}
+        else:
+            state['lighter_client'] = {
+                'exists': True,
+                'type': type(self.lighter_client).__name__
+            }
+
+            # 检查api_client状态
+            if hasattr(self.lighter_client, 'api_client'):
+                if self.lighter_client.api_client is None:
+                    state['api_client'] = {'exists': False, 'type': None}
+                else:
+                    state['api_client'] = {
+                        'exists': True,
+                        'type': type(self.lighter_client.api_client).__name__
+                    }
+
+                    # 检查rest_client状态
+                    if hasattr(self.lighter_client.api_client, 'rest_client'):
+                        if self.lighter_client.api_client.rest_client is None:
+                            state['rest_client'] = {'exists': False, 'type': None}
+                        else:
+                            state['rest_client'] = {
+                                'exists': True,
+                                'type': type(self.lighter_client.api_client.rest_client).__name__
+                            }
+                    else:
+                        state['rest_client'] = {'exists': False, 'type': 'attribute missing'}
+            else:
+                state['api_client'] = {'exists': False, 'type': 'attribute missing'}
+                state['rest_client'] = {'exists': False, 'type': 'unknown'}
+
+        return state
+
+    def _log_sdk_object_states(self) -> None:
+        """记录SDK对象状态到日志
+
+        003-fix-lighter-sdk US1 T016: 记录每个对象的类型和存在状态
+        """
+        state = self._get_sdk_object_state()
+
+        for obj_name, obj_state in state.items():
+            if obj_state['exists']:
+                self.logger.log(
+                    f"[LIGHTER] SDK Object: {obj_name} = {obj_state['type']} ✓",
+                    "INFO"
+                )
+            else:
+                self.logger.log(
+                    f"[LIGHTER] SDK Object: {obj_name} = {obj_state.get('type', 'None')} ✗",
+                    "ERROR"
+                )
+
+    def _log_sdk_state_snapshot(self) -> None:
+        """记录完整的SDK状态快照到日志
+
+        003-fix-lighter-sdk US2 T020: 格式化输出对象状态
+        """
+        import time
+        timestamp = time.time()
+
+        self.logger.log("=" * 60, "INFO")
+        self.logger.log(f"[LIGHTER] SDK State Snapshot at {timestamp}", "INFO")
+        self.logger.log("-" * 60, "INFO")
+
+        state = self._get_sdk_object_state()
+        for obj_name, obj_state in state.items():
+            status_symbol = "✓" if obj_state['exists'] else "✗"
+            obj_type = obj_state.get('type', 'None')
+            self.logger.log(
+                f"  {status_symbol} {obj_name}: {obj_type}",
+                "INFO" if obj_state['exists'] else "ERROR"
+            )
+
+        # 判断整体状态
+        failed_objects = [name for name, state in state.items() if not state['exists']]
+        if failed_objects:
+            overall_status = f"Failed: {', '.join(failed_objects)}"
+            self.logger.log(f"Overall: {overall_status}", "ERROR")
+        else:
+            self.logger.log("Overall: Healthy - all objects initialized", "INFO")
+
+        self.logger.log("=" * 60, "INFO")
+
+    async def check_sdk_health(self):
+        """检查SDK健康状态
+
+        Returns:
+            SDKHealthStatus: SDK健康状态对象
+
+        003-fix-lighter-sdk US3 T027: 检查所有对象和API可用性
+        """
+        import time
+        errors = []
+
+        # 检查对象存在性
+        if self.lighter_client is None:
+            errors.append("lighter_client is None")
+        elif not hasattr(self.lighter_client, 'api_client'):
+            errors.append("lighter_client.api_client attribute does not exist")
+        elif self.lighter_client.api_client is None:
+            errors.append("api_client is None")
+        elif not hasattr(self.lighter_client.api_client, 'rest_client'):
+            errors.append("api_client.rest_client attribute does not exist")
+        elif self.lighter_client.api_client.rest_client is None:
+            errors.append("rest_client is None")
+
+        if errors:
+            return SDKHealthStatus(
+                healthy=False,
+                errors=errors,
+                timestamp=time.time()
+            )
+
+        # 检查API可用性
+        try:
+            err = self.lighter_client.check_client()
+            if err is not None:
+                errors.append(f"CheckClient failed: {err}")
+                return SDKHealthStatus(
+                    healthy=False,
+                    errors=errors,
+                    timestamp=time.time()
+                )
+        except Exception as e:
+            errors.append(f"CheckClient exception: {type(e).__name__}: {e}")
+            return SDKHealthStatus(
+                healthy=False,
+                errors=errors,
+                timestamp=time.time()
+            )
+
+        return SDKHealthStatus(
+            healthy=True,
+            errors=[],
+            timestamp=time.time()
+        )
+
+    # ========================================================================
+    # End 003-fix-lighter-sdk
+    # ========================================================================
 
     async def connect(self) -> None:
         """Connect to Lighter."""
         try:
-            # Initialize shared API client
-            self.api_client = ApiClient(configuration=Configuration(host=self.base_url))
+            # 🔴 FIX: 配置代理支持 - 从环境变量获取代理设置
+            # 检查环境变量中的代理设置
+            https_proxy = os.getenv('https_proxy') or os.getenv('HTTPS_PROXY')
+            http_proxy = os.getenv('http_proxy') or os.getenv('HTTP_PROXY')
+            proxy_url = https_proxy or http_proxy
+
+            # 创建配置对象
+            config = Configuration(host=self.base_url)
+
+            # 如果存在代理设置，则应用
+            if proxy_url:
+                config.proxy = proxy_url
+                self.logger.log(f"Using proxy: {proxy_url}", "INFO")
+
+            # Initialize shared API client with proxy configuration
+            self.api_client = ApiClient(configuration=config)
+
+            # 🔴 FIX: 在初始化 Lighter client 之前，先获取 contract_id
+            # 因为 _initialize_lighter_client() 和后续代码需要 contract_id
+            if not hasattr(self.config, 'contract_id') or self.config.contract_id is None:
+                self.logger.log(f"[LIGHTER] 获取 contract_id for {self.config.ticker}...", "INFO")
+                contract_id, tick_size = await self.get_contract_attributes()
+                self.logger.log(f"[LIGHTER] contract_id={contract_id}, tick_size={tick_size}", "INFO")
 
             # Initialize Lighter client
             await self._initialize_lighter_client()
@@ -268,14 +565,123 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Lighter client not initialized. Call connect() first.")
 
         # Create order using official SDK
-        create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
-        if error is not None:
-            return OrderResult(
-                success=False, order_id=str(order_params['client_order_index']),
-                error_message=f"Order creation error: {error}")
+        try:
+            # 🔴 DEBUG: 打印order_params内容以诊断问题
+            self.logger.log(f"[DEBUG] order_params: {order_params}", "INFO")
+            self.logger.log(f"[DEBUG] lighter_client类型: {type(self.lighter_client)}", "INFO")
+            self.logger.log(f"[DEBUG] lighter_client存在: {self.lighter_client is not None}", "INFO")
 
-        else:
-            return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+            # 003-fix-lighter-sdk: 验证contract_id已正确设置
+            if not hasattr(self.config, 'contract_id') or self.config.contract_id is None:
+                error_msg = "contract_id is not set! Call get_contract_attributes() before placing orders."
+                self.logger.log(f"[LIGHTER] ERROR: {error_msg}", "ERROR")
+                self.logger.log(f"[LIGHTER] ERROR: config attributes: {dir(self.config)}", "ERROR")
+                return OrderResult(
+                    success=False,
+                    order_id=str(order_params.get('client_order_index', 'unknown')),
+                    error_message=error_msg
+                )
+
+            self.logger.log(f"[DEBUG] contract_id已设置: {self.config.contract_id}", "INFO")
+
+            # 检查客户端的api_client和tx_api状态
+            self.logger.log(f"[DEBUG] api_client存在: {hasattr(self.lighter_client, 'api_client') and self.lighter_client.api_client is not None}", "INFO")
+            if hasattr(self.lighter_client, 'api_client') and self.lighter_client.api_client:
+                self.logger.log(f"[DEBUG] api_client配置: {self.lighter_client.api_client.configuration}", "INFO")
+
+            # 003-fix-lighter-sdk: 验证SDK的market_info是否已加载
+            if hasattr(self.config, 'market_info') and self.config.market_info is not None:
+                self.logger.log(f"[DEBUG] market_info已加载: symbol={self.config.market_info.symbol}, market_id={self.config.market_info.market_id}", "INFO")
+            else:
+                self.logger.log(f"[LIGHTER] WARNING: market_info未加载，这可能导致SDK查找market失败", "WARNING")
+
+            create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
+
+            self.logger.log(f"[DEBUG] create_order返回: create_order={create_order}, tx_hash={tx_hash}, error={error}", "INFO")
+
+            if error is not None:
+                return OrderResult(
+                    success=False, order_id=str(order_params['client_order_index']),
+                    error_message=f"Order creation error: {error}")
+
+            else:
+                return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+        except lighter.exceptions.BadRequestException as e:
+            # 捕获400错误（通常是请求参数错误）
+            self.logger.log(f"[LIGHTER] ERROR: BadRequestException (400) in create_order", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception: {e}", "ERROR")
+            if hasattr(e, 'body') and e.body:
+                self.logger.log(f"[LIGHTER] ERROR: Response body: {e.body}", "ERROR")
+            if hasattr(e, 'data') and e.data:
+                self.logger.log(f"[LIGHTER] ERROR: Response data: {e.data}", "ERROR")
+            # 记录SDK状态快照
+            self._log_sdk_state_snapshot()
+            return OrderResult(
+                success=False,
+                order_id=str(order_params.get('client_order_index', 'unknown')),
+                error_message=f"BadRequestException (400): {str(e)}"
+            )
+        except lighter.exceptions.ServiceException as e:
+            # 捕获500错误（服务器错误）
+            self.logger.log(f"[LIGHTER] ERROR: ServiceException (500-599) in create_order", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception: {e}", "ERROR")
+            if hasattr(e, 'status'):
+                self.logger.log(f"[LIGHTER] ERROR: HTTP Status: {e.status}", "ERROR")
+            if hasattr(e, 'body') and e.body:
+                self.logger.log(f"[LIGHTER] ERROR: Response body: {e.body}", "ERROR")
+            # 记录SDK状态快照
+            self._log_sdk_state_snapshot()
+            return OrderResult(
+                success=False,
+                order_id=str(order_params.get('client_order_index', 'unknown')),
+                error_message=f"ServiceException (500): {str(e)}"
+            )
+        except lighter.exceptions.UnauthorizedException as e:
+            # 捕获401错误（认证错误）
+            self.logger.log(f"[LIGHTER] ERROR: UnauthorizedException (401) in create_order", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception: {e}", "ERROR")
+            # 记录SDK状态快照
+            self._log_sdk_state_snapshot()
+            return OrderResult(
+                success=False,
+                order_id=str(order_params.get('client_order_index', 'unknown')),
+                error_message=f"UnauthorizedException (401): Authentication failed"
+            )
+        except AttributeError as e:
+            # 捕获AttributeError（SDK内部错误，通常是ret.code访问失败）
+            self.logger.log(f"[LIGHTER] ERROR: AttributeError in create_order - SDK内部错误", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception: {e}", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: 这通常表示send_tx返回了None，可能是网络连接或API服务器问题", "ERROR")
+            # 记录SDK状态快照
+            self._log_sdk_state_snapshot()
+            return OrderResult(
+                success=False,
+                order_id=str(order_params.get('client_order_index', 'unknown')),
+                error_message=f"SDK内部错误: {str(e)} - 可能是网络连接问题或API服务器不可用"
+            )
+        except Exception as e:
+            # 001-fix-lighter-trading T015: 增强错误捕获，记录完整SDK异常堆栈
+            import traceback
+            error_type = type(e).__name__
+            error_msg = str(e)
+            stack_trace = traceback.format_exc()
+
+            # 003-fix-lighter-sdk US2 T021-T022: 记录SDK状态快照
+            self.logger.log(f"[LIGHTER] ERROR: SDK exception in create_order", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception type: {error_type}", "ERROR")
+            self.logger.log(f"[LIGHTER] ERROR: Exception message: {error_msg}", "ERROR")
+
+            # 记录SDK状态快照
+            self._log_sdk_state_snapshot()
+
+            self.logger.log(f"[LIGHTER] ERROR: Stack trace:\n{stack_trace}", "ERROR")
+
+            # 返回包含详细错误信息的OrderResult
+            return OrderResult(
+                success=False,
+                order_id=str(order_params.get('client_order_index', 'unknown')),
+                error_message=f"SDK exception: {error_type}: {error_msg}"
+            )
 
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
                                 side: str) -> OrderResult:
@@ -318,18 +724,30 @@ class LighterClient(BaseExchangeClient):
         011-fix-lighter-hedge: Now uses IOC orders - returns immediately after placement.
         No wait loop - order will either fill or cancel immediately.
         """
+        import time
+        start = time.time()
+
         self.current_order = None
         self.current_order_client_id = None
+
+        self.logger.log(f"[Lighter开仓] 开始获取价格，已耗时 {time.time() - start:.2f}s", "INFO")
         order_price = await self.get_order_price(direction)
+        self.logger.log(f"[Lighter开仓] 获取价格完成，已耗时 {time.time() - start:.2f}s", "INFO")
+
         order_price = self.round_to_tick(order_price)
 
+        self.logger.log(f"[Lighter开仓] 调用 place_limit_order 前，已耗时 {time.time() - start:.2f}s", "INFO")
         order_result = await self.place_limit_order(contract_id, quantity, order_price, direction)
+        self.logger.log(f"[Lighter开仓] place_limit_order 完成，已耗时 {time.time() - start:.2f}s", "INFO")
+
         if not order_result.success:
             raise Exception(f"[OPEN] Error placing order: {order_result.error_message}")
 
         # 011-fix-lighter-hedge: Wait briefly (0.5s) for WebSocket update, not 10s
         # IOC orders should execute immediately, but we wait a short time for WebSocket callback
+        self.logger.log(f"[Lighter开仓] 等待 WebSocket 更新前，已耗时 {time.time() - start:.2f}s", "INFO")
         await asyncio.sleep(0.5)
+        self.logger.log(f"[Lighter开仓] WebSocket 等待完成，已耗时 {time.time() - start:.2f}s", "INFO")
 
         # Return immediately - IOC order is either filled or cancelled
         if self.current_order is not None:

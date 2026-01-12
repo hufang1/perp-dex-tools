@@ -148,7 +148,7 @@ class SpreadArbConfig:
     ioc_slippage_tolerance_rate: Decimal = Decimal('0.0005')      # IOC滑点容忍度（默认0.05%）
     ioc_slippage_min_rate: Decimal = Decimal('0.0003')            # IOC滑点容忍度最小值（默认0.03%）
     ioc_slippage_max_rate: Decimal = Decimal('0.0005')            # IOC滑点容忍度最大值（默认0.05%）
-    order_timeout_ms: int = 500                                   # 订单超时时间（毫秒，默认500ms）
+    order_timeout_ms: int = 8000                                  # 🔴 FIX: 订单超时时间（毫秒）- 002-fix-lighter-ws: Lighter SDK需要5秒+，增加到8000ms
     emergency_close_timeout_ms: int = 1000                        # 紧急平仓超时时间（毫秒，默认1000ms）
 
     # ==================== 012-dual-leg-concurrency: 双腿并发交易配置 ====================

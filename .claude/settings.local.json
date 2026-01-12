@@ -35,7 +35,16 @@
       "Bash(python3.13:*)",
       "Bash(pip3 show:*)",
       "Bash(find:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(NO_PROXY=\"*\" curl:*)",
+      "Bash(pkill:*)",
+      "Bash(env:*)",
+      "Bash(if [ -f .env ])",
+      "Bash(then head -20 .env)",
+      "Bash(else echo \".env 文件不存在\")",
+      "Bash(fi:*)"
     ]
   }
 }

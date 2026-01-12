@@ -33,7 +33,6 @@ from .models import (
 
 # 011-async-ws-ioc-trading: 异步重构模块
 from .performance_monitor import PerformanceMonitor
-from .websocket_manager import WebSocketManager
 from .concurrent_executor import ConcurrentExecutor
 from .ioc_order_manager import IocOrderManager
 from .risk_validator import RiskValidator
@@ -132,10 +131,6 @@ class SpreadArbitrageBot:
         # 性能监控器 - 所有异步功能的核心
         self.performance_monitor = PerformanceMonitor(config, self.logger)
         self.logger.info("性能监控器已初始化")
-
-        # WebSocket管理器 - 实时订单簿数据
-        self.websocket_manager: Optional[WebSocketManager] = None
-        # WebSocket将在_initialize中连接，避免在__init__中执行异步操作
 
         # 并发执行器 - 双腿并发交易
         self.concurrent_executor: Optional[ConcurrentExecutor] = None
@@ -250,29 +245,6 @@ class SpreadArbitrageBot:
     async def _initialize(self):
         """初始化连接和客户端"""
         self.logger.info("初始化中...")
-
-        # ========================================================================
-        # 011-async-ws-ioc-trading: 初始化WebSocket管理器
-        # ========================================================================
-        self.websocket_manager = WebSocketManager(self.config, self.logger)
-
-        # 设置订单簿回调
-        self.websocket_manager.set_orderbook_callback(self._handle_websocket_orderbook)
-
-        # 连接WebSocket（如果启用了）
-        try:
-            self.logger.info("连接WebSocket...")
-            await self.websocket_manager.connect_all()
-
-            # 订阅订单簿
-            symbol = f"{self.config.ticker}-USD"
-            await self.websocket_manager.subscribe_orderbook('extended', symbol)
-            await self.websocket_manager.subscribe_orderbook('lighter', symbol)
-
-            self.logger.info("✅ WebSocket已连接并订阅订单簿")
-        except Exception as e:
-            self.logger.warning(f"⚠️ WebSocket连接失败: {e}，将使用现有订单簿更新机制")
-            # WebSocket失败不影响原有功能，继续使用原有的订单簿更新机制
 
         # 初始化并发执行器
         self.concurrent_executor = ConcurrentExecutor(
@@ -2817,14 +2789,9 @@ class SpreadArbitrageBot:
         Returns:
             (extended_timestamp_ms, lighter_timestamp_ms)
         """
-        ext_ts = None
-        lit_ts = None
-
-        if self.websocket_manager:
-            ext_ts = self.websocket_manager.get_orderbook_timestamp('extended')
-            lit_ts = self.websocket_manager.get_orderbook_timestamp('lighter')
-
-        return ext_ts, lit_ts
+        # WebSocket 时间戳由 exchanges 模块处理
+        # 这里返回 None，因为订单簿数据通过 sync_orderbooks() 从 exchange clients 获取
+        return None, None
 
     # ========================================================================
 
@@ -2832,13 +2799,6 @@ class SpreadArbitrageBot:
         """清理资源"""
         self.logger.info("清理资源...")
         self.stop_flag = True
-
-        # ========================================================================
-        # 011-async-ws-ioc-trading: 断开WebSocket连接
-        # ========================================================================
-        if self.websocket_manager:
-            self.logger.info("断开WebSocket连接...")
-            await self.websocket_manager.disconnect_all()
 
         # 导出性能监控统计
         if self.config.enable_enhanced_logging:
