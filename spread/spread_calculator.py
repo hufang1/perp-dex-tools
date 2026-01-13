@@ -36,9 +36,9 @@ class SpreadCalculator:
 
     def __init__(
         self,
-        open_threshold: Decimal = Decimal("0.002"),
+        open_threshold: Decimal = Decimal("0.0002"),
         slippage_buffer: Decimal = Decimal("0.0005"),
-        min_profit: Decimal = Decimal("0.001"),
+        min_profit: Decimal = Decimal("0.0001"),
         max_spread: Decimal = Decimal("0.05")
     ):
         """

@@ -256,13 +256,13 @@ class BotConfig:
     配置参数可通过命令行参数、环境变量或默认值设置
     """
     # 交易参数
-    symbol: str = "BTC"                                    # 交易对
+    symbol: str = "ETH"                                    # 交易对
     target_quantity: Decimal = Decimal("0.01")             # 目标交易数量
-    min_spread_threshold: Decimal = Decimal("0.002")       # 最小价差阈值 0.2%
+    min_spread_threshold: Decimal = Decimal("0.0002")       # 最小价差阈值 0.2%
 
     # 风控参数
     slippage_buffer: Decimal = Decimal("0.0005")           # 滑点保护 0.05%
-    min_profit: Decimal = Decimal("0.001")                 # 最小利润 0.1%
+    min_profit: Decimal = Decimal("0.0001")                 # 最小利润 0.1%
     max_spread: Decimal = Decimal("0.05")                  # 极端价差阈值 5%
     single_side_timeout: float = 3.0                       # 单边超时 3 秒
 
