@@ -12,6 +12,7 @@
 import asyncio
 import signal
 import sys
+import uuid
 from decimal import Decimal
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -28,6 +29,7 @@ from models import (
     BotStats,
     Trade,
     SpreadInfo,
+    OpenPosition,
 )
 from order_book_manager import OrderBookManager
 from spread_calculator import SpreadCalculator
@@ -35,6 +37,10 @@ from risk_manager import RiskManager
 from trade_executor import TradeExecutor, ExecutionResult
 from state_manager import StateManager
 from exceptions import SpreadArbError, SingleSideExecutionError
+from spread_monitor import SpreadMonitor
+from arithmetic_open_strategy import ArithmeticOpenStrategy
+from smart_close_strategy import SmartCloseStrategy
+from position_balance_checker import PositionBalanceChecker
 
 # 设置日志
 logging.basicConfig(
@@ -63,6 +69,10 @@ class SpreadArbBot:
 
         # 组件初始化（稍后在 start 方法中完成）
         self.order_book_manager: Optional[OrderBookManager] = None
+        self.spread_monitor: Optional[SpreadMonitor] = None
+        self.open_strategy: Optional[ArithmeticOpenStrategy] = None
+        self.close_strategy: Optional[SmartCloseStrategy] = None
+        self.balance_checker: Optional[PositionBalanceChecker] = None
         self.spread_calculator: Optional[SpreadCalculator] = None
         self.risk_manager: Optional[RiskManager] = None
         self.trade_executor: Optional[TradeExecutor] = None
@@ -77,17 +87,20 @@ class SpreadArbBot:
         # 统计信息
         self.start_time: Optional[datetime] = None
 
-        logger.info("套利机器人初始化完成")
-        logger.info(f"配置: 交易对={config.symbol}, "
+        # 订单簿同步任务
+        self._orderbook_sync_task: Optional[asyncio.Task] = None
+
+        logger.debug("套利机器人初始化完成")
+        logger.debug(f"配置: 交易对={config.symbol}, "
                    f"数量={config.target_quantity}, "
                    f"开仓阈值={config.min_spread_threshold:.2%}, "
                    f"最小利润={config.min_profit:.2%}")
 
     async def start(self) -> None:
         """启动机器人"""
-        logger.info("=" * 50)
+        logger.debug("=" * 50)
         logger.info("启动机器人...")
-        logger.info("=" * 50)
+        logger.debug("=" * 50)
 
         try:
             self.start_time = datetime.now()
@@ -104,13 +117,19 @@ class SpreadArbBot:
             # 4. 启动订单簿连接
             await self.order_book_manager.start()
 
-            # 5. 启动自动保存
+            # 5. 启动价差监控器 (016-spread-optimize)
+            await self.spread_monitor.start()
+
+            # 6. 启动订单簿同步任务
+            self._orderbook_sync_task = asyncio.create_task(self._sync_orderbooks_loop())
+
+            # 7. 启动自动保存
             await self.state_manager.start_auto_save()
 
-            # 6. 设置信号处理
+            # 8. 设置信号处理
             self._setup_signal_handlers()
 
-            # 7. 运行主交易循环
+            # 9. 运行主交易循环
             self._running = True
             await self.run_trading_loop()
 
@@ -129,6 +148,15 @@ class SpreadArbBot:
         self._stop_event.set()
 
         try:
+            # 停止订单簿同步任务
+            if self._orderbook_sync_task:
+                self._orderbook_sync_task.cancel()
+                try:
+                    await self._orderbook_sync_task
+                except asyncio.CancelledError:
+                    pass
+                self._orderbook_sync_task = None
+
             # 停止自动保存
             if self.state_manager:
                 await self.state_manager.stop_auto_save()
@@ -141,6 +169,10 @@ class SpreadArbBot:
             if self.order_book_manager:
                 await self.order_book_manager.stop()
 
+            # 停止价差监控器 (016-spread-optimize)
+            if self.spread_monitor:
+                await self.spread_monitor.stop()
+
             # 打印统计信息
             self._print_stats()
 
@@ -151,7 +183,7 @@ class SpreadArbBot:
 
     async def run_trading_loop(self) -> None:
         """运行主交易循环"""
-        logger.info("主交易循环已启动")
+        logger.debug("主交易循环已启动")
 
         check_interval = 1.0  # 每秒检查一次
 
@@ -192,20 +224,17 @@ class SpreadArbBot:
             logger.debug("订单簿未就绪，等待中...")
             return
 
-        # 计算开仓价差
-        spread_info = await self.spread_calculator.calculate_open_spread(
-            self.order_book_manager,
-            self.config.target_quantity
-        )
+        # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
+        spread_info = self.spread_monitor.get_current_spread()
 
-        if spread_info is None:
+        if spread_info is None or not spread_info.is_valid():
             return
 
-        # 检查是否满足开仓条件
-        if self.spread_calculator.should_open(spread_info.open_spread):
-            logger.info(
-                f"发现套利机会: 价差={spread_info.open_spread:.2%}"
-            )
+        # 使用等差数列开仓策略判断 (016-spread-optimize)
+        should_open, reason = self.open_strategy.should_open(spread_info)
+
+        if should_open:
+            logger.info(reason)
 
             # 风控验证
             validation = await self.risk_manager.validate_open_position(
@@ -221,18 +250,17 @@ class SpreadArbBot:
             # 切换到开仓状态
             self.state_manager.set_state(BotState.OPENING)
             await self.state_manager.save_state()
+        else:
+            logger.debug(reason)
 
     async def _process_opening_state(self) -> None:
         """处理 OPENING 状态：执行开仓"""
         logger.info("执行开仓...")
 
-        # 计算价差
-        spread_info = await self.spread_calculator.calculate_open_spread(
-            self.order_book_manager,
-            self.config.target_quantity
-        )
+        # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
+        spread_info = self.spread_monitor.get_current_spread()
 
-        if spread_info is None:
+        if spread_info is None or not spread_info.is_valid():
             logger.warning("无法获取价差信息，取消开仓")
             self.state_manager.set_state(BotState.IDLE)
             await self.state_manager.save_state()
@@ -250,7 +278,7 @@ class SpreadArbBot:
                 state=PositionState.LONG,
                 extended_entry_price=result.extended_price,
                 lighter_entry_price=result.lighter_price,
-                entry_spread=spread_info.open_spread,
+                entry_spread=spread_info.spread_pct,
                 entry_time=datetime.now(),
                 extended_quantity=self.config.target_quantity,
                 lighter_quantity=-self.config.target_quantity,
@@ -259,14 +287,46 @@ class SpreadArbBot:
             )
 
             self.state_manager.update_position(position)
-            self.state_manager.set_state(BotState.HOLDING)
-            await self.state_manager.save_state()
+
+            # 更新缓存价差 (016-spread-optimize)
+            self.open_strategy.update_cached_spread(spread_info.spread_pct)
+
+            # 添加仓位到智能平仓系统 (016-spread-optimize)
+            open_position = OpenPosition(
+                position_id=str(uuid.uuid4()),
+                open_time=datetime.now().timestamp(),
+                ext_price=result.extended_price,
+                lig_price=result.lighter_price,
+                open_spread=spread_info.spread_pct,
+                quantity=self.config.target_quantity,
+                ext_order_id=result.extended_order_id,
+                lig_order_id=result.lighter_order_id,
+                is_active=True,
+            )
+            self.close_strategy.add_position(open_position)
 
             logger.info(
                 f"开仓成功: Extended={result.extended_price}, "
                 f"Lighter={result.lighter_price}, "
-                f"价差={spread_info.open_spread:.2%}"
+                f"价差={spread_info.spread_pct:.2%}"
             )
+
+            # 启动仓位平衡检测 (016-spread-optimize)
+            logger.info(f"开始仓位平衡检测（缓冲期{self.config.balance_check_buffer}秒）...")
+            balance_result = await self.balance_checker.start_monitoring(
+                self.config.target_quantity
+            )
+
+            if balance_result.is_balanced:
+                # 验证通过，切换到HOLDING状态
+                logger.info("仓位平衡验证通过，进入HOLDING状态")
+                self.state_manager.set_state(BotState.HOLDING)
+                await self.state_manager.save_state()
+            else:
+                # 验证失败（已触发紧急平仓）
+                logger.error("仓位平衡验证失败，已执行紧急平仓")
+                self.state_manager.set_state(BotState.IDLE)
+                await self.state_manager.save_state()
 
         else:
             # 开仓失败
@@ -289,29 +349,24 @@ class SpreadArbBot:
             await self.state_manager.save_state()
             return
 
-        # 计算平仓价差
-        spread_info = await self.spread_calculator.calculate_close_spread(
-            self.order_book_manager,
-            abs(position.extended_quantity)
-        )
+        # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
+        spread_info = self.spread_monitor.get_current_spread()
 
-        if spread_info is None or spread_info.close_spread is None:
+        if spread_info is None or not spread_info.is_valid():
             return
 
-        # 检查是否满足平仓条件
-        if self.spread_calculator.should_close(
-            position.entry_spread,
-            spread_info.close_spread,
-            position
-        ):
-            logger.info(
-                f"价差收敛: 开仓={position.entry_spread:.2%}, "
-                f"平仓={spread_info.close_spread:.2%}"
-            )
+        # 使用智能平仓策略判断 (016-spread-optimize)
+        trigger = self.close_strategy.should_close(spread_info)
+
+        if trigger.is_triggered:
+            logger.info(trigger.format_log())
 
             # 切换到平仓状态
             self.state_manager.set_state(BotState.CLOSING)
             await self.state_manager.save_state()
+        else:
+            # 输出持仓监控日志
+            self.close_strategy.monitor_position(spread_info)
 
     async def _process_closing_state(self) -> None:
         """处理 CLOSING 状态：执行平仓"""
@@ -350,6 +405,9 @@ class SpreadArbBot:
             self.state_manager.update_position(None)
             self.state_manager.set_state(BotState.IDLE)
             await self.state_manager.save_state()
+
+            # 平掉所有仓位记录 (016-spread-optimize)
+            self.close_strategy.close_all()
 
             logger.info(
                 f"平仓成功: 利润=${profit:.2f}, "
@@ -421,11 +479,12 @@ class SpreadArbBot:
 
     async def _init_clients(self) -> None:
         """初始化交易所客户端"""
-        logger.info("初始化交易所客户端...")
+        logger.debug("初始化交易所客户端...")
 
         # 添加项目根目录到 sys.path 以便导入 exchanges 模块
         import sys
         from pathlib import Path
+        import requests
         project_root = Path(__file__).parent.parent.absolute()
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
@@ -440,10 +499,28 @@ class SpreadArbBot:
                 for key, value in config_dict.items():
                     setattr(self, key, value)
 
+        # 获取 Lighter market_id
+        lighter_base_url = "https://mainnet.zklighter.elliot.ai"
+        lighter_market_url = f"{lighter_base_url}/api/v1/orderBooks"
+        try:
+            response = requests.get(lighter_market_url, headers={"accept": "application/json"}, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            lighter_market_id = None
+            for market in data.get("order_books", []):
+                if market["symbol"] == self.config.symbol:
+                    lighter_market_id = market["market_id"]
+                    break
+            if lighter_market_id is None:
+                raise ValueError(f"Lighter market {self.config.symbol} not found")
+        except Exception as e:
+            logger.error(f"Failed to get Lighter market_id: {e}")
+            raise
+
         # 创建配置字典
         lighter_config_dict = {
             'ticker': self.config.symbol,
-            'contract_id': '',  # 将在获取合约信息时设置
+            'contract_id': lighter_market_id,  # 使用获取到的 market_id
             'quantity': self.config.target_quantity,
             'tick_size': Decimal('0.01'),  # 将在获取合约信息时更新
             'close_order_side': 'sell'
@@ -464,14 +541,38 @@ class SpreadArbBot:
         self.lighter_client = LighterClient(lighter_config)
         self.extended_client = ExtendedClient(extended_config)
 
-        logger.info("交易所客户端初始化完成")
+        # 连接到交易所并建立 WebSocket 连接
+        logger.info("连接到 Lighter 交易所...")
+        await self.lighter_client.connect()
+
+        logger.info("连接到 Extended 交易所...")
+        await self.extended_client.connect()
+
+        # 等待 WebSocket 连接建立
+        logger.info("等待订单簿数据...")
+        # await asyncio.sleep(3)
+
+        logger.debug("交易所客户端初始化完成")
 
     async def _init_components(self) -> None:
         """初始化组件"""
-        logger.info("初始化组件...")
+        logger.debug("初始化组件...")
 
         # 订单簿管理器
         self.order_book_manager = OrderBookManager(self.config.symbol)
+
+        # 价差监控器 (016-spread-optimize)
+        self.spread_monitor = SpreadMonitor(
+            self.order_book_manager,
+            open_threshold=self.config.min_spread_threshold,
+            slippage_buffer=self.config.slippage_buffer
+        )
+
+        # 等差数列开仓策略 (016-spread-optimize)
+        self.open_strategy = ArithmeticOpenStrategy(self.config)
+
+        # 智能平仓系统 (016-spread-optimize)
+        self.close_strategy = SmartCloseStrategy(self.config)
 
         # 价差计算器
         self.spread_calculator = SpreadCalculator(
@@ -496,56 +597,130 @@ class SpreadArbBot:
             timeout=self.config.single_side_timeout
         )
 
+        # 仓位平衡检测器 (016-spread-optimize)
+        self.balance_checker = PositionBalanceChecker(
+            self.lighter_client,
+            self.extended_client,
+            self.trade_executor,
+            buffer_seconds=self.config.balance_check_buffer
+        )
+
         # 状态管理器
         state_file = Path("logs") / "spread_arb_state.json"
         self.state_manager = StateManager(state_file)
 
-        logger.info("组件初始化完成")
+        logger.debug("组件初始化完成")
 
     async def _load_state(self) -> None:
         """加载状态"""
-        logger.info("加载状态...")
+        logger.debug("加载状态...")
 
         state = await self.state_manager.load_state()
-        logger.info(f"当前状态: {state.value}")
+        logger.debug(f"当前状态: {state.value}")
 
         position = self.state_manager.get_position()
         if position:
-            logger.info(f"持仓: {position.state.value}, "
+            logger.debug(f"持仓: {position.state.value}, "
                        f"数量={abs(position.extended_quantity)}, "
                        f"开仓价差={position.entry_spread:.2%}")
 
     def _setup_signal_handlers(self) -> None:
         """设置信号处理器"""
         def signal_handler(signum, frame):
-            logger.info(f"收到信号 {signum}，准备关闭...")
+            logger.debug(f"收到信号 {signum}，准备关闭...")
             self._stop_event.set()
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+
+    async def _sync_orderbooks_loop(self) -> None:
+        """
+        订单簿同步循环
+
+        定期从交易所客户端获取订单簿数据并更新到 OrderBookManager
+        """
+        from decimal import Decimal
+
+        # 等待客户端被初始化
+        while not self._stop_event.is_set():
+            if self.extended_client is not None and self.lighter_client is not None:
+                break
+            await asyncio.sleep(0.5)
+
+        while not self._stop_event.is_set():
+            try:
+                # 从 Extended 客户端获取订单簿
+                if hasattr(self.extended_client, 'orderbook') and self.extended_client.orderbook:
+                    orderbook = self.extended_client.orderbook
+                    bids = {}
+                    asks = {}
+
+                    # 转换 bids {price: quantity}
+                    if orderbook.get('bid'):
+                        for item in orderbook['bid']:
+                            bids[Decimal(str(item['p']))] = Decimal(str(item['q']))
+
+                    # 转换 asks {price: quantity}
+                    if orderbook.get('ask'):
+                        for item in orderbook['ask']:
+                            asks[Decimal(str(item['p']))] = Decimal(str(item['q']))
+
+                    if bids and asks:
+                        self.order_book_manager.update_extended_order_book(
+                            bids=bids,
+                            asks=asks,
+                            sequence=0,
+                            is_snapshot=True
+                        )
+
+                # 从 Lighter 客户端获取订单簿
+                if hasattr(self.lighter_client, 'ws_manager') and self.lighter_client.ws_manager:
+                    best_bid = self.lighter_client.ws_manager.best_bid
+                    best_ask = self.lighter_client.ws_manager.best_ask
+
+                    if best_bid and best_ask:
+                        # Lighter 只返回最佳买卖价
+                        best_bid_dec = Decimal(str(best_bid))
+                        best_ask_dec = Decimal(str(best_ask))
+
+                        bids = {best_bid_dec: Decimal("1.0")}  # 数量设为1.0表示有流动性
+                        asks = {best_ask_dec: Decimal("1.0")}
+
+                        self.order_book_manager.update_lighter_order_book(
+                            bids=bids,
+                            asks=asks,
+                            sequence=0,
+                            is_snapshot=True
+                        )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"订单簿同步异常: {e}")
+
+            # 每100ms同步一次
+            await asyncio.sleep(0.1)
 
     # ========================================================================
     # 私有方法：辅助
     # ========================================================================
 
     def _print_stats(self) -> None:
-        """打印统计信息"""
+        """打印统计信息（精简单行格式）"""
         stats = self.get_stats()
 
-        logger.info("=" * 50)
-        logger.info("运行统计:")
-        logger.info(f"  总交易次数: {stats.total_trades}")
-        logger.info(f"  盈利次数: {stats.profitable_trades}")
-        logger.info(f"  胜率: {stats.win_rate:.1%}")
-        logger.info(f"  总利润: ${stats.total_profit:.2f}")
-        logger.info(f"  总手续费: ${stats.total_fees:.2f}")
-        logger.info(f"  净利润: ${stats.net_profit:.2f}")
+        # 单行格式: 统计: 交易10次 | 胜率60% | 净利润$0.50 | 运行时间1:23:45
+        stats_str = (f"统计: 交易{stats.total_trades}次 | "
+                    f"胜率{stats.win_rate:.1%} | "
+                    f"净利润${stats.net_profit:.2f}")
 
         if stats.start_time:
             uptime = datetime.now() - stats.start_time
-            logger.info(f"  运行时间: {uptime}")
+            hours, remainder = divmod(int(uptime.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            stats_str += f" | 运行{hours}:{minutes:02d}:{seconds:02d}"
 
-        logger.info("=" * 50)
+        logger.info(stats_str)
 
     async def _calculate_close_spread_from_result(self, result: ExecutionResult) -> Decimal:
         """从执行结果计算平仓价差"""
@@ -591,16 +766,16 @@ def parse_arguments() -> BotConfig:
     parser.add_argument(
         "--spread-threshold",
         type=Decimal,
-        default=Decimal("0.002"),
+        default=Decimal("0.0002"),
         dest="min_spread_threshold",
-        help="最小价差阈值 (默认: 0.002 = 0.2%%)"
+        help="最小价差阈值 (默认: 0.002 = 0.02%%)"
     )
 
     parser.add_argument(
         "--slippage-buffer",
         type=Decimal,
-        default=Decimal("0.0005"),
-        help="滑点保护 (默认: 0.0005 = 0.05%%)"
+        default=Decimal("0.0001"),
+        help="滑点保护 (默认: 0.0005 = 0.01%%)"
     )
 
     parser.add_argument(
@@ -615,6 +790,22 @@ def parse_arguments() -> BotConfig:
         type=Decimal,
         default=Decimal("0.05"),
         help="极端价差阈值 (默认: 0.05 = 5%%)"
+    )
+
+    parser.add_argument(
+        "--spread-step",
+        type=Decimal,
+        default=Decimal("0.0005"),
+        dest="spread_step",
+        help="价差步进值 (默认: 0.0005 = 0.05%%) (016-spread-optimize)"
+    )
+
+    parser.add_argument(
+        "--balance-buffer",
+        type=float,
+        default=3.0,
+        dest="balance_check_buffer",
+        help="仓位平衡检测缓冲期（秒） (默认: 3.0) (016-spread-optimize)"
     )
 
     parser.add_argument(
@@ -646,6 +837,8 @@ def parse_arguments() -> BotConfig:
         slippage_buffer=args.slippage_buffer,
         min_profit=args.min_profit,
         max_spread=args.max_spread,
+        spread_step=args.spread_step,
+        balance_check_buffer=args.balance_check_buffer,
         single_side_timeout=args.single_side_timeout,
         dry_run=args.dry_run,
         verbose=args.verbose,

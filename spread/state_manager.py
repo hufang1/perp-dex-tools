@@ -23,6 +23,8 @@ from models import (
     PositionState,
     BotStats,
     BotConfig,
+    Portfolio,  # 新增 (016-spread-optimize)
+    OpenPosition,  # 新增 (016-spread-optimize)
 )
 from exceptions import StateLoadError, StateSaveError
 
@@ -49,6 +51,7 @@ class StateManager:
         # 内存状态
         self._current_state: BotState = BotState.IDLE
         self._position: Optional[Position] = None
+        self._portfolio: Portfolio = Portfolio()  # 新增 (016-spread-optimize)
         self._stats: BotStats = BotStats()
         self._last_save_time: Optional[datetime] = None
 
@@ -73,6 +76,7 @@ class StateManager:
                 logger.info("状态文件不存在，使用默认状态")
                 self._current_state = BotState.IDLE
                 self._position = None
+                self._portfolio = Portfolio()  # 新增 (016-spread-optimize)
                 self._stats = BotStats()
                 return self._current_state
 
@@ -83,7 +87,7 @@ class StateManager:
             state_str = data.get("state", "IDLE")
             self._current_state = BotState[state_str]
 
-            # 解析持仓
+            # 解析持仓（保持向后兼容）
             position_data = data.get("position")
             if position_data:
                 self._position = Position(
@@ -100,6 +104,42 @@ class StateManager:
             else:
                 self._position = None
 
+            # 解析Portfolio（新增 016-spread-optimize，向后兼容）
+            portfolio_data = data.get("portfolio")
+            if portfolio_data:
+                self._portfolio = Portfolio()
+                for pos_data in portfolio_data.get("positions", []):
+                    position = OpenPosition(
+                        position_id=pos_data.get("position_id", ""),
+                        open_time=pos_data.get("open_time", 0),
+                        ext_price=Decimal(str(pos_data.get("ext_price", 0))),
+                        lig_price=Decimal(str(pos_data.get("lig_price", 0))),
+                        open_spread=Decimal(str(pos_data.get("open_spread", 0))),
+                        quantity=Decimal(str(pos_data.get("quantity", 0))),
+                        ext_order_id=pos_data.get("ext_order_id"),
+                        lig_order_id=pos_data.get("lig_order_id"),
+                        is_active=pos_data.get("is_active", True),
+                    )
+                    self._portfolio.add_position(position)
+            else:
+                # 向后兼容：如果有旧Position，转换为Portfolio
+                self._portfolio = Portfolio()
+                if self._position and self._position.is_open():
+                    # 将旧Position转换为OpenPosition
+                    import time
+                    open_position = OpenPosition(
+                        position_id=f"legacy_{int(time.time())}",
+                        open_time=self._position.entry_time.timestamp() if self._position.entry_time else time.time(),
+                        ext_price=self._position.extended_entry_price,
+                        lig_price=self._position.lighter_entry_price,
+                        open_spread=self._position.entry_spread,
+                        quantity=abs(self._position.extended_quantity),
+                        ext_order_id=self._position.extended_order_id,
+                        lig_order_id=self._position.lighter_order_id,
+                        is_active=True,
+                    )
+                    self._portfolio.add_position(open_position)
+
             # 解析统计信息
             stats_data = data.get("stats", {})
             self._stats = BotStats(
@@ -110,6 +150,17 @@ class StateManager:
                 start_time=datetime.fromisoformat(stats_data["start_time"]) if stats_data.get("start_time") else None,
                 last_trade_time=datetime.fromisoformat(stats_data["last_trade_time"]) if stats_data.get("last_trade_time") else None,
             )
+
+            # 解析策略状态配置 (016-spread-optimize Phase 9: T053 状态恢复)
+            config_state_data = data.get("config_state")
+            if config_state_data:
+                self._config_state = {
+                    "cached_open_spread": Decimal(str(config_state_data.get("cached_open_spread", 0))),
+                    "spread_step": Decimal(str(config_state_data.get("spread_step", "0.0005"))),
+                }
+                logger.info(f"策略状态已恢复: cached_spread={self._config_state['cached_open_spread']:.2%}")
+            else:
+                self._config_state = None
 
             logger.info(f"状态加载成功: {self._current_state.value}")
 
@@ -147,6 +198,7 @@ class StateManager:
             data = {
                 "state": self._current_state.value,
                 "position": None,
+                "portfolio": None,  # 新增 (016-spread-optimize)
                 "stats": {
                     "total_trades": self._stats.total_trades,
                     "profitable_trades": self._stats.profitable_trades,
@@ -169,6 +221,36 @@ class StateManager:
                     "lighter_quantity": str(self._position.lighter_quantity),
                     "extended_order_id": self._position.extended_order_id,
                     "lighter_order_id": self._position.lighter_order_id,
+                }
+
+            # 新增 (016-spread-optimize): 保存Portfolio
+            if self._portfolio and self._portfolio.positions:
+                data["portfolio"] = {
+                    "positions": [
+                        {
+                            "position_id": pos.position_id,
+                            "open_time": pos.open_time,
+                            "ext_price": str(pos.ext_price),
+                            "lig_price": str(pos.lig_price),
+                            "open_spread": str(pos.open_spread),
+                            "quantity": str(pos.quantity),
+                            "ext_order_id": pos.ext_order_id,
+                            "lig_order_id": pos.lig_order_id,
+                            "is_active": pos.is_active,
+                        }
+                        for pos in self._portfolio.positions
+                    ],
+                    "total_quantity": str(self._portfolio.total_quantity),
+                    "weighted_avg_entry_spread": str(self._portfolio.weighted_avg_entry_spread),
+                    "first_open_time": self._portfolio.first_open_time,
+                    "last_open_time": self._portfolio.last_open_time,
+                }
+
+            # 新增 (016-spread-optimize Phase 9): 保存策略状态配置
+            if hasattr(self, '_config') and self._config:
+                data["config_state"] = {
+                    "cached_open_spread": str(self._config.cached_open_spread),
+                    "spread_step": str(self._config.spread_step),
                 }
 
             # 确保目录存在
@@ -208,6 +290,14 @@ class StateManager:
     def update_position(self, position: Position) -> None:
         """更新持仓信息"""
         self._position = position
+
+    def get_portfolio(self) -> Portfolio:
+        """获取仓位组合"""
+        return self._portfolio
+
+    def update_portfolio(self, portfolio: Portfolio) -> None:
+        """更新仓位组合"""
+        self._portfolio = portfolio
 
     def get_state(self) -> BotState:
         """获取机器人状态"""

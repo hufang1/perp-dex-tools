@@ -44,8 +44,13 @@ class LighterCustomWebSocketManager:
         if self.logger:
             self.logger.log(message, level)
 
-    def update_order_book(self, side: str, updates: List[Dict[str, Any]]):
-        """Update the order book with new price/size information."""
+    def update_order_book(self, side: str, updates: List[Any]):
+        """Update the order book with new price/size information.
+
+        Supports two formats:
+        - List format: [price, size]
+        - Dict format: {"price": ..., "size": ...}
+        """
         if side not in ["bids", "asks"]:
             self._log(f"Invalid side parameter: {side}. Must be 'bids' or 'asks'", "ERROR")
             return
@@ -58,18 +63,35 @@ class LighterCustomWebSocketManager:
 
         for update in updates:
             try:
-                if not isinstance(update, dict):
-                    self._log(f"Invalid update format: expected dict, got {type(update)}", "ERROR")
-                    continue
+                price = None
+                size = None
 
-                if "price" not in update or "size" not in update:
-                    self._log(f"Missing required fields in update: {update}", "ERROR")
-                    continue
+                # Handle list format: [price, size]
+                if isinstance(update, list):
+                    if len(update) >= 2:
+                        price = float(update[0])
+                        size = float(update[1])
+                    else:
+                        self._log(f"Invalid list format: {update}", "ERROR")
+                        continue
 
-                price = float(update["price"])
-                size = float(update["size"])
+                # Handle dict format: {"price": ..., "size": ...}
+                elif isinstance(update, dict):
+                    if "price" in update and "size" in update:
+                        price = float(update["price"])
+                        size = float(update["size"])
+                    else:
+                        self._log(f"Missing required fields in dict: {update}", "ERROR")
+                        continue
+                else:
+                    self._log(f"Invalid update format: expected list or dict, got {type(update)}", "ERROR")
+                    continue
 
                 # Validate price and size are reasonable
+                if price is None or size is None:
+                    self._log(f"Price or size is None: price={price}, size={size}", "ERROR")
+                    continue
+
                 if price <= 0:
                     self._log(f"Invalid price in update: {price}", "ERROR")
                     continue
@@ -82,7 +104,7 @@ class LighterCustomWebSocketManager:
                     ob.pop(price, None)
                 else:
                     ob[price] = size
-            except (KeyError, ValueError, TypeError) as e:
+            except (ValueError, TypeError) as e:
                 self._log(f"Error processing order book update: {e}, update: {update}", "ERROR")
                 continue
 
@@ -171,19 +193,21 @@ class LighterCustomWebSocketManager:
             raise
 
     def get_best_levels(self) -> Tuple[Tuple[Optional[float], Optional[float]], Tuple[Optional[float], Optional[float]]]:
-        """Get the best bid and ask levels with sufficient size for our order (~$5000)."""
+        """Get the best bid and ask levels from order book."""
         try:
-            # Get all bid levels with sufficient size
-            bid_levels = [(price, size) for price, size in self.order_book["bids"].items()
-                          if size * price >= 40000]
+            best_bid = None
+            best_ask = None
 
-            # Get all ask levels with sufficient size
-            ask_levels = [(price, size) for price, size in self.order_book["asks"].items()
-                          if size * price >= 40000]
+            # 直接使用最佳价格，不检查流动性
+            if self.order_book["bids"]:
+                best_bid_price = max(self.order_book["bids"].keys())
+                best_bid_size = self.order_book["bids"][best_bid_price]
+                best_bid = (best_bid_price, best_bid_size)
 
-            # Get best bid (highest price) and best ask (lowest price)
-            best_bid = max(bid_levels) if bid_levels else (None, None)
-            best_ask = min(ask_levels) if ask_levels else (None, None)
+            if self.order_book["asks"]:
+                best_ask_price = min(self.order_book["asks"].keys())
+                best_ask_size = self.order_book["asks"][best_ask_price]
+                best_ask = (best_ask_price, best_ask_size)
 
             return best_bid, best_ask
         except (ValueError, KeyError) as e:
@@ -311,9 +335,19 @@ class LighterCustomWebSocketManager:
                                     self.update_order_book("asks", order_book.get("asks", []))
                                     self.snapshot_loaded = True
 
+                                    # Get the best bid and ask levels from snapshot
+                                    (best_bid_price, best_bid_size), (best_ask_price, best_ask_size) = self.get_best_levels()
+
+                                    # Update global variables
+                                    if best_bid_price is not None:
+                                        self.best_bid = best_bid_price
+                                    if best_ask_price is not None:
+                                        self.best_ask = best_ask_price
+
                                     self._log(f"Lighter order book snapshot loaded with "
                                               f"{len(self.order_book['bids'])} bids and "
-                                              f"{len(self.order_book['asks'])} asks", "INFO")
+                                              f"{len(self.order_book['asks'])} asks, "
+                                              f"best_bid={self.best_bid}, best_ask={self.best_ask}", "INFO")
 
                                 elif data.get("type") == "update/order_book" and self.snapshot_loaded:
                                     # Check for cutoff/incomplete updates first

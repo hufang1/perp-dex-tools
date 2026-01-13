@@ -101,16 +101,27 @@ def validate_optional_environment() -> List[str]:
 
 
 def print_environment_summary():
-    """打印环境配置摘要"""
-    logger.info("=" * 50)
-    logger.info("环境配置摘要:")
-    logger.info(f"  LIGHTER_ACCOUNT_INDEX: {os.getenv('LIGHTER_ACCOUNT_INDEX', '未设置')}")
-    logger.info(f"  LIGHTER_API_KEY_INDEX: {os.getenv('LIGHTER_API_KEY_INDEX', '未设置')}")
-    logger.info(f"  EXTENDED_VAULT: {'已设置' if os.getenv('EXTENDED_VAULT') else '未设置'}")
-    logger.info(f"  EXTENDED_API_KEY: {'已设置' if os.getenv('EXTENDED_API_KEY') else '未设置'}")
-    logger.info(f"  TELEGRAM_BOT_TOKEN: {'已设置' if os.getenv('TELEGRAM_BOT_TOKEN') else '未设置'}")
-    logger.info(f"  TIMEZONE: {os.getenv('TIMEZONE', 'Asia/Shanghai')}")
-    logger.info("=" * 50)
+    """打印环境配置摘要（精简单行格式）"""
+    logger.info(f"环境: Lighter账户{os.getenv('LIGHTER_ACCOUNT_INDEX', '未设置')} | "
+                f"Extended Vault{'已配置' if os.getenv('EXTENDED_VAULT') else '未配置'}")
+
+
+def format_config_summary(symbol: str, size: float, open_threshold: float,
+                          profit_target: float, buffer: float) -> str:
+    """
+    格式化配置为单行摘要
+
+    Args:
+        symbol: 交易对
+        size: 交易数量
+        open_threshold: 开仓阈值（百分比）
+        profit_target: 盈利目标（百分比）
+        buffer: 缓冲期（秒）
+
+    Returns:
+        单行配置摘要字符串
+    """
+    return f"配置: {symbol}|{size}|开仓{open_threshold:.2%}|盈利{profit_target:.2%}|缓冲{buffer}s"
 
 
 def check_env_before_start():

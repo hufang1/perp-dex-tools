@@ -261,7 +261,7 @@ class BotConfig:
     min_spread_threshold: Decimal = Decimal("0.0002")       # 最小价差阈值 0.2%
 
     # 风控参数
-    slippage_buffer: Decimal = Decimal("0.0005")           # 滑点保护 0.05%
+    slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护 0.05%
     min_profit: Decimal = Decimal("0.0001")                 # 最小利润 0.1%
     max_spread: Decimal = Decimal("0.05")                  # 极端价差阈值 5%
     single_side_timeout: float = 3.0                       # 单边超时 3 秒
@@ -275,6 +275,44 @@ class BotConfig:
     dry_run: bool = False                                  # 模拟运行模式
     verbose: bool = False                                  # 详细日志模式
     enable_telegram: bool = False                          # 启用 Telegram 通知
+
+    # ========== 新增字段 (016-spread-optimize) ==========
+    # 等差数列开仓策略相关
+    cached_open_spread: Decimal = field(default_factory=lambda: Decimal("0"))
+    """
+    缓存的开仓价差（用于等差数列策略）
+    - 初始值为0
+    - 首次开仓时设置为当前价差
+    - 后续每次开仓后更新为新的价差
+    - 价差缩小时不降低
+    """
+
+    spread_step: Decimal = field(default_factory=lambda: Decimal("0.0005"))
+    """
+    价差步进值（用于等差数列策略）
+    - 默认0.05% = 0.0005
+    - 下次开仓阈值 = cached_open_spread + spread_step
+    """
+
+    # 仓位平衡检测相关
+    balance_check_buffer: float = 3.0
+    """
+    仓位平衡检测缓冲期（秒）
+    - 默认3秒
+    - 开仓后在此时间内验证两边仓位
+    - 不平衡时立即平仓
+    """
+
+    # 智能平仓系统相关
+    total_fee_rate: Decimal = field(default_factory=lambda: Decimal("0.0005"))
+    """
+    总手续费率
+    - 默认0.05% = 0.0005
+    - 包含两个交易所的开仓和平仓手续费
+    - Extended: 0.025% x 2 = 0.05%
+    - Lighter: ~0.025% x 2 = 0.05%
+    - 总计约0.05%
+    """
 
     def validate(self) -> bool:
         """
@@ -302,4 +340,281 @@ class BotConfig:
         if self.min_profit < min_required_profit:
             return False
 
+        # 新增字段验证 (016-spread-optimize)
+        if self.spread_step <= 0:
+            return False
+        if self.balance_check_buffer <= 0:
+            return False
+        if self.total_fee_rate < 0:
+            return False
+        if self.min_profit <= self.total_fee_rate:
+            return False  # 确保有利润空间
+
         return True
+
+
+# ========== 新增数据类 (016-spread-optimize) ==========
+
+class OpenStrategyState(Enum):
+    """开仓策略状态"""
+    WAITING = "waiting"      # 等待价差
+    READY = "ready"          # 满足开仓条件
+    EXECUTING = "executing"  # 执行开仓中
+    SUCCESS = "success"      # 开仓成功
+    FAILED = "failed"        # 开仓失败
+
+
+@dataclass
+class RealTimeSpreadInfo:
+    """
+    实时价差信息（用于SpreadMonitor）
+
+    与SpreadInfo不同，这个类用于实时监控两个交易所的订单簿价格
+    """
+    # Extended订单簿价格
+    ext_bid: Decimal
+    ext_ask: Decimal
+
+    # Lighter订单簿价格
+    lig_bid: Decimal
+    lig_ask: Decimal
+
+    # 计算的价差
+    spread_abs: Decimal     # 绝对价差
+    spread_pct: Decimal      # 百分比价差
+
+    # 时间戳
+    timestamp: float         # Unix时间戳
+
+    @property
+    def ext_mid(self) -> Decimal:
+        """Extended中间价"""
+        return (self.ext_bid + self.ext_ask) / 2
+
+    @property
+    def lig_mid(self) -> Decimal:
+        """Lighter中间价"""
+        return (self.lig_bid + self.lig_ask) / 2
+
+    def is_valid(self) -> bool:
+        """验证价差数据是否有效"""
+        if self.ext_bid <= 0 or self.ext_ask <= 0:
+            return False
+        if self.lig_bid <= 0 or self.lig_ask <= 0:
+            return False
+        if self.ext_bid >= self.ext_ask:
+            return False
+        if self.lig_bid >= self.lig_ask:
+            return False
+        if self.spread_abs < 0:
+            return False
+        return True
+
+    def format_log(self, open_threshold: Decimal, slippage_buffer: Decimal) -> str:
+        """格式化为单行日志字符串
+
+        Args:
+            open_threshold: 开仓阈值（如 0.20%）
+            slippage_buffer: 滑点保护（如 0.05%）
+
+        Returns:
+            格式化的日志字符串
+        """
+        # 计算实际开仓阈值
+        required_threshold = open_threshold + slippage_buffer
+
+        # 判断是否满足开仓条件
+        action = "开仓" if self.spread_pct >= required_threshold else "不开仓"
+
+        return (
+            f"价差: Ext[{self.ext_bid:.1f}/{self.ext_ask:.1f}] "
+            f"Lig[{self.lig_bid:.1f}/{self.lig_ask:.1f}] = "
+            f"{self.spread_abs:.1f} ({self.spread_pct:.2%}) "
+            f"< {required_threshold:.2%} ({open_threshold:.2%}阈值+{slippage_buffer:.2%}滑点) {action}"
+        )
+
+
+@dataclass
+class OpenPosition:
+    """
+    单笔开仓记录（用于等差数列策略）
+    """
+    # 基础信息
+    position_id: str                    # 唯一标识
+    open_time: float                    # 开仓时间戳
+
+    # 价格信息
+    ext_price: Decimal                  # Extended开仓价格
+    lig_price: Decimal                  # Lighter开仓价格
+    open_spread: Decimal                # 开仓价差
+
+    # 数量信息
+    quantity: Decimal                   # 开仓数量
+
+    # 订单信息
+    ext_order_id: Optional[str] = None
+    lig_order_id: Optional[str] = None
+
+    # 状态
+    is_active: bool = True              # 是否仍持有（未平仓）
+
+    def format_log(self) -> str:
+        """格式化为单行日志"""
+        status = "持有" if self.is_active else "已平"
+        return (
+            f"仓位[{self.position_id[:8]}]: "
+            f"{status} | "
+            f"数量={self.quantity} | "
+            f"价差={self.open_spread:.2%} | "
+            f"Ext={self.ext_price:.1f} | "
+            f"Lig={self.lig_price:.1f}"
+        )
+
+
+@dataclass
+class Portfolio:
+    """
+    仓位组合（支持等差数列多笔仓位）
+
+    管理多笔开仓记录，计算加权平均价差
+    """
+    # 持仓列表
+    positions: list[OpenPosition] = field(default_factory=list)
+
+    # 统计信息
+    total_quantity: Decimal = field(default_factory=lambda: Decimal("0"))
+    weighted_avg_entry_spread: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    # 时间范围
+    first_open_time: Optional[float] = None
+    last_open_time: Optional[float] = None
+
+    def add_position(self, position: OpenPosition) -> None:
+        """添加新仓位"""
+        self.positions.append(position)
+        self._recalculate()
+
+    def close_position(self, position_id: str) -> Optional[OpenPosition]:
+        """平仓指定仓位"""
+        for pos in self.positions:
+            if pos.position_id == position_id and pos.is_active:
+                pos.is_active = False
+                self._recalculate()
+                return pos
+        return None
+
+    def close_all(self) -> list[OpenPosition]:
+        """平掉所有仓位"""
+        closed = []
+        for pos in self.positions:
+            if pos.is_active:
+                pos.is_active = False
+                closed.append(pos)
+        self._recalculate()
+        return closed
+
+    def get_active_positions(self) -> list[OpenPosition]:
+        """获取所有活跃仓位"""
+        return [p for p in self.positions if p.is_active]
+
+    def get_total_entry_spread(self) -> Decimal:
+        """获取加权平均开仓价差"""
+        return self.weighted_avg_entry_spread
+
+    def _recalculate(self) -> None:
+        """重新计算统计信息"""
+        active = self.get_active_positions()
+        if not active:
+            self.total_quantity = Decimal("0")
+            self.weighted_avg_entry_spread = Decimal("0")
+            self.first_open_time = None
+            self.last_open_time = None
+            return
+
+        # 计算总数量和加权平均价差
+        total_qty = Decimal("0")
+        weighted_spread = Decimal("0")
+
+        times = [p.open_time for p in active]
+
+        for pos in active:
+            total_qty += pos.quantity
+            weighted_spread += pos.open_spread * pos.quantity
+
+        self.total_quantity = total_qty
+        self.weighted_avg_entry_spread = weighted_spread / total_qty if total_qty > 0 else Decimal("0")
+        self.first_open_time = min(times) if times else None
+        self.last_open_time = max(times) if times else None
+
+    def format_log(self) -> str:
+        """格式化为单行日志"""
+        active_count = len(self.get_active_positions())
+        return (
+            f"持仓: {active_count}笔 | "
+            f"总量={self.total_quantity} | "
+            f"均价差={self.weighted_avg_entry_spread:.2%}"
+        )
+
+
+@dataclass
+class BalanceCheckResult:
+    """
+    仓位平衡检查结果
+    """
+    is_balanced: bool                    # 是否平衡
+    ext_quantity: Decimal                # Extended仓位数量
+    lig_quantity: Decimal                # Lighter仓位数量
+    check_time: float                    # 检查时间戳
+
+    # 差异信息
+    quantity_diff: Decimal = field(default_factory=lambda: Decimal("0"))
+    diff_percentage: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    def format_log(self) -> str:
+        """格式化为单行日志"""
+        if self.is_balanced:
+            return f"仓位平衡: Ext {self.ext_quantity} / Lig {self.lig_quantity}"
+        else:
+            return (
+                f"仓位不平衡: Ext {self.ext_quantity} != Lig {self.lig_quantity} | "
+                f"差异={self.quantity_diff} ({self.diff_percentage:.1%})"
+            )
+
+
+@dataclass
+class CloseTrigger:
+    """
+    平仓触发信息
+    """
+    # 触发条件
+    is_triggered: bool                   # 是否触发平仓
+
+    # 价差信息
+    entry_spread: Decimal                # 开仓价差（加权平均）
+    current_spread: Decimal              # 当前市场价差
+    profit_target: Decimal               # 盈利目标
+    fee_rate: Decimal                    # 手续费率
+
+    # 计算结果
+    expected_profit: Decimal             # 预期利润
+    actual_profit: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    # 时间
+    trigger_time: float = 0.0            # 触发时间
+
+    def format_log(self) -> str:
+        """格式化为单行日志"""
+        if self.is_triggered:
+            return (
+                f"平仓触发: 开仓{self.entry_spread:.2%} >= "
+                f"当前{self.current_spread:.2%} + "
+                f"盈利{self.profit_target:.2%} + "
+                f"手续费{self.fee_rate:.2%} | "
+                f"利润={self.actual_profit:.2f}"
+            )
+        else:
+            return (
+                f"持仓监控: 开仓{self.entry_spread:.2%} vs "
+                f"当前{self.current_spread:.2%} | "
+                f"利润={self.expected_profit:.2%}"
+            )

@@ -85,30 +85,41 @@ class TradeExecutor:
     async def execute_open_position(
         self,
         quantity: Decimal,
-        spread: SpreadInfo
+        spread
     ) -> ExecutionResult:
         """
-        执行开仓（并发发送订单）
+        执行开仓（并发发送订单）- Taker模式 (016-spread-optimize)
 
-        开仓方向：
-        - Extended: 买入（使用 spread.extended_ask_vwap）
-        - Lighter: 卖出（使用 spread.lighter_bid_vwap）
+        开仓方向（Taker模式，即时成交）：
+        - Extended: 买入（使用 ask 价格）
+        - Lighter: 卖出（使用 bid 价格）
 
         Args:
             quantity: 交易数量
-            spread: 价差信息
+            spread: 价差信息（RealTimeSpreadInfo或SpreadInfo）
 
         Returns:
             ExecutionResult 对象
         """
         start_time = time.time()
-        logger.info(f"开始执行开仓: 数量={quantity}")
+        logger.info(f"开仓[Taker]: 数量={quantity}")
 
         try:
-            # 并发发送两个订单
+            # Taker模式价格计算 (016-spread-optimize)
+            # 买入用ask，卖出用bid
+            if hasattr(spread, 'ext_ask'):
+                # RealTimeSpreadInfo
+                ext_price = spread.ext_ask
+                lig_price = spread.lig_bid
+            else:
+                # SpreadInfo（向后兼容）
+                ext_price = getattr(spread, 'extended_ask_vwap', None)
+                lig_price = getattr(spread, 'lighter_bid_vwap', None)
+
+            # 并发发送两个订单（Taker模式）
             results = await asyncio.gather(
-                self._place_extended_order("buy", quantity, spread.extended_ask_vwap),
-                self._place_lighter_order("sell", quantity, spread.lighter_bid_vwap),
+                self._place_extended_order_taker("buy", quantity, ext_price),
+                self._place_lighter_order_taker("sell", quantity, lig_price),
                 return_exceptions=True
             )
 
@@ -140,8 +151,8 @@ class TradeExecutor:
             # 处理执行结果
             if execution_status["both_filled"]:
                 logger.info(
-                    f"开仓成功: Extended={extended_result['order_id']}, "
-                    f"Lighter={lighter_result['order_id']}, "
+                    f"开仓成功[Taker]: Ext={extended_result['order_id']}, "
+                    f"Lig={lighter_result['order_id']}, "
                     f"耗时={execution_time:.3f}秒"
                 )
                 return ExecutionResult(
@@ -193,11 +204,11 @@ class TradeExecutor:
         quantity: Decimal
     ) -> ExecutionResult:
         """
-        执行平仓（并发发送订单）
+        执行平仓（并发发送订单）- Taker模式 (016-spread-optimize)
 
-        平仓方向：
-        - Extended: 卖出
-        - Lighter: 买入
+        平仓方向（Taker模式，即时成交）：
+        - Extended: 卖出（使用 bid 价格）
+        - Lighter: 买入（使用 ask 价格）
 
         Args:
             position: 当前持仓
@@ -207,16 +218,13 @@ class TradeExecutor:
             ExecutionResult 对象
         """
         start_time = time.time()
-        logger.info(f"开始执行平仓: 数量={quantity}")
+        logger.info(f"平仓[Taker]: 数量={quantity}")
 
         try:
-            # 并发发送两个订单
-            # 注意：平仓时需要获取当前市场价格
-            # 这里简化处理，实际应该从订单簿获取 VWAP
-
+            # Taker模式：使用市价单确保即时成交 (016-spread-optimize)
             results = await asyncio.gather(
-                self._place_extended_order("sell", quantity, None),  # 市价单
-                self._place_lighter_order("buy", quantity, None),   # 市价单
+                self._place_extended_order_taker("sell", quantity, None),
+                self._place_lighter_order_taker("buy", quantity, None),
                 return_exceptions=True
             )
 
@@ -248,8 +256,8 @@ class TradeExecutor:
             # 处理执行结果
             if execution_status["both_filled"]:
                 logger.info(
-                    f"平仓成功: Extended={extended_result['order_id']}, "
-                    f"Lighter={lighter_result['order_id']}, "
+                    f"平仓成功[Taker]: Ext={extended_result['order_id']}, "
+                    f"Lig={lighter_result['order_id']}, "
                     f"耗时={execution_time:.3f}秒"
                 )
                 return ExecutionResult(
@@ -362,7 +370,7 @@ class TradeExecutor:
         side: str
     ) -> bool:
         """
-        强平（单边成交时使用）
+        强平（单边成交时使用）- Taker模式 (016-spread-optimize)
 
         Args:
             exchange: 需要强平的交易所
@@ -372,19 +380,19 @@ class TradeExecutor:
         Returns:
             是否成功
         """
-        logger.warning(f"执行强平: {exchange} {side} {quantity}")
+        logger.warning(f"强平[Taker]: {exchange} {side} {quantity}")
 
         try:
             if exchange == "extended":
                 if side == "buy":
-                    result = await self._place_extended_order("sell", quantity, None)
+                    result = await self._place_extended_order_taker("sell", quantity, None)
                 else:
-                    result = await self._place_extended_order("buy", quantity, None)
+                    result = await self._place_extended_order_taker("buy", quantity, None)
             else:  # lighter
                 if side == "buy":
-                    result = await self._place_lighter_order("sell", quantity, None)
+                    result = await self._place_lighter_order_taker("sell", quantity, None)
                 else:
-                    result = await self._place_lighter_order("buy", quantity, None)
+                    result = await self._place_lighter_order_taker("buy", quantity, None)
 
             if isinstance(result, Exception):
                 logger.error(f"强平失败: {result}")
@@ -485,6 +493,104 @@ class TradeExecutor:
 
         except Exception as e:
             logger.error(f"Lighter 订单失败: {e}")
+            raise
+
+    async def _place_extended_order_taker(
+        self,
+        side: str,
+        quantity: Decimal,
+        price: Optional[Decimal]
+    ) -> Dict[str, Any]:
+        """
+        下 Extended Taker 订单 (016-spread-optimize)
+
+        Taker模式：使用对手价确保即时成交
+        - 买入：使用ask价格（或更高）
+        - 卖出：使用bid价格（或更低）
+
+        Args:
+            side: "buy" 或 "sell"
+            quantity: 数量
+            price: 价格（None表示市价单，或指定具体价格）
+
+        Returns:
+            订单结果字典
+        """
+        try:
+            # Taker模式：直接使用市价单或对手价 (016-spread-optimize)
+            if price is None:
+                # 市价单，直接成交
+                result = await self.extended_client.place_market_order(
+                    side=side,
+                    amount=quantity
+                )
+                logger.debug(f"Ext Taker市价单: {side} {quantity}")
+            else:
+                # 使用指定价格（应该是对手价）
+                # 买入时价格略高于ask，卖出时价格略低于bid
+                result = await self.extended_client.place_limit_order(
+                    side=side,
+                    amount=quantity,
+                    price=price
+                )
+                logger.debug(f"Ext Taker限价单: {side} {quantity} @ {price}")
+
+            return {
+                "order_id": result.get("order_id"),
+                "price": result.get("price")
+            }
+
+        except Exception as e:
+            logger.error(f"Extended Taker订单失败: {e}")
+            raise
+
+    async def _place_lighter_order_taker(
+        self,
+        side: str,
+        quantity: Decimal,
+        price: Optional[Decimal]
+    ) -> Dict[str, Any]:
+        """
+        下 Lighter Taker 订单 (016-spread-optimize)
+
+        Taker模式：使用对手价确保即时成交
+        - 买入：使用ask价格（或更高）
+        - 卖出：使用bid价格（或更低）
+
+        Args:
+            side: "buy" 或 "sell"
+            quantity: 数量
+            price: 价格（None表示市价单，或指定具体价格）
+
+        Returns:
+            订单结果字典
+        """
+        try:
+            # Taker模式：直接使用市价单或对手价 (016-spread-optimize)
+            if price is None:
+                # 市价单，直接成交
+                result = await self.lighter_client.place_market_order(
+                    side=side,
+                    amount=quantity
+                )
+                logger.debug(f"Lig Taker市价单: {side} {quantity}")
+            else:
+                # 使用指定价格（应该是对手价）
+                # 买入时价格略高于ask，卖出时价格略低于bid
+                result = await self.lighter_client.place_limit_order(
+                    side=side,
+                    amount=quantity,
+                    price=price
+                )
+                logger.debug(f"Lig Taker限价单: {side} {quantity} @ {price}")
+
+            return {
+                "order_id": result.get("order_id"),
+                "price": result.get("price")
+            }
+
+        except Exception as e:
+            logger.error(f"Lighter Taker订单失败: {e}")
             raise
 
     async def _check_order_status(
