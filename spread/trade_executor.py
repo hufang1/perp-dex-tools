@@ -511,34 +511,41 @@ class TradeExecutor:
         Args:
             side: "buy" 或 "sell"
             quantity: 数量
-            price: 价格（None表示市价单，或指定具体价格）
+            price: 价格（None表示自动获取对手价，或指定具体价格）
 
         Returns:
             订单结果字典
         """
         try:
-            # Taker模式：直接使用市价单或对手价 (016-spread-optimize)
-            if price is None:
-                # 市价单，直接成交
-                result = await self.extended_client.place_market_order(
-                    side=side,
-                    amount=quantity
-                )
-                logger.debug(f"Ext Taker市价单: {side} {quantity}")
-            else:
-                # 使用指定价格（应该是对手价）
-                # 买入时价格略高于ask，卖出时价格略低于bid
-                result = await self.extended_client.place_limit_order(
-                    side=side,
-                    amount=quantity,
-                    price=price
-                )
-                logger.debug(f"Ext Taker限价单: {side} {quantity} @ {price}")
+            contract_id = self.extended_client.config.contract_id
 
-            return {
-                "order_id": result.get("order_id"),
-                "price": result.get("price")
-            }
+            # Taker模式：获取对手价确保即时成交
+            if price is None:
+                best_bid, best_ask = await self.extended_client.fetch_bbo_prices(contract_id)
+                if side == "buy":
+                    # 买入使用ask价格确保成交
+                    price = best_ask
+                else:
+                    # 卖出使用bid价格确保成交
+                    price = best_bid
+
+            # 调用 Extended 客户端的 taker 订单方法
+            # 使用 place_open_order 但不使用 post_only，且价格跨越价差
+            result = await self.extended_client.place_taker_order(
+                contract_id=contract_id,
+                quantity=quantity,
+                side=side,
+                price=price
+            )
+            logger.debug(f"Ext Taker订单: {side} {quantity} @ {price}")
+
+            if result.success:
+                return {
+                    "order_id": result.order_id,
+                    "price": str(result.price) if result.price else str(price)
+                }
+            else:
+                raise Exception(result.error_message)
 
         except Exception as e:
             logger.error(f"Extended Taker订单失败: {e}")
@@ -560,34 +567,41 @@ class TradeExecutor:
         Args:
             side: "buy" 或 "sell"
             quantity: 数量
-            price: 价格（None表示市价单，或指定具体价格）
+            price: 价格（None表示自动获取对手价，或指定具体价格）
 
         Returns:
             订单结果字典
         """
         try:
-            # Taker模式：直接使用市价单或对手价 (016-spread-optimize)
-            if price is None:
-                # 市价单，直接成交
-                result = await self.lighter_client.place_market_order(
-                    side=side,
-                    amount=quantity
-                )
-                logger.debug(f"Lig Taker市价单: {side} {quantity}")
-            else:
-                # 使用指定价格（应该是对手价）
-                # 买入时价格略高于ask，卖出时价格略低于bid
-                result = await self.lighter_client.place_limit_order(
-                    side=side,
-                    amount=quantity,
-                    price=price
-                )
-                logger.debug(f"Lig Taker限价单: {side} {quantity} @ {price}")
+            contract_id = self.lighter_client.config.contract_id
 
-            return {
-                "order_id": result.get("order_id"),
-                "price": result.get("price")
-            }
+            # Taker模式：获取对手价确保即时成交
+            if price is None:
+                best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(contract_id)
+                if side == "buy":
+                    # 买入使用ask价格确保成交
+                    price = best_ask
+                else:
+                    # 卖出使用bid价格确保成交
+                    price = best_bid
+
+            # 调用 Lighter 客户端下市价单（通过使用对手价的限价单实现）
+            # place_limit_order 参数: (contract_id, quantity, price, side)
+            result = await self.lighter_client.place_limit_order(
+                contract_id=contract_id,
+                quantity=quantity,
+                price=price,
+                side=side
+            )
+            logger.debug(f"Lig Taker订单: {side} {quantity} @ {price}")
+
+            if result.success:
+                return {
+                    "order_id": result.order_id,
+                    "price": str(result.price) if result.price else str(price)
+                }
+            else:
+                raise Exception(result.error_message)
 
         except Exception as e:
             logger.error(f"Lighter Taker订单失败: {e}")
@@ -610,14 +624,24 @@ class TradeExecutor:
         """
         try:
             if exchange == "extended":
-                status = await self.extended_client.get_order_status(order_id)
+                order_info = await self.extended_client.get_order_info(order_id)
             else:
-                status = await self.lighter_client.get_order_status(order_id)
+                order_info = await self.lighter_client.get_order_info(order_id)
+
+            if order_info is None:
+                return {"filled": False}
+
+            # OrderInfo has status and filled_size attributes
+            is_filled = order_info.status in ['FILLED', 'PARTIALLY_FILLED']
+            filled_price = order_info.price if is_filled else None
+            filled_quantity = order_info.filled_size if is_filled else Decimal('0')
 
             return {
-                "filled": status.get("filled", False),
-                "price": status.get("filled_price"),
-                "quantity": status.get("filled_quantity")
+                "filled": is_filled and order_info.filled_size > 0,
+                "price": filled_price,
+                "quantity": filled_quantity,
+                "status": order_info.status,
+                "filled_size": order_info.filled_size
             }
 
         except Exception as e:

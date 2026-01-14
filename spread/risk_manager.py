@@ -98,36 +98,11 @@ class RiskManager:
                     f"Extended 卖单深度不足: 需要 {quantity}, 可用 {extended_ask_depth}"
                 )
 
-            # 2. 检查余额（简化处理，实际需要查询账户余额）
-            # 这里假设客户端有 get_balance 方法
-            try:
-                lighter_balance = await self._get_balance("lighter")
-                extended_balance = await self._get_balance("extended")
-
-                # 估算所需资金
-                required_lighter = quantity * spread.lighter_bid_vwap * Decimal("1.1")  # 110% 缓冲
-                required_extended = quantity * spread.extended_ask_vwap * Decimal("1.1")
-
-                if lighter_balance < required_lighter:
-                    return ValidationResult(
-                        False,
-                        f"Lighter 余额不足: 需要 {required_lighter:.2f}, 可用 {lighter_balance:.2f}"
-                    )
-
-                if extended_balance < required_extended:
-                    return ValidationResult(
-                        False,
-                        f"Extended 余额不足: 需要 {required_extended:.2f}, 可用 {extended_balance:.2f}"
-                    )
-
-            except Exception as e:
-                logger.warning(f"无法查询余额: {e}，跳过余额检查")
-
-            # 3. 检查价差合理性
-            if not self.is_spread_reasonable(spread.open_spread):
+            # 2. 检查价差合理性
+            if not self.is_spread_reasonable(spread.spread_pct):
                 return ValidationResult(
                     False,
-                    f"极端价差: {spread.open_spread:.2%} > {self.config.max_spread:.2%}"
+                    f"极端价差: {spread.spread_pct:.2%} > {self.config.max_spread:.2%}"
                 )
 
             logger.info("开仓风控验证通过")
@@ -185,39 +160,6 @@ class RiskManager:
             logger.error(f"平仓风控验证失败: {e}")
             return ValidationResult(False, f"验证异常: {str(e)}")
 
-    async def check_balance(
-        self,
-        exchange: str,
-        quantity: Decimal,
-        price: Decimal
-    ) -> bool:
-        """
-        检查余额是否充足
-
-        Args:
-            exchange: "lighter" 或 "extended"
-            quantity: 交易数量
-            price: 交易价格
-
-        Returns:
-            余额是否充足
-        """
-        try:
-            balance = await self._get_balance(exchange)
-            required = quantity * price * Decimal("1.1")  # 110% 缓冲
-
-            if balance < required:
-                logger.warning(
-                    f"{exchange} 余额不足: 需要 {required:.2f}, 可用 {balance:.2f}"
-                )
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"检查余额失败 ({exchange}): {e}")
-            return False
-
     def is_spread_reasonable(self, spread: Decimal) -> bool:
         """
         检查价差是否合理（不是极端价差）
@@ -268,32 +210,3 @@ class RiskManager:
         except Exception as e:
             logger.error(f"紧急平仓异常: {e}")
             return False
-
-    # ========================================================================
-    # 私有方法
-    # ========================================================================
-
-    async def _get_balance(self, exchange: str) -> Decimal:
-        """
-        获取账户余额
-
-        Args:
-            exchange: "lighter" 或 "extended"
-
-        Returns:
-            可用余额
-        """
-        try:
-            if exchange == "lighter":
-                # 假设 Lighter 客户端有 get_balance 方法
-                balance_info = await self.lighter_client.get_balance()
-                return Decimal(str(balance_info.get("available", 0)))
-            else:
-                # 假设 Extended 客户端有 get_balance 方法
-                balance_info = await self.extended_client.get_balance()
-                return Decimal(str(balance_info.get("available", 0)))
-
-        except Exception as e:
-            logger.error(f"获取余额失败 ({exchange}): {e}")
-            # 返回一个保守的默认值
-            return Decimal("0")

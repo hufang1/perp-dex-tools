@@ -104,6 +104,9 @@ class ExtendedClient(BaseExchangeClient):
         self.initial_check_for_open_orders = True  # PATCH: will turn to False after 2 times (to match the trading bot logic), so that we can get the open orders even after restarting the script
         self.get_active_orders_cnt = 0
 
+        # Initialize min_order_size (will be set in get_contract_attributes)
+        self.min_order_size = Decimal('0.001')
+
     def _validate_config(self) -> None:
         """Validate the exchange-specific configuration."""
         required_env_vars = ['EXTENDED_VAULT', 'EXTENDED_STARK_KEY_PRIVATE', 'EXTENDED_STARK_KEY_PUBLIC', 'EXTENDED_API_KEY']
@@ -295,6 +298,104 @@ class ExtendedClient(BaseExchangeClient):
 
         return OrderResult(success=False, error_message='Max retries exceeded')
     
+    async def place_taker_order(self, contract_id: str, quantity: Decimal, side: str, price: Decimal) -> OrderResult:
+        """
+        Place a taker order (market order) that executes immediately.
+
+        Taker orders cross the spread to execute immediately:
+        - Buy orders use the ask price (or higher)
+        - Sell orders use the bid price (or lower)
+
+        Args:
+            contract_id: Market name (e.g., ETH-USD)
+            quantity: Order quantity
+            side: "buy" or "sell"
+            price: The price to use (should cross the spread for immediate execution)
+
+        Returns:
+            OrderResult with execution details
+        """
+        max_retries = 5
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                # Convert side string to OrderSide enum
+                order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+
+                # Round price to appropriate precision
+                rounded_price = self.round_to_tick(price)
+                quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
+
+                # Place the order WITHOUT post_only to allow taker execution
+                order_result = await self.perpetual_trading_client.place_order(
+                    market_name=contract_id,
+                    amount_of_synthetic=quantity,
+                    price=rounded_price,
+                    side=order_side,
+                    time_in_force=TimeInForce.IOC,  # Immediate or Cancel for taker
+                    post_only=False,  # Allow taker execution
+                    expire_time=utc_now() + timedelta(minutes=1),
+                )
+
+                if not order_result or not order_result.data or order_result.status != 'OK':
+                    if retry_count < max_retries - 1:
+                        retry_count += 1
+                        await asyncio.sleep(0.05)
+                        continue
+                    else:
+                        return OrderResult(success=False, error_message='Failed to place taker order')
+
+                # Extract order ID from response
+                order_id = order_result.data.id
+                if not order_id:
+                    return OrderResult(success=False, error_message='No order ID in response')
+
+                # Check order status after a short delay
+                await asyncio.sleep(0.05)
+                order_info = await self.get_order_info(order_id)
+
+                if order_info:
+                    if order_info.status in ['CANCELED', 'REJECTED']:
+                        if retry_count < max_retries - 1:
+                            self.logger.log(f"Taker order not filled, retrying...", level="INFO")
+                            retry_count += 1
+                            continue
+                        else:
+                            return OrderResult(success=False, error_message=f'Taker order not filled after {max_retries} attempts')
+                    elif order_info.status in ['FILLED', 'PARTIALLY_FILLED']:
+                        # Order successfully filled
+                        return OrderResult(
+                            success=True,
+                            order_id=order_id,
+                            side=side,
+                            size=quantity,
+                            price=rounded_price,
+                            status=order_info.status,
+                            filled_size=order_info.filled_size
+                        )
+                    else:
+                        return OrderResult(success=False, error_message=f'Unexpected order status: {order_info.status}')
+                else:
+                    # Assume order is successful if we can't get info
+                    return OrderResult(
+                        success=True,
+                        order_id=order_id,
+                        side=side,
+                        size=quantity,
+                        price=rounded_price
+                    )
+
+            except Exception as e:
+                if retry_count < max_retries - 1:
+                    retry_count += 1
+                    await asyncio.sleep(0.05)
+                    continue
+                else:
+                    return OrderResult(success=False, error_message=str(e))
+
+        return OrderResult(success=False, error_message='Max retries exceeded')
+
     async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
         """Place a close order with Extended using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15

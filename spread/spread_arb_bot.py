@@ -548,6 +548,27 @@ class SpreadArbBot:
         logger.info("连接到 Extended 交易所...")
         await self.extended_client.connect()
 
+        # 获取合约属性（设置 contract_id, tick_size 等）
+        logger.info("获取合约属性...")
+
+        # Lighter: 获取合约属性
+        lighter_contract_id, lighter_tick_size = await self.lighter_client.get_contract_attributes()
+        lighter_config_dict['contract_id'] = lighter_contract_id
+        lighter_config_dict['tick_size'] = lighter_tick_size
+        logger.info(f"Lighter 合约属性: contract_id={lighter_contract_id}, tick_size={lighter_tick_size}")
+
+        # Extended: 获取合约属性
+        extended_contract_id, extended_tick_size = await self.extended_client.get_contract_attributes()
+        extended_config_dict['contract_id'] = extended_contract_id
+        extended_config_dict['tick_size'] = extended_tick_size
+        logger.info(f"Extended 合约属性: contract_id={extended_contract_id}, tick_size={extended_tick_size}")
+
+        # 更新配置
+        lighter_config = Config(lighter_config_dict)
+        extended_config = Config(extended_config_dict)
+        self.lighter_client.config = lighter_config
+        self.extended_client.config = extended_config
+
         # 等待 WebSocket 连接建立
         logger.info("等待订单簿数据...")
         # await asyncio.sleep(3)

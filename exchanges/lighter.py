@@ -274,6 +274,11 @@ class LighterClient(BaseExchangeClient):
         if self.lighter_client is None:
             await self._initialize_lighter_client()
 
+        # Ensure market config is loaded (multipliers are set)
+        if self.base_amount_multiplier is None or self.price_multiplier is None:
+            ticker = self.config.ticker
+            await self._get_market_config(ticker)
+
         # Determine order side and price
         if side.lower() == 'buy':
             is_ask = False
@@ -520,32 +525,50 @@ class LighterClient(BaseExchangeClient):
             self.logger.log("Ticker is empty", "ERROR")
             raise ValueError("Ticker is empty")
 
-        order_api = lighter.OrderApi(self.api_client)
-        # Get all order books to find the market for our ticker
-        order_books = await order_api.order_books()
-
-        # Find the market that matches our ticker
-        market_info = None
-        for market in order_books.order_books:
-            if market.symbol == ticker:
-                market_info = market
-                break
-
-        if market_info is None:
-            self.logger.log("Failed to get markets", "ERROR")
-            raise ValueError("Failed to get markets")
-
-        market_summary = await order_api.order_book_details(market_id=market_info.market_id)
-        order_book_details = market_summary.order_book_details[0]
-        # Set contract_id to market name (Lighter uses market IDs as identifiers)
-        self.config.contract_id = market_info.market_id
-        self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
-        self.price_multiplier = pow(10, market_info.supported_price_decimals)
+        # Use direct HTTP request to avoid SDK validation issues with 'inactive' status
+        import requests
+        lighter_base_url = "https://mainnet.zklighter.elliot.ai"
+        lighter_market_url = f"{lighter_base_url}/api/v1/orderBooks"
 
         try:
-            self.config.tick_size = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
-        except Exception:
-            self.logger.log("Failed to get tick size", "ERROR")
-            raise ValueError("Failed to get tick size")
+            response = requests.get(lighter_market_url, headers={"accept": "application/json"}, timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
-        return self.config.contract_id, self.config.tick_size
+            # Find the market that matches our ticker
+            market_info = None
+            for market in data.get("order_books", []):
+                if market["symbol"] == ticker:
+                    market_info = market
+                    break
+
+            if market_info is None:
+                self.logger.log(f"Market {ticker} not found", "ERROR")
+                raise ValueError(f"Market {ticker} not found")
+
+            # Set contract_id to market_id (Lighter uses market IDs as identifiers)
+            market_id = market_info["market_id"]
+            self.config.contract_id = market_id
+
+            # Get multipliers from market info
+            supported_size_decimals = market_info.get("supported_size_decimals", 2)
+            supported_price_decimals = market_info.get("supported_price_decimals", 2)
+            self.base_amount_multiplier = pow(10, supported_size_decimals)
+            self.price_multiplier = pow(10, supported_price_decimals)
+
+            # Calculate tick size from price decimals
+            self.config.tick_size = Decimal("1") / (Decimal("10") ** supported_price_decimals)
+
+            self.logger.log(
+                f"Lighter contract attributes: market_id={market_id}, "
+                f"tick_size={self.config.tick_size}, "
+                f"base_amount_multiplier={self.base_amount_multiplier}, "
+                f"price_multiplier={self.price_multiplier}",
+                "INFO"
+            )
+
+            return self.config.contract_id, self.config.tick_size
+
+        except Exception as e:
+            self.logger.log(f"Failed to get contract attributes: {e}", "ERROR")
+            raise
