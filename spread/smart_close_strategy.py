@@ -41,6 +41,8 @@ class SmartCloseStrategy:
         """
         self.config = config
         self.portfolio: Portfolio = Portfolio()
+        self._last_log_time: float = 0
+        self._log_interval: float = 5.0  # 每5秒输出一次日志
 
     def add_position(self, position: OpenPosition) -> None:
         """
@@ -122,7 +124,12 @@ class SmartCloseStrategy:
         if spread_info and spread_info.is_valid():
             trigger = self.should_close(spread_info)
             if not trigger.is_triggered:
-                logger.info(trigger.format_log())
+                # 限制日志输出频率：每5秒一次
+                import time
+                current_time = time.time()
+                if current_time - self._last_log_time >= self._log_interval:
+                    logger.info(trigger.format_log())
+                    self._last_log_time = current_time
 
     def close_all(self) -> list[OpenPosition]:
         """

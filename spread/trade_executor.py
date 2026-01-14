@@ -166,25 +166,33 @@ class TradeExecutor:
                     lighter_filled=True
                 )
             elif execution_status["timeout"]:
-                logger.error("开仓超时")
-                # 尝试取消订单
-                await self._cancel_orders(
-                    extended_result["order_id"],
-                    lighter_result["order_id"]
-                )
+                logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
+                # 不取消订单！订单可能已经成交，但状态查询有延迟
+                # 让OPENING_WAIT状态通过查询实际仓位来判断
                 return ExecutionResult(
-                    error_message="订单执行超时",
+                    success=False,
+                    extended_order_id=extended_result["order_id"],
+                    lighter_order_id=lighter_result["order_id"],
+                    extended_price=extended_result.get("price"),
+                    lighter_price=lighter_result.get("price"),
+                    error_message="订单状态查询超时",
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
                     lighter_filled=execution_status["lighter_filled"]
                 )
             else:
-                # 单边成交
+                # 单边成交（这种情况现在不应该发生，因为我们修改了wait_for_execution）
                 logger.error(
                     f"单边成交: Extended={execution_status['extended_filled']}, "
                     f"Lighter={execution_status['lighter_filled']}"
                 )
+                # 也返回order_id，让上层逻辑进入OPENING_WAIT状态检查实际仓位
                 return ExecutionResult(
+                    success=False,
+                    extended_order_id=extended_result["order_id"],
+                    lighter_order_id=lighter_result["order_id"],
+                    extended_price=extended_result.get("price"),
+                    lighter_price=lighter_result.get("price"),
                     error_message="单边成交",
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
@@ -295,6 +303,9 @@ class TradeExecutor:
         """
         等待订单执行
 
+        重要变更：不再立即判定单边成交，而是等待到超时
+        让系统进入OPENING_WAIT状态通过实际仓位检查来判断
+
         Args:
             extended_order_id: Extended 订单 ID
             lighter_order_id: Lighter 订单 ID
@@ -322,6 +333,7 @@ class TradeExecutor:
             lighter_filled = lighter_status.get("filled", False)
 
             if extended_filled and lighter_filled:
+                # 两边都已成交，成功返回
                 return {
                     "both_filled": True,
                     "extended_filled": True,
@@ -329,33 +341,14 @@ class TradeExecutor:
                     "timeout": False
                 }
 
-            # 检查单边成交（异常情况）
-            if extended_filled != lighter_filled:
-                # 等待一小段时间确认
-                await asyncio.sleep(0.2)
-
-                # 重新检查
-                extended_status = await self._check_order_status(
-                    "extended", extended_order_id
-                )
-                lighter_status = await self._check_order_status(
-                    "lighter", lighter_order_id
-                )
-
-                extended_filled = extended_status.get("filled", False)
-                lighter_filled = lighter_status.get("filled", False)
-
-                if extended_filled != lighter_filled:
-                    return {
-                        "both_filled": False,
-                        "extended_filled": extended_filled,
-                        "lighter_filled": lighter_filled,
-                        "timeout": False
-                    }
+            # 不再立即判定单边成交，继续等待
+            # 即使检测到单边成交，也等待到超时
+            # 这样可以让后续的OPENING_WAIT状态通过实际仓位来验证
 
             await asyncio.sleep(check_interval)
 
-        # 超时
+        # 超时：返回当前状态，让上层逻辑处理
+        # 不管是单边成交还是都没成交，都进入OPENING_WAIT状态
         return {
             "both_filled": False,
             "extended_filled": extended_filled,
@@ -559,7 +552,7 @@ class TradeExecutor:
             if result.success:
                 return {
                     "order_id": result.order_id,
-                    "price": str(result.price) if result.price else str(price)
+                    "price": result.price if result.price else price
                 }
             else:
                 raise Exception(result.error_message)
@@ -577,14 +570,14 @@ class TradeExecutor:
         """
         下 Lighter Taker 订单 (016-spread-optimize)
 
-        Taker模式：使用对手价确保即时成交
-        - 买入：使用ask价格（或更高）
-        - 卖出：使用bid价格（或更低）
+        Taker模式：使用对手价确保即时成交，设置post_only=False
+        - 买入：使用ask价格
+        - 卖出：使用bid价格
 
         Args:
             side: "buy" 或 "sell"
             quantity: 数量
-            price: 价格（None表示自动获取对手价，或指定具体价格）
+            price: 价格（None表示自动使用对手价）
 
         Returns:
             订单结果字典
@@ -592,30 +585,30 @@ class TradeExecutor:
         try:
             contract_id = self.lighter_client.config.contract_id
 
-            # Taker模式：获取对手价确保即时成交
+            # Taker模式：使用对手价
             if price is None:
                 best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(contract_id)
                 if side == "buy":
-                    # 买入使用ask价格确保成交
+                    # 买入用ask价格
                     price = best_ask
                 else:
-                    # 卖出使用bid价格确保成交
+                    # 卖出用bid价格
                     price = best_bid
 
-            # 调用 Lighter 客户端下市价单（通过使用对手价的限价单实现）
-            # place_limit_order 参数: (contract_id, quantity, price, side)
+            # 调用 Lighter 客户端下taker订单（使用IOC立即成交或取消）
             result = await self.lighter_client.place_limit_order(
                 contract_id=contract_id,
                 quantity=quantity,
                 price=price,
-                side=side
+                side=side,
+                time_in_force=0  # 0=IOC (Immediate or Cancel): taker模式
             )
             logger.debug(f"Lig Taker订单: {side} {quantity} @ {price}")
 
             if result.success:
                 return {
                     "order_id": result.order_id,
-                    "price": str(result.price) if result.price else str(price)
+                    "price": result.price if result.price else price
                 }
             else:
                 raise Exception(result.error_message)

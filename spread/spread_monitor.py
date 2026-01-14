@@ -84,7 +84,7 @@ class SpreadMonitor:
                     if spread_info.is_valid():
                         self._current_spread = spread_info
 
-                    # 限制日志输出频率（显示所有价差，包括负价差）
+                    # 限制日志输出频率（每5秒一次）
                     current_time = asyncio.get_event_loop().time()
                     if current_time - self._last_log_time >= self._log_interval:
                         # 使用配置的开仓阈值和滑点保护

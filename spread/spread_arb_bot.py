@@ -12,6 +12,7 @@
 import asyncio
 import signal
 import sys
+import time
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -93,8 +94,11 @@ class SpreadArbBot:
         # 开仓等待确认
         self._opening_wait_start_time: Optional[float] = None
         # 开仓失败冷却期（秒）
-        self._open_cooldown: float = 5.0
+        self._open_cooldown: float = 10.0  # 增加到10秒
         self._last_open_fail_time: Optional[float] = None
+        # 开仓成功冷却期（防止频繁开仓）
+        self._last_open_success_time: Optional[float] = None
+        self._open_success_cooldown: float = 3.0  # 成功后3秒冷却
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -130,12 +134,26 @@ class SpreadArbBot:
             self._orderbook_sync_task = asyncio.create_task(self._sync_orderbooks_loop())
 
             # 7. 启动自动保存
-            await self.state_manager.start_auto_save()
+            # await self.state_manager.start_auto_save()
 
             # 8. 设置信号处理
             self._setup_signal_handlers()
 
-            # 9. 运行主交易循环
+            # 9. 等待价差监控准备好
+            logger.info("等待价差监控准备就绪...")
+            import time as time_module
+            wait_start = time_module.time()
+            while True:
+                spread_info = self.spread_monitor.get_current_spread()
+                if spread_info is not None and spread_info.is_valid():
+                    logger.info(f"价差监控就绪 (耗时{time_module.time() - wait_start:.1f}秒)")
+                    break
+                if time_module.time() - wait_start > 10:  # 最多等待10秒
+                    logger.warning("价差监控等待超时，继续启动...")
+                    break
+                await asyncio.sleep(0.5)  # 每500ms检查一次
+
+            # 10. 运行主交易循环
             self._running = True
             await self.run_trading_loop()
 
@@ -154,30 +172,42 @@ class SpreadArbBot:
         self._stop_event.set()
 
         try:
-            # 停止订单簿同步任务
+            # 停止订单簿同步任务（带超时）
             if self._orderbook_sync_task:
                 self._orderbook_sync_task.cancel()
                 try:
-                    await self._orderbook_sync_task
-                except asyncio.CancelledError:
+                    await asyncio.wait_for(self._orderbook_sync_task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 self._orderbook_sync_task = None
 
-            # 停止自动保存
+            # 停止自动保存（带超时）
             if self.state_manager:
-                await self.state_manager.stop_auto_save()
+                try:
+                    await asyncio.wait_for(self.state_manager.stop_auto_save(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("停止自动保存超时")
 
-            # 保存最终状态
+            # 保存最终状态（带超时）
             if self.state_manager:
-                await self.state_manager.save_state()
+                try:
+                    await asyncio.wait_for(self.state_manager.save_state(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("保存状态超时")
 
-            # 停止订单簿连接
+            # 停止订单簿连接（带超时）
             if self.order_book_manager:
-                await self.order_book_manager.stop()
+                try:
+                    await asyncio.wait_for(self.order_book_manager.stop(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("停止订单簿连接超时")
 
-            # 停止价差监控器 (016-spread-optimize)
+            # 停止价差监控器（带超时）
             if self.spread_monitor:
-                await self.spread_monitor.stop()
+                try:
+                    await asyncio.wait_for(self.spread_monitor.stop(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("停止价差监控器超时")
 
             # 打印统计信息
             self._print_stats()
@@ -235,10 +265,20 @@ class SpreadArbBot:
 
         # 检查冷却期
         import time
+        current_time = time.time()
+
+        # 检查失败冷却期
         if self._last_open_fail_time is not None:
-            elapsed = time.time() - self._last_open_fail_time
+            elapsed = current_time - self._last_open_fail_time
             if elapsed < self._open_cooldown:
-                logger.debug(f"冷却中，剩余{self._open_cooldown - elapsed:.1f}秒")
+                logger.debug(f"失败冷却中，剩余{self._open_cooldown - elapsed:.1f}秒")
+                return
+
+        # 检查成功冷却期
+        if self._last_open_success_time is not None:
+            elapsed = current_time - self._last_open_success_time
+            if elapsed < self._open_success_cooldown:
+                logger.debug(f"成功冷却中，剩余{self._open_success_cooldown - elapsed:.1f}秒")
                 return
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
@@ -268,7 +308,13 @@ class SpreadArbBot:
             self.state_manager.set_state(BotState.OPENING)
             await self.state_manager.save_state()
         else:
-            logger.debug(reason)
+            # 输出不能开仓的原因，但限制频率（每5秒一次）
+            if not hasattr(self, '_last_open_check_log_time'):
+                self._last_open_check_log_time = 0
+            current_time = time.time()
+            if current_time - self._last_open_check_log_time >= 5.0:
+                logger.info(reason)
+                self._last_open_check_log_time = current_time
 
     async def _process_opening_state(self) -> None:
         """处理 OPENING 状态：执行开仓"""
@@ -289,66 +335,72 @@ class SpreadArbBot:
             spread_info
         )
 
-        if result.success:
-            # 开仓成功，创建持仓
-            position = Position(
-                state=PositionState.LONG,
-                extended_entry_price=result.extended_price,
-                lighter_entry_price=result.lighter_price,
-                entry_spread=spread_info.spread_pct,
-                entry_time=datetime.now(),
-                extended_quantity=self.config.target_quantity,
-                lighter_quantity=-self.config.target_quantity,
-                extended_order_id=result.extended_order_id,
-                lighter_order_id=result.lighter_order_id,
-            )
-
-            self.state_manager.update_position(position)
-
-            # 更新缓存价差 (016-spread-optimize)
-            self.open_strategy.update_cached_spread(spread_info.spread_pct)
-
-            # 添加仓位到智能平仓系统 (016-spread-optimize)
-            open_position = OpenPosition(
-                position_id=str(uuid.uuid4()),
-                open_time=datetime.now().timestamp(),
-                ext_price=result.extended_price,
-                lig_price=result.lighter_price,
-                open_spread=spread_info.spread_pct,
-                quantity=self.config.target_quantity,
-                ext_order_id=result.extended_order_id,
-                lig_order_id=result.lighter_order_id,
-                is_active=True,
-            )
-            self.close_strategy.add_position(open_position)
-
-            logger.info(
-                f"开仓成功: Ext={result.extended_price} Lig={result.lighter_price} "
-                f"价差={spread_info.spread_pct:.2%}"
-            )
-
-            import time
-            self._opening_wait_start_time = time.time()
-            logger.info(f"等待仓位确认 (超时{self.config.open_wait_timeout}s)")
-            self.state_manager.set_state(BotState.OPENING_WAIT)
-            await self.state_manager.save_state()
-
-        else:
-            # 开仓失败
-            logger.error(f"开仓失败: {result.error_message}")
-
-            # 检查是否单边成交
-            if result.extended_filled != result.lighter_filled:
-                await self._handle_single_side_execution(result)
-
-            # 设置冷却期
+        # 检查是否完全失败（没有订单ID）
+        if result.extended_order_id is None and result.lighter_order_id is None:
+            # 完全失败，进入IDLE和冷却期
+            logger.error(f"开仓完全失败: {result.error_message}")
             import time
             self._last_open_fail_time = time.time()
             logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
-
             self.state_manager.set_state(BotState.IDLE)
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
+            return
+
+        # 不管订单状态如何，只要有订单ID就进入OPENING_WAIT状态
+        # 在OPENING_WAIT状态中通过实际仓位检查来判断是否真的开仓成功
+        # 这样可以避免订单状态查询延迟导致的误判
+
+        # 创建持仓记录（先创建，后续在OPENING_WAIT中验证）
+        position = Position(
+            state=PositionState.LONG,
+            extended_entry_price=result.extended_price or spread_info.ext_ask,
+            lighter_entry_price=result.lighter_price or spread_info.lig_bid,
+            entry_spread=spread_info.spread_pct,
+            entry_time=datetime.now(),
+            extended_quantity=self.config.target_quantity,
+            lighter_quantity=-self.config.target_quantity,
+            extended_order_id=result.extended_order_id,
+            lighter_order_id=result.lighter_order_id,
+        )
+
+        self.state_manager.update_position(position)
+
+        # 更新缓存价差 (016-spread-optimize)
+        self.open_strategy.update_cached_spread(spread_info.spread_pct)
+
+        # 添加仓位到智能平仓系统 (016-spread-optimize)
+        open_position = OpenPosition(
+            position_id=str(uuid.uuid4()),
+            open_time=datetime.now().timestamp(),
+            ext_price=result.extended_price or spread_info.ext_ask,
+            lig_price=result.lighter_price or spread_info.lig_bid,
+            open_spread=spread_info.spread_pct,
+            quantity=self.config.target_quantity,
+            ext_order_id=result.extended_order_id,
+            lig_order_id=result.lighter_order_id,
+            is_active=True,
+        )
+        self.close_strategy.add_position(open_position)
+
+        if result.success:
+            logger.info(
+                f"订单发送成功: Ext={result.extended_price} Lig={result.lighter_price} "
+                f"价差={spread_info.spread_pct:.2%}"
+            )
+        else:
+            logger.warning(
+                f"订单发送超时/部分成功: Ext_filled={result.extended_filled} "
+                f"Lig_filled={result.lighter_filled}，等待仓位确认..."
+            )
+
+        import time
+        self._opening_wait_start_time = time.time()
+        # 记录开仓成功时间，触发成功冷却期
+        self._last_open_success_time = time.time()
+        logger.info(f"等待仓位确认 (超时{self.config.open_wait_timeout}s)")
+        self.state_manager.set_state(BotState.OPENING_WAIT)
+        await self.state_manager.save_state()
 
     async def _process_holding_state(self) -> None:
         """处理 HOLDING 状态：监控价差，寻找平仓机会"""
@@ -868,6 +920,25 @@ class SpreadArbBot:
         state = await self.state_manager.load_state()
         logger.debug(f"当前状态: {state.value}")
 
+        # 程序重启后，如果是OPENING或OPENING_WAIT状态，重置为IDLE
+        # 因为之前的开仓流程已经失效，需要重新开始
+        if state in [BotState.OPENING, BotState.OPENING_WAIT]:
+            logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
+            self.state_manager.set_state(BotState.IDLE)
+            await self.state_manager.save_state()
+
+        # 检查HOLDING/CLOSING状态但实际没有持仓的情况
+        if state in [BotState.HOLDING, BotState.CLOSING]:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+            if not has_position:
+                logger.info(f"检测到{state.value}状态但实际无持仓，重置为IDLE")
+                self.state_manager.set_state(BotState.IDLE)
+                await self.state_manager.save_state()
+
         position = self.state_manager.get_position()
         if position:
             logger.debug(f"持仓: {position.state.value}, "
@@ -879,8 +950,17 @@ class SpreadArbBot:
 
     def _setup_signal_handlers(self) -> None:
         """设置信号处理器"""
+        _shutting_down = [False]  # 使用列表避免 nonlocal
+
         def signal_handler(signum, frame):
-            logger.debug(f"收到信号 {signum}，准备关闭...")
+            if _shutting_down[0]:
+                # 已经在关闭中，强制退出
+                logger.warning("强制退出")
+                import sys
+                sys.exit(1)
+
+            logger.info(f"收到信号 {signum}，正在关闭...")
+            _shutting_down[0] = True
             self._stop_event.set()
 
         signal.signal(signal.SIGINT, signal_handler)
@@ -1129,12 +1209,16 @@ async def main():
     try:
         await bot.start()
     except KeyboardInterrupt:
-        logger.info("收到中断信号")
+        logger.info("收到中断信号，正在退出...")
     except Exception as e:
         logger.error(f"运行异常: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        await bot.stop()
+        # 使用 try-except 防止 stop() 中的错误影响退出
+        try:
+            await asyncio.wait_for(bot.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception):
+            logger.warning("停止超时，强制退出")
 
 
 if __name__ == "__main__":

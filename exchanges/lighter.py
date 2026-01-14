@@ -268,8 +268,16 @@ class LighterClient(BaseExchangeClient):
             return OrderResult(success=True, order_id=str(order_params['client_order_index']))
 
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
-                                side: str) -> OrderResult:
-        """Place a post only order with Lighter using official SDK."""
+                                side: str, time_in_force: int = None) -> OrderResult:
+        """Place a limit order with Lighter using official SDK.
+
+        Args:
+            contract_id: Market/contract ID
+            quantity: Order quantity
+            price: Order price
+            side: 'buy' or 'sell'
+            time_in_force: Time in force (0=IOC, 1=GTT, 2=POST_ONLY). Default=1 (GTT)
+        """
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -291,6 +299,13 @@ class LighterClient(BaseExchangeClient):
         client_order_index = int(time.time() * 1000) % 1000000  # Simple unique ID
         self.current_order_client_id = client_order_index
 
+        # Use provided time_in_force or default to GTT
+        if time_in_force is None:
+            time_in_force = self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME
+
+        # For IOC orders, use 0 expiry; for others, use default 28-day expiry
+        order_expiry = 0 if time_in_force == 0 else -1
+
         # Create order parameters
         order_params = {
             'market_index': self.config.contract_id,
@@ -299,9 +314,10 @@ class LighterClient(BaseExchangeClient):
             'price': int(price * self.price_multiplier),
             'is_ask': is_ask,
             'order_type': self.lighter_client.ORDER_TYPE_LIMIT,
-            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            'time_in_force': time_in_force,
             'reduce_only': False,
             'trigger_price': 0,
+            'order_expiry': order_expiry,
         }
 
         order_result = await self._submit_order_with_retry(order_params)
