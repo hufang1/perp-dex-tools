@@ -80,7 +80,7 @@ class TradeExecutor:
         self.risk_manager = risk_manager
         self.timeout = timeout
 
-        # logger.info(f"交易执行器初始化: 超时={timeout}秒")
+        logger.info(f"交易执行器初始化: 超时={timeout}秒")
 
     async def execute_open_position(
         self,
@@ -102,7 +102,7 @@ class TradeExecutor:
             ExecutionResult 对象
         """
         start_time = time.time()
-        # logger.info(f"开仓[Taker]: 数量={quantity}")
+        logger.info(f"开仓[Taker]: 数量={quantity}")
 
         try:
             # Taker模式价格计算 (016-spread-optimize)
@@ -150,11 +150,11 @@ class TradeExecutor:
 
             # 处理执行结果
             if execution_status["both_filled"]:
-                # logger.info(
-                #     f"开仓成功[Taker]: Ext={extended_result['order_id']}, "
-                #     f"Lig={lighter_result['order_id']}, "
-                #     f"耗时={execution_time:.3f}秒"
-                # )
+                logger.info(
+                    f"开仓成功[Taker]: Ext={extended_result['order_id']}, "
+                    f"Lig={lighter_result['order_id']}, "
+                    f"耗时={execution_time:.3f}秒"
+                )
                 return ExecutionResult(
                     success=True,
                     extended_order_id=extended_result["order_id"],
@@ -166,7 +166,7 @@ class TradeExecutor:
                     lighter_filled=True
                 )
             elif execution_status["timeout"]:
-                # logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
+                logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
                 # 不取消订单！订单可能已经成交，但状态查询有延迟
                 # 让OPENING_WAIT状态通过查询实际仓位来判断
                 return ExecutionResult(
@@ -226,7 +226,7 @@ class TradeExecutor:
             ExecutionResult 对象
         """
         start_time = time.time()
-        # logger.info(f"平仓[Taker]: 数量={quantity}")
+        logger.info(f"平仓[Taker]: 数量={quantity}")
 
         try:
             # Taker模式：使用市价单确保即时成交 (016-spread-optimize)
@@ -263,11 +263,11 @@ class TradeExecutor:
 
             # 处理执行结果
             if execution_status["both_filled"]:
-                # logger.info(
-                #     f"平仓成功[Taker]: Ext={extended_result['order_id']}, "
-                #     f"Lig={lighter_result['order_id']}, "
-                #     f"耗时={execution_time:.3f}秒"
-                # )
+                logger.info(
+                    f"平仓成功[Taker]: Ext={extended_result['order_id']}, "
+                    f"Lig={lighter_result['order_id']}, "
+                    f"耗时={execution_time:.3f}秒"
+                )
                 return ExecutionResult(
                     success=True,
                     extended_order_id=extended_result["order_id"],
@@ -373,7 +373,7 @@ class TradeExecutor:
         Returns:
             是否成功
         """
-        # logger.warning(f"强平[Taker]: {exchange} {side} {quantity}")
+        logger.warning(f"强平[Taker]: {exchange} {side} {quantity}")
 
         try:
             order_id = None
@@ -403,7 +403,7 @@ class TradeExecutor:
                 )
 
                 if execution_status["both_filled"] or execution_status[f"{exchange}_filled"]:
-                    # logger.info(f"强平成交: {order_id}")
+                    logger.info(f"强平成交: {order_id}")
                     return True
                 else:
                     logger.error(f"强平未成交/超时: {order_id}")
@@ -547,7 +547,7 @@ class TradeExecutor:
                 side=side,
                 price=price
             )
-            # logger.debug(f"Ext Taker订单: {side} {quantity} @ {price}")
+            logger.debug(f"Ext Taker订单: {side} {quantity} @ {price}")
 
             if result.success:
                 return {
@@ -571,8 +571,8 @@ class TradeExecutor:
         下 Lighter Taker 订单 (016-spread-optimize)
 
         Taker模式：跨越价差确保即时成交
-        - 买入：ask * 1.002（高于ask 0.2%）
-        - 卖出：bid * 0.998（低于bid 0.2%）
+        - 买入：ask + 1.0（高于ask确保成交）
+        - 卖出：bid - 1.0（低于bid确保成交）
 
         Args:
             side: "buy" 或 "sell"
@@ -590,11 +590,11 @@ class TradeExecutor:
                 best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(contract_id)
 
                 if side == "buy":
-                    # 买入用ask * 1.002，确保跨越价差
-                    price = best_ask * Decimal('1.002')
+                    # 买入用ask + 1.0，确保跨越价差
+                    price = best_ask + Decimal('1.0')
                 else:
-                    # 卖出用bid * 0.998，确保跨越价差
-                    price = best_bid * Decimal('0.998')
+                    # 卖出用bid - 1.0，确保跨越价差
+                    price = best_bid - Decimal('1.0')
 
             # 调用 Lighter 客户端下taker订单（使用IOC立即成交或取消）
             result = await self.lighter_client.place_limit_order(
@@ -677,6 +677,6 @@ class TradeExecutor:
                 self.lighter_client.cancel_order(lighter_order_id),
                 return_exceptions=True
             )
-            # logger.info("已取消未成交订单")
+            logger.info("已取消未成交订单")
         except Exception as e:
             logger.error(f"取消订单失败: {e}")

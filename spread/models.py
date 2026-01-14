@@ -288,7 +288,7 @@ class BotConfig:
     - 价差缩小时不降低
     """
 
-    spread_step: Decimal = field(default_factory=lambda: Decimal("0.0005"))
+    spread_step: Decimal = field(default_factory=lambda: Decimal("0.00005"))
     """
     价差步进值（用于等差数列策略）
     - 默认0.05% = 0.0005

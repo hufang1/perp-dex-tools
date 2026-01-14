@@ -427,9 +427,6 @@ class SpreadArbBot:
             # 切换到平仓状态
             self.state_manager.set_state(BotState.CLOSING)
             await self.state_manager.save_state()
-        else:
-            # 输出持仓监控日志
-            self.close_strategy.monitor_position(spread_info)
 
     async def _process_closing_state(self) -> None:
         """处理 CLOSING 状态：执行平仓"""
@@ -1128,9 +1125,9 @@ def parse_arguments() -> BotConfig:
     parser.add_argument(
         "--spread-step",
         type=Decimal,
-        default=Decimal("0.0005"),
+        default=Decimal("0.00005"),
         dest="spread_step",
-        help="价差步进值 (默认: 0.0005 = 0.05%%) (016-spread-optimize)"
+        help="价差步进值 (默认: 0.00005 = 0.005%%) (016-spread-optimize)"
     )
 
     parser.add_argument(

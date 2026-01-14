@@ -156,7 +156,7 @@ class StateManager:
             if config_state_data:
                 self._config_state = {
                     "cached_open_spread": Decimal(str(config_state_data.get("cached_open_spread", 0))),
-                    "spread_step": Decimal(str(config_state_data.get("spread_step", "0.0005"))),
+                    "spread_step": Decimal(str(config_state_data.get("spread_step", "0.00005"))),
                 }
                 logger.info(f"策略状态已恢复: cached_spread={self._config_state['cached_open_spread']:.2%}")
             else:
