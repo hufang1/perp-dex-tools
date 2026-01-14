@@ -90,6 +90,12 @@ class SpreadArbBot:
         # 订单簿同步任务
         self._orderbook_sync_task: Optional[asyncio.Task] = None
 
+        # 开仓等待确认
+        self._opening_wait_start_time: Optional[float] = None
+        # 开仓失败冷却期（秒）
+        self._open_cooldown: float = 5.0
+        self._last_open_fail_time: Optional[float] = None
+
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
                    f"数量={config.target_quantity}, "
@@ -201,6 +207,9 @@ class SpreadArbBot:
                 elif state == BotState.OPENING:
                     await self._process_opening_state()
 
+                elif state == BotState.OPENING_WAIT:
+                    await self._process_opening_wait_state()
+
                 elif state == BotState.CLOSING:
                     await self._process_closing_state()
 
@@ -223,6 +232,14 @@ class SpreadArbBot:
         if not self.order_book_manager.is_ready():
             logger.debug("订单簿未就绪，等待中...")
             return
+
+        # 检查冷却期
+        import time
+        if self._last_open_fail_time is not None:
+            elapsed = time.time() - self._last_open_fail_time
+            if elapsed < self._open_cooldown:
+                logger.debug(f"冷却中，剩余{self._open_cooldown - elapsed:.1f}秒")
+                return
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
         spread_info = self.spread_monitor.get_current_spread()
@@ -306,27 +323,15 @@ class SpreadArbBot:
             self.close_strategy.add_position(open_position)
 
             logger.info(
-                f"开仓成功: Extended={result.extended_price}, "
-                f"Lighter={result.lighter_price}, "
+                f"开仓成功: Ext={result.extended_price} Lig={result.lighter_price} "
                 f"价差={spread_info.spread_pct:.2%}"
             )
 
-            # 启动仓位平衡检测 (016-spread-optimize)
-            logger.info(f"开始仓位平衡检测（缓冲期{self.config.balance_check_buffer}秒）...")
-            balance_result = await self.balance_checker.start_monitoring(
-                self.config.target_quantity
-            )
-
-            if balance_result.is_balanced:
-                # 验证通过，切换到HOLDING状态
-                logger.info("仓位平衡验证通过，进入HOLDING状态")
-                self.state_manager.set_state(BotState.HOLDING)
-                await self.state_manager.save_state()
-            else:
-                # 验证失败（已触发紧急平仓）
-                logger.error("仓位平衡验证失败，已执行紧急平仓")
-                self.state_manager.set_state(BotState.IDLE)
-                await self.state_manager.save_state()
+            import time
+            self._opening_wait_start_time = time.time()
+            logger.info(f"等待仓位确认 (超时{self.config.open_wait_timeout}s)")
+            self.state_manager.set_state(BotState.OPENING_WAIT)
+            await self.state_manager.save_state()
 
         else:
             # 开仓失败
@@ -336,7 +341,13 @@ class SpreadArbBot:
             if result.extended_filled != result.lighter_filled:
                 await self._handle_single_side_execution(result)
 
+            # 设置冷却期
+            import time
+            self._last_open_fail_time = time.time()
+            logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
+
             self.state_manager.set_state(BotState.IDLE)
+            self._opening_wait_start_time = None
             await self.state_manager.save_state()
 
     async def _process_holding_state(self) -> None:
@@ -421,27 +432,226 @@ class SpreadArbBot:
             self.state_manager.set_state(BotState.HOLDING)
             await self.state_manager.save_state()
 
+    async def _process_opening_wait_state(self) -> None:
+        """处理 OPENING_WAIT 状态：等待确认仓位"""
+        import time
+
+        current_time = time.time()
+        if self._opening_wait_start_time is None:
+            self._opening_wait_start_time = current_time
+
+        elapsed = current_time - self._opening_wait_start_time
+        timeout = self.config.open_wait_timeout
+
+        if elapsed > timeout:
+            logger.warning(f"等待超时({elapsed:.1f}s)，强平")
+            await self._force_close_positions()
+            self.state_manager.set_state(BotState.IDLE)
+            self._opening_wait_start_time = None
+            await self.state_manager.save_state()
+            return
+
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+
+            logger.debug(f"仓位检查 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
+
+            tolerance = Decimal("0.001")
+            expected_qty = self.config.target_quantity
+
+            ext_has_position = abs(ext_position - expected_qty) < tolerance
+            lig_has_position = abs(lig_position - expected_qty) < tolerance
+
+            if ext_has_position and lig_has_position:
+                logger.info(f"仓位确认 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
+                self.state_manager.set_state(BotState.HOLDING)
+                self._opening_wait_start_time = None
+                await self.state_manager.save_state()
+            elif elapsed >= 2.0 and ext_has_position != lig_has_position:
+                logger.warning(f"仓位不一致 Ext={ext_position} Lig={lig_position}，强平")
+                await self._force_close_positions()
+                self.state_manager.set_state(BotState.IDLE)
+                self._opening_wait_start_time = None
+                await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"仓位检查失败: {e}")
+
+    async def _force_close_positions(self) -> None:
+        """强制平掉所有仓位"""
+        logger.warning("执行强制平仓")
+
+        max_retries = 3
+        retry_delay = 1.0
+
+        for attempt in range(max_retries):
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+
+                if abs(ext_position) < Decimal("0.001") and abs(lig_position) < Decimal("0.001"):
+                    logger.info("无仓位需要平仓")
+                    return
+
+                logger.warning(f"当前仓位 Ext={ext_position} Lig={lig_position}")
+
+                # 强平 Extended
+                if abs(ext_position) >= Decimal("0.001"):
+                    side = "sell" if ext_position > 0 else "buy"
+                    success = await self.trade_executor.rollback_position(
+                        "extended", abs(ext_position), side
+                    )
+                    if not success:
+                        logger.error(f"Extended强平失败(尝试{attempt+1})")
+
+                # 强平 Lighter
+                if abs(lig_position) >= Decimal("0.001"):
+                    side = "sell" if lig_position > 0 else "buy"
+                    success = await self.trade_executor.rollback_position(
+                        "lighter", abs(lig_position), side
+                    )
+                    if not success:
+                        logger.error(f"Lighter强平失败(尝试{attempt+1})")
+
+                # 等待并验证
+                await asyncio.sleep(0.5)
+                final_ext = await self.extended_client.get_account_positions()
+                final_lig = await self.lighter_client.get_account_positions()
+
+                if abs(final_ext) < Decimal("0.001") and abs(final_lig) < Decimal("0.001"):
+                    logger.info(f"强制平仓完成 Ext={final_ext} Lig={final_lig}")
+                    return
+                else:
+                    logger.warning(f"平仓后仍有仓位 Ext={final_ext} Lig={final_lig}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+
+            except Exception as e:
+                logger.error(f"强制平仓异常(尝试{attempt+1}): {e}")
+
+        logger.error("强制平仓重试用尽")
+
     async def _handle_single_side_execution(self, result: ExecutionResult) -> None:
         """处理单边成交"""
         logger.error("检测到单边成交，执行紧急强平")
 
-        if result.extended_filled and not result.lighter_filled:
-            # Extended 成交，Lighter 未成交
-            # 需要在 Extended 卖出
-            await self.trade_executor.rollback_position(
-                "extended",
-                self.config.target_quantity,
-                "sell"
-            )
+        import time
+        max_retries = 3
+        retry_delay = 1.0
 
-        elif result.lighter_filled and not result.extended_filled:
-            # Lighter 成交，Extended 未成交
-            # 需要在 Lighter 买入
-            await self.trade_executor.rollback_position(
-                "lighter",
-                self.config.target_quantity,
-                "buy"
-            )
+        for attempt in range(max_retries):
+            try:
+                # 获取当前仓位
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+
+                logger.warning(f"当前仓位 Ext={ext_position} Lig={lig_position}")
+
+                # 强平有仓位的一边
+                if ext_position != 0:
+                    side = "sell" if ext_position > 0 else "buy"
+                    success = await self.trade_executor.rollback_position(
+                        "extended", abs(ext_position), side
+                    )
+                    if not success:
+                        logger.error(f"Extended强平失败(尝试{attempt+1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
+
+                if lig_position != 0:
+                    side = "sell" if lig_position > 0 else "buy"
+                    success = await self.trade_executor.rollback_position(
+                        "lighter", abs(lig_position), side
+                    )
+                    if not success:
+                        logger.error(f"Lighter强平失败(尝试{attempt+1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
+
+                # 验证最终仓位
+                await asyncio.sleep(0.5)  # 等待订单生效
+                final_ext = await self.extended_client.get_account_positions()
+                final_lig = await self.lighter_client.get_account_positions()
+
+                tolerance = Decimal("0.001")
+                if abs(final_ext) < tolerance and abs(final_lig) < tolerance:
+                    logger.info(f"强平成功 Ext={final_ext} Lig={final_lig}")
+                    return
+                else:
+                    logger.warning(f"强平后仍有仓位 Ext={final_ext} Lig={final_lig}(尝试{attempt+1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+
+            except Exception as e:
+                logger.error(f"强平异常(尝试{attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+
+        logger.error("强平重试次数用尽，可能存在残余仓位")
+
+    async def _check_and_clean_positions(self) -> None:
+        """启动时检查并清理残留仓位"""
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+
+            tolerance = Decimal("0.001")
+            has_ext = abs(ext_position) >= tolerance
+            has_lig = abs(lig_position) >= tolerance
+
+            if not has_ext and not has_lig:
+                logger.info("启动仓位检查: 无残留仓位")
+                return
+
+            # 有残留仓位，需要清理
+            logger.warning(f"启动仓位检查: 发现残留 Ext={ext_position} Lig={lig_position}")
+
+            # 检查状态文件记录的持仓
+            state = self.state_manager.get_state()
+            position = self.state_manager.get_position()
+
+            if state == BotState.HOLDING and position:
+                # 状态文件显示有持仓，检查是否匹配
+                logger.info(f"状态记录持仓: {position.extended_quantity}/{position.lighter_quantity}")
+                # 不清理，让程序继续处理
+                return
+
+            # 状态显示无持仓但实际有仓位，需要清理
+            logger.warning("状态显示无持仓但实际有仓位，执行清理")
+
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if abs(ext_position) >= tolerance:
+                        side = "sell" if ext_position > 0 else "buy"
+                        await self.trade_executor.rollback_position("extended", abs(ext_position), side)
+
+                    if abs(lig_position) >= tolerance:
+                        side = "sell" if lig_position > 0 else "buy"
+                        await self.trade_executor.rollback_position("lighter", abs(lig_position), side)
+
+                    await asyncio.sleep(0.5)
+                    final_ext = await self.extended_client.get_account_positions()
+                    final_lig = await self.lighter_client.get_account_positions()
+
+                    if abs(final_ext) < tolerance and abs(final_lig) < tolerance:
+                        logger.info(f"残留仓位清理成功 Ext={final_ext} Lig={final_lig}")
+                        return
+                    else:
+                        logger.warning(f"残留仓位仍有 Ext={final_ext} Lig={final_lig}")
+                        ext_position = final_ext
+                        lig_position = final_lig
+
+                except Exception as e:
+                    logger.error(f"清理残留仓位异常(尝试{attempt+1}): {e}")
+
+            logger.error("清理残留仓位失败，请手动检查")
+
+        except Exception as e:
+            logger.error(f"仓位检查失败: {e}")
 
     def get_stats(self) -> BotStats:
         """获取统计信息"""
@@ -645,6 +855,9 @@ class SpreadArbBot:
                        f"数量={abs(position.extended_quantity)}, "
                        f"开仓价差={position.entry_spread:.2%}")
 
+        # 检查交易所实际仓位
+        await self._check_and_clean_positions()
+
     def _setup_signal_handlers(self) -> None:
         """设置信号处理器"""
         def signal_handler(signum, frame):
@@ -838,6 +1051,14 @@ def parse_arguments() -> BotConfig:
     )
 
     parser.add_argument(
+        "--open-wait-timeout",
+        type=float,
+        default=10.0,
+        dest="open_wait_timeout",
+        help="开仓等待确认超时时间（秒） (默认: 10.0)"
+    )
+
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="模拟运行模式"
@@ -861,6 +1082,7 @@ def parse_arguments() -> BotConfig:
         spread_step=args.spread_step,
         balance_check_buffer=args.balance_check_buffer,
         single_side_timeout=args.single_side_timeout,
+        open_wait_timeout=args.open_wait_timeout,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )

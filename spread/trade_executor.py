@@ -383,23 +383,40 @@ class TradeExecutor:
         logger.warning(f"强平[Taker]: {exchange} {side} {quantity}")
 
         try:
+            order_id = None
             if exchange == "extended":
-                if side == "buy":
+                if side == "sell":
                     result = await self._place_extended_order_taker("sell", quantity, None)
                 else:
                     result = await self._place_extended_order_taker("buy", quantity, None)
             else:  # lighter
-                if side == "buy":
+                if side == "sell":
                     result = await self._place_lighter_order_taker("sell", quantity, None)
                 else:
                     result = await self._place_lighter_order_taker("buy", quantity, None)
 
             if isinstance(result, Exception):
-                logger.error(f"强平失败: {result}")
+                logger.error(f"强平下单失败: {result}")
                 return False
 
-            logger.info(f"强平成功: {result.get('order_id')}")
-            return True
+            order_id = result.get('order_id')
+
+            # 等待强平订单成交（最多3秒）
+            if order_id:
+                execution_status = await self.wait_for_execution(
+                    order_id if exchange == "extended" else None,
+                    order_id if exchange == "lighter" else None,
+                    timeout=3.0
+                )
+
+                if execution_status["both_filled"] or execution_status[f"{exchange}_filled"]:
+                    logger.info(f"强平成交: {order_id}")
+                    return True
+                else:
+                    logger.error(f"强平未成交/超时: {order_id}")
+                    return False
+
+            return False
 
         except Exception as e:
             logger.error(f"强平异常: {e}")

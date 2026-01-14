@@ -20,6 +20,7 @@ class BotState(Enum):
     """机器人状态枚举"""
     IDLE = "IDLE"           # 空闲，等待机会
     OPENING = "OPENING"     # 开仓中
+    OPENING_WAIT = "OPENING_WAIT"  # 开仓后等待确认仓位
     HOLDING = "HOLDING"     # 持仓中
     CLOSING = "CLOSING"     # 平仓中
     ERROR = "ERROR"         # 错误状态
@@ -303,6 +304,16 @@ class BotConfig:
     - 不平衡时立即平仓
     """
 
+    # 开仓等待确认相关
+    open_wait_timeout: float = 10.0
+    """
+    开仓等待确认超时时间（秒）
+    - 默认10秒
+    - 开仓后等待确认两边仓位的时间
+    - 超时或仓位不一致时强制平仓
+    - 等待期间不继续开仓
+    """
+
     # 智能平仓系统相关
     total_fee_rate: Decimal = field(default_factory=lambda: Decimal("0.0005"))
     """
@@ -344,6 +355,8 @@ class BotConfig:
         if self.spread_step <= 0:
             return False
         if self.balance_check_buffer <= 0:
+            return False
+        if self.open_wait_timeout <= 0:
             return False
         if self.total_fee_rate < 0:
             return False

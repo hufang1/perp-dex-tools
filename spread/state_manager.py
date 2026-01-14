@@ -2,7 +2,7 @@
 状态管理器：管理系统状态和持久化
 
 负责：
-1. 管理机器人状态（IDLE, OPENING, HOLDING, CLOSING, ERROR）
+1. 管理机器人状态（IDLE, OPENING, OPENING_WAIT, HOLDING, CLOSING, ERROR）
 2. 管理持仓信息
 3. 管理统计信息
 4. 状态持久化到文件
