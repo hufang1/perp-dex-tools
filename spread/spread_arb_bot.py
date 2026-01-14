@@ -446,6 +446,9 @@ class SpreadArbBot:
         if elapsed > timeout:
             logger.warning(f"等待超时({elapsed:.1f}s)，强平")
             await self._force_close_positions()
+            # 强平后进入冷却期
+            self._last_open_fail_time = time.time()
+            logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
             self.state_manager.set_state(BotState.IDLE)
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
@@ -468,12 +471,17 @@ class SpreadArbBot:
                 self.state_manager.set_state(BotState.HOLDING)
                 self._opening_wait_start_time = None
                 await self.state_manager.save_state()
-            elif elapsed >= 2.0 and ext_has_position != lig_has_position:
-                logger.warning(f"仓位不一致 Ext={ext_position} Lig={lig_position}，强平")
-                await self._force_close_positions()
-                self.state_manager.set_state(BotState.IDLE)
-                self._opening_wait_start_time = None
-                await self.state_manager.save_state()
+            elif elapsed >= 2.0:
+                # 检查仓位是否不一致（任何一边没有预期仓位）
+                if not ext_has_position or not lig_has_position:
+                    logger.warning(f"仓位不一致 Ext={ext_position} Lig={lig_position}，强平")
+                    await self._force_close_positions()
+                    # 强平后进入冷却期
+                    self._last_open_fail_time = time.time()
+                    logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
+                    self.state_manager.set_state(BotState.IDLE)
+                    self._opening_wait_start_time = None
+                    await self.state_manager.save_state()
 
         except Exception as e:
             logger.error(f"仓位检查失败: {e}")
@@ -487,40 +495,49 @@ class SpreadArbBot:
 
         for attempt in range(max_retries):
             try:
+                # 获取当前仓位
                 ext_position = await self.extended_client.get_account_positions()
                 lig_position = await self.lighter_client.get_account_positions()
 
-                if abs(ext_position) < Decimal("0.001") and abs(lig_position) < Decimal("0.001"):
-                    logger.info("无仓位需要平仓")
+                tolerance = Decimal("0.001")
+                ext_has_pos = abs(ext_position) >= tolerance
+                lig_has_pos = abs(lig_position) >= tolerance
+
+                if not ext_has_pos and not lig_has_pos:
+                    logger.info(f"无仓位需要平仓 Ext={ext_position} Lig={lig_position}")
                     return
 
-                logger.warning(f"当前仓位 Ext={ext_position} Lig={lig_position}")
+                logger.warning(f"强制平仓(尝试{attempt+1}/{max_retries}) Ext={ext_position} Lig={lig_position}")
 
-                # 强平 Extended
-                if abs(ext_position) >= Decimal("0.001"):
+                # 并发强平两边（提高效率）
+                close_tasks = []
+
+                if ext_has_pos:
                     side = "sell" if ext_position > 0 else "buy"
-                    success = await self.trade_executor.rollback_position(
-                        "extended", abs(ext_position), side
-                    )
-                    if not success:
-                        logger.error(f"Extended强平失败(尝试{attempt+1})")
+                    close_tasks.append(("extended", abs(ext_position), side))
 
-                # 强平 Lighter
-                if abs(lig_position) >= Decimal("0.001"):
+                if lig_has_pos:
                     side = "sell" if lig_position > 0 else "buy"
-                    success = await self.trade_executor.rollback_position(
-                        "lighter", abs(lig_position), side
-                    )
-                    if not success:
-                        logger.error(f"Lighter强平失败(尝试{attempt+1})")
+                    close_tasks.append(("lighter", abs(lig_position), side))
 
-                # 等待并验证
-                await asyncio.sleep(0.5)
+                # 执行强平
+                for exchange, qty, side in close_tasks:
+                    success = await self.trade_executor.rollback_position(exchange, qty, side)
+                    if not success:
+                        logger.error(f"{exchange.capitalize()}强平失败")
+
+                # 等待订单生效
+                await asyncio.sleep(1.0)
+
+                # 验证最终仓位
                 final_ext = await self.extended_client.get_account_positions()
                 final_lig = await self.lighter_client.get_account_positions()
 
-                if abs(final_ext) < Decimal("0.001") and abs(final_lig) < Decimal("0.001"):
-                    logger.info(f"强制平仓完成 Ext={final_ext} Lig={final_lig}")
+                final_ext_has = abs(final_ext) >= tolerance
+                final_lig_has = abs(final_lig) >= tolerance
+
+                if not final_ext_has and not final_lig_has:
+                    logger.info(f"强制平仓成功 Ext={final_ext} Lig={final_lig}")
                     return
                 else:
                     logger.warning(f"平仓后仍有仓位 Ext={final_ext} Lig={final_lig}")
@@ -528,9 +545,11 @@ class SpreadArbBot:
                         await asyncio.sleep(retry_delay)
 
             except Exception as e:
-                logger.error(f"强制平仓异常(尝试{attempt+1}): {e}")
+                logger.error(f"强制平仓异常(尝试{attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
 
-        logger.error("强制平仓重试用尽")
+        logger.error("强制平仓重试用尽，可能存在残余仓位")
 
     async def _handle_single_side_execution(self, result: ExecutionResult) -> None:
         """处理单边成交"""
