@@ -31,6 +31,7 @@ from models import (
     Trade,
     SpreadInfo,
     OpenPosition,
+    Portfolio,
 )
 from order_book_manager import OrderBookManager
 from spread_calculator import SpreadCalculator
@@ -425,8 +426,9 @@ class SpreadArbBot:
 
         self.state_manager.update_position(position)
 
-        # 更新上次开仓价差 (016-spread-optimize)
-        self.open_strategy.update_cached_spread(spread_info.spread_pct)
+        # 注意：不在这里更新 cached_open_spread！
+        # 需要等到仓位确认成功后再更新（在 OPENING_WAIT 状态中）
+        # 如果仓位确认失败并回滚，cached_open_spread 保持不变
 
         # 注意：不在这里添加仓位到智能平仓系统！
         # 需要等到仓位确认成功后再添加（在 OPENING_WAIT 状态中）
@@ -581,31 +583,54 @@ class SpreadArbBot:
 
         if trigger.is_triggered:
             # 切换到平仓状态
-            self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {trigger.reason}")
+            close_reason = (f"开仓{trigger.entry_spread:.2%} >= 当前{trigger.current_spread:.2%} + "
+                          f"利润{trigger.profit_target:.2%} + 手续费{trigger.fee_rate:.2%} | "
+                          f"预期利润{trigger.expected_profit:.2%}")
+            self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {close_reason}")
             await self.state_manager.save_state()
 
     async def _process_closing_state(self) -> None:
         """处理 CLOSING 状态：执行平仓"""
         logger.info("执行平仓...")
 
-        position = self.state_manager.get_position()
-        if position is None:
-            logger.warning("持仓信息丢失")
-            self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
+        # 获取 Portfolio（多笔仓位）
+        portfolio = self.state_manager.get_portfolio()
+        if portfolio is None or portfolio.total_quantity == 0:
+            logger.warning("持仓信息丢失或无持仓")
+            self.state_manager.set_state(BotState.IDLE, "持仓信息丢失或无持仓")
             await self.state_manager.save_state()
             return
 
+        # 获取总持仓数量
+        total_quantity = portfolio.total_quantity
+        entry_spread = portfolio.get_total_entry_spread()
+
+        logger.info(f"平仓总数量: {total_quantity} ETH, 加权开仓价差: {entry_spread:.2%}")
+
+        # 创建一个临时 Position 对象用于 execute_close_position
+        # 因为 execute_close_position 需要 Position 参数
+        temp_position = Position(
+            state=PositionState.LONG,
+            extended_entry_price=Decimal("0"),  # 平仓时不需要
+            lighter_entry_price=Decimal("0"),  # 平仓时不需要
+            entry_spread=entry_spread,
+            entry_time=datetime.now(),
+            extended_quantity=total_quantity,
+            lighter_quantity=-total_quantity,
+            extended_order_id="close",
+            lighter_order_id="close"
+        )
+
         # 执行平仓
         result = await self.trade_executor.execute_close_position(
-            position,
-            abs(position.extended_quantity)
+            temp_position,
+            total_quantity
         )
 
         if result.success:
             # 平仓成功，计算利润
-            entry_spread = position.entry_spread
             close_spread = await self._calculate_close_spread_from_result(result)
-            profit = self._calculate_profit(position, result)
+            profit = self._calculate_profit_for_portfolio(portfolio, result)
 
             # 更新统计
             stats = self.state_manager.get_stats()
@@ -613,17 +638,20 @@ class SpreadArbBot:
             if profit > 0:
                 stats.profitable_trades += 1
             stats.total_profit += profit
-            stats.total_fees += self._calculate_fees(position)
+            stats.total_fees += self._calculate_fees_for_portfolio(portfolio)
             stats.last_trade_time = datetime.now()
             self.state_manager.update_stats(stats)
 
-            # 清除持仓
-            self.state_manager.update_position(None)
+            # 清除所有持仓记录
+            self.close_strategy.close_all()
+
+            # 清除旧的 Position（向后兼容）
+            old_position = self.state_manager.get_position()
+            if old_position:
+                self.state_manager.update_position(None)
+
             self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.2%}")
             await self.state_manager.save_state()
-
-            # 平掉所有仓位记录 (016-spread-optimize)
-            self.close_strategy.close_all()
 
             logger.info(
                 f"平仓成功: 利润=${profit:.2f}, "
@@ -691,6 +719,10 @@ class SpreadArbBot:
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
                     self.close_strategy.add_position(self._pending_open_position)
+
+                    # 更新上次开仓价差（只在仓位确认成功后才更新）
+                    self.open_strategy.update_cached_spread(self._pending_open_position.open_spread)
+
                     self._pending_open_position = None
 
                 await self.state_manager.save_state()
@@ -1465,14 +1497,40 @@ class SpreadArbBot:
         return Decimal("0.001")
 
     def _calculate_profit(self, position: Position, result: ExecutionResult) -> Decimal:
-        """计算利润"""
+        """计算利润（旧版，单笔仓位）"""
         # 简化计算
         return self.config.target_quantity * position.entry_spread * position.extended_entry_price * Decimal("0.5")
 
+    def _calculate_profit_for_portfolio(self, portfolio: Portfolio, result: ExecutionResult) -> Decimal:
+        """计算 Portfolio 利润（新版，多笔仓位）"""
+        # 简化计算：使用加权平均开仓价差
+        entry_spread = portfolio.get_total_entry_spread()
+        total_quantity = portfolio.total_quantity
+
+        # 获取平仓价格
+        if result.extended_price and result.lighter_price:
+            avg_close_price = (result.extended_price + result.lighter_price) / 2
+        else:
+            # 如果没有平仓价格，使用开仓价格的估算
+            avg_close_price = Decimal("3000")  # 临时默认值
+
+        # 利润 = 数量 * (开仓价差 - 手续费) * 价格
+        # 开仓价差就是利润率
+        profit = total_quantity * (entry_spread - self.config.total_fee_rate) * avg_close_price
+        return profit
+
     def _calculate_fees(self, position: Position) -> Decimal:
-        """计算手续费"""
+        """计算手续费（旧版，单笔仓位）"""
         # Extended 0.025% 双向 = 0.05%
         return self.config.target_quantity * position.extended_entry_price * Decimal("0.0005")
+
+    def _calculate_fees_for_portfolio(self, portfolio: Portfolio) -> Decimal:
+        """计算 Portfolio 手续费（新版，多笔仓位）"""
+        # 简化计算：使用总数量和平均价格
+        total_quantity = portfolio.total_quantity
+        # 使用估算价格
+        avg_price = Decimal("3000")
+        return total_quantity * avg_price * self.config.total_fee_rate
 
 
 # ========================================================================
