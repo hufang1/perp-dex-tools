@@ -99,6 +99,9 @@ class SpreadArbBot:
         # 开仓成功冷却期（防止频繁开仓）
         self._last_open_success_time: Optional[float] = None
         self._open_success_cooldown: float = 3.0  # 成功后3秒冷却
+        # 持仓日志输出间隔（秒）
+        self._last_holding_log_time: float = 0
+        self._holding_log_interval: float = 5.0  # 每5秒输出一次
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -305,7 +308,7 @@ class SpreadArbBot:
                 return
 
             # 切换到开仓状态
-            self.state_manager.set_state(BotState.OPENING)
+            self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.2%} > 阈值{self.config.min_spread_threshold:.2%}")
             await self.state_manager.save_state()
         else:
             # 输出不能开仓的原因，但限制频率（每5秒一次）
@@ -325,7 +328,7 @@ class SpreadArbBot:
 
         if spread_info is None or not spread_info.is_valid():
             logger.warning("无法获取价差信息，取消开仓")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, "无法获取价差信息")
             await self.state_manager.save_state()
             return
 
@@ -342,7 +345,7 @@ class SpreadArbBot:
             import time
             self._last_open_fail_time = time.time()
             logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, f"开仓失败: {result.error_message}")
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
             return
@@ -399,16 +402,16 @@ class SpreadArbBot:
         # 记录开仓成功时间，触发成功冷却期
         self._last_open_success_time = time.time()
         logger.info(f"等待仓位确认 (超时{self.config.open_wait_timeout}s)")
-        self.state_manager.set_state(BotState.OPENING_WAIT)
+        self.state_manager.set_state(BotState.OPENING_WAIT, f"订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
         await self.state_manager.save_state()
 
     async def _process_holding_state(self) -> None:
-        """处理 HOLDING 状态：监控价差，寻找平仓机会"""
+        """处理 HOLDING 状态：监控价差，寻找平仓机会和继续开仓机会"""
         position = self.state_manager.get_position()
 
         if position is None:
             logger.warning("持仓信息丢失，返回 IDLE 状态")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
             await self.state_manager.save_state()
             return
 
@@ -418,6 +421,46 @@ class SpreadArbBot:
         if spread_info is None or not spread_info.is_valid():
             return
 
+        # 检查是否可以继续开仓（等差数列策略）
+        should_open, reason = self.open_strategy.should_open(spread_info)
+
+        if should_open:
+            # 可以继续开仓！切换到开仓状态
+            # 风控验证
+            validation = await self.risk_manager.validate_open_position(
+                self.order_book_manager,
+                self.config.target_quantity,
+                spread_info
+            )
+
+            if not validation.is_valid:
+                print(f"⚠️ 继续开仓风控失败: {validation.reason}")
+            else:
+                # 风控通过，切换到开仓状态
+                self.state_manager.set_state(BotState.OPENING, f"继续开仓: {reason}")
+                await self.state_manager.save_state()
+                return  # 直接返回，不再执行后续逻辑
+
+        # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差 下次阈值 开仓/不开仓）
+        # 限制频率：每5秒输出一次
+        import time
+        current_time = time.time()
+        if current_time - self._last_holding_log_time >= self._holding_log_interval:
+            current_spread = spread_info.spread_pct
+            cached_spread = self.config.cached_open_spread
+            spread_step = self.config.spread_step
+
+            if cached_spread == 0:
+                next_threshold = self.config.min_spread_threshold
+                threshold_info = f"阈值{next_threshold:.2%}"
+            else:
+                next_threshold = cached_spread + spread_step
+                threshold_info = f"缓存{cached_spread:.2%}+步进{spread_step:.2%}={next_threshold:.2%}"
+
+            status_text = "开仓" if should_open else "不开仓"
+            print(f"📊 状态「持仓中」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
+            self._last_holding_log_time = current_time
+
         # 使用智能平仓策略判断 (016-spread-optimize)
         trigger = self.close_strategy.should_close(spread_info)
 
@@ -425,7 +468,7 @@ class SpreadArbBot:
             logger.info(trigger.format_log())
 
             # 切换到平仓状态
-            self.state_manager.set_state(BotState.CLOSING)
+            self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {trigger.reason}")
             await self.state_manager.save_state()
 
     async def _process_closing_state(self) -> None:
@@ -435,7 +478,7 @@ class SpreadArbBot:
         position = self.state_manager.get_position()
         if position is None:
             logger.warning("持仓信息丢失")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
             await self.state_manager.save_state()
             return
 
@@ -463,7 +506,7 @@ class SpreadArbBot:
 
             # 清除持仓
             self.state_manager.update_position(None)
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.2%}")
             await self.state_manager.save_state()
 
             # 平掉所有仓位记录 (016-spread-optimize)
@@ -478,7 +521,7 @@ class SpreadArbBot:
             # 平仓失败
             logger.error(f"平仓失败: {result.error_message}")
             # 保持 HOLDING 状态，等待下一次机会
-            self.state_manager.set_state(BotState.HOLDING)
+            self.state_manager.set_state(BotState.HOLDING, f"平仓失败: {result.error_message}")
             await self.state_manager.save_state()
 
     async def _process_opening_wait_state(self) -> None:
@@ -498,7 +541,7 @@ class SpreadArbBot:
             # 强平后进入冷却期
             self._last_open_fail_time = time.time()
             logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, f"等待超时({elapsed:.1f}s)，已强平")
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
             return
@@ -517,7 +560,7 @@ class SpreadArbBot:
 
             if ext_has_position and lig_has_position:
                 logger.info(f"仓位确认 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
-                self.state_manager.set_state(BotState.HOLDING)
+                self.state_manager.set_state(BotState.HOLDING, f"仓位确认成功 Ext={ext_position} Lig={lig_position}")
                 self._opening_wait_start_time = None
                 await self.state_manager.save_state()
             elif elapsed >= 2.0:
@@ -528,7 +571,7 @@ class SpreadArbBot:
                     # 强平后进入冷却期
                     self._last_open_fail_time = time.time()
                     logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-                    self.state_manager.set_state(BotState.IDLE)
+                    self.state_manager.set_state(BotState.IDLE, f"仓位不一致 Ext={ext_position} Lig={lig_position}，已强平")
                     self._opening_wait_start_time = None
                     await self.state_manager.save_state()
 
@@ -921,7 +964,7 @@ class SpreadArbBot:
         # 因为之前的开仓流程已经失效，需要重新开始
         if state in [BotState.OPENING, BotState.OPENING_WAIT]:
             logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
-            self.state_manager.set_state(BotState.IDLE)
+            self.state_manager.set_state(BotState.IDLE, "程序重启，重置未完成的开仓状态")
             await self.state_manager.save_state()
 
         # 检查HOLDING/CLOSING状态但实际没有持仓的情况
@@ -933,7 +976,8 @@ class SpreadArbBot:
 
             if not has_position:
                 logger.info(f"检测到{state.value}状态但实际无持仓，重置为IDLE")
-                self.state_manager.set_state(BotState.IDLE)
+                self.state_manager.set_state(BotState.IDLE, "程序重启，检测到无实际持仓，重置状态")
+                await self.state_manager.save_state()
                 await self.state_manager.save_state()
 
         position = self.state_manager.get_position()

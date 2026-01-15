@@ -39,6 +39,16 @@ class StateManager:
     定期保存状态到文件，支持崩溃后恢复
     """
 
+    # 状态中文映射
+    STATE_NAMES_CN = {
+        BotState.IDLE: "空闲",
+        BotState.OPENING: "开仓中",
+        BotState.OPENING_WAIT: "开仓等待确认",
+        BotState.HOLDING: "持仓中",
+        BotState.CLOSING: "平仓中",
+        BotState.ERROR: "错误",
+    }
+
     def __init__(self, state_file: Path):
         """
         初始化状态管理器
@@ -303,10 +313,37 @@ class StateManager:
         """获取机器人状态"""
         return self._current_state
 
-    def set_state(self, state: BotState) -> None:
-        """设置机器人状态"""
+    # 状态中文映射
+    STATE_NAMES_CN = {
+        BotState.IDLE: "空闲",
+        BotState.OPENING: "开仓中",
+        BotState.OPENING_WAIT: "开仓等待确认",
+        BotState.HOLDING: "持仓中",
+        BotState.CLOSING: "平仓中",
+        BotState.ERROR: "错误",
+    }
+
+    def set_state(self, state: BotState, reason: str = "") -> None:
+        """
+        设置机器人状态
+
+        Args:
+            state: 新状态
+            reason: 状态转换的原因（可选）
+        """
         old_state = self._current_state
         self._current_state = state
+
+        # 输出状态转换日志（使用print强制输出，不受logging级别影响）
+        old_name = self.STATE_NAMES_CN.get(old_state, old_state.value)
+        new_name = self.STATE_NAMES_CN.get(state, state.value)
+
+        if reason:
+            print(f"💥 {old_name} -> {new_name} | {reason}")
+        else:
+            print(f"💥 {old_name} -> {new_name}")
+
+        # 仍然记录到logger（如果日志级别允许）
         logger.info(f"状态转换: {old_state.value} -> {state.value}")
 
     def get_stats(self) -> BotStats:
