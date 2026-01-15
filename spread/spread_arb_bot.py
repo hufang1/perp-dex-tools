@@ -14,6 +14,7 @@ import signal
 import sys
 import time
 import uuid
+import csv
 from decimal import Decimal
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -108,6 +109,14 @@ class SpreadArbBot:
         self._last_holding_log_time: float = 0
         self._holding_log_interval: float = 5.0  # 每5秒输出一次
         # API错误计数和风控模式
+        self._api_error_count: int = 0
+        self._paused_start_time: Optional[float] = None
+        self._last_api_check_time: Optional[float] = None
+
+        # CSV埋点日志
+        self._csv_log_dir = Path("logs/trades")
+        self._csv_log_dir.mkdir(parents=True, exist_ok=True)
+        self._init_csv_loggers()
         self._api_error_count: int = 0
         self._api_error_threshold: int = 3  # 连续3次错误进入风控模式
         self._paused_start_time: Optional[float] = None
@@ -628,39 +637,159 @@ class SpreadArbBot:
         )
 
         if result.success:
-            # 平仓成功，计算利润
-            close_spread = await self._calculate_close_spread_from_result(result)
-            profit = self._calculate_profit_for_portfolio(portfolio, result)
+            logger.info("平仓订单已发送，等待确认实际仓位...")
 
-            # 更新统计
-            stats = self.state_manager.get_stats()
-            stats.total_trades += 1
-            if profit > 0:
-                stats.profitable_trades += 1
-            stats.total_profit += profit
-            stats.total_fees += self._calculate_fees_for_portfolio(portfolio)
-            stats.last_trade_time = datetime.now()
-            self.state_manager.update_stats(stats)
+            # 等待订单生效
+            await asyncio.sleep(1.0)
 
-            # 清除所有持仓记录
-            self.close_strategy.close_all()
+            # 检查实际仓位
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
 
-            # 清除旧的 Position（向后兼容）
-            old_position = self.state_manager.get_position()
-            if old_position:
-                self.state_manager.update_position(None)
+            logger.info(f"平仓后仓位检查: Ext={ext_position} Lig={lig_position}")
 
-            self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.2%}")
-            await self.state_manager.save_state()
+            # 检查是否都已平仓
+            ext_closed = ext_position < tolerance
+            lig_closed = lig_position < tolerance
 
-            logger.info(
-                f"平仓成功: 利润=${profit:.2f}, "
-                f"价差收敛={entry_spread - close_spread:.2%}"
-            )
+            if ext_closed and lig_closed:
+                # 两边都平了，计算利润并进入IDLE
+                close_spread = await self._calculate_close_spread_from_result(result)
+                profit = self._calculate_profit_for_portfolio(portfolio, result)
+
+                # 更新统计
+                stats = self.state_manager.get_stats()
+                stats.total_trades += 1
+                if profit > 0:
+                    stats.profitable_trades += 1
+                stats.total_profit += profit
+                stats.total_fees += self._calculate_fees_for_portfolio(portfolio)
+                stats.last_trade_time = datetime.now()
+                self.state_manager.update_stats(stats)
+
+                # 清除所有持仓记录
+                self.close_strategy.close_all()
+
+                # 清除旧的 Position（向后兼容）
+                old_position = self.state_manager.get_position()
+                if old_position:
+                    self.state_manager.update_position(None)
+
+                # 计算持仓时长（从第一笔开仓到平仓）
+                if portfolio.first_open_time:
+                    elapsed_time = time.time() - portfolio.first_open_time
+                else:
+                    elapsed_time = 0.0
+
+                # CSV埋点：平仓成功
+                fees = self._calculate_fees_for_portfolio(portfolio)
+                self._log_close_to_csv(
+                    entry_spread=entry_spread,
+                    close_spread=close_spread,
+                    total_qty=total_quantity,
+                    profit=profit,
+                    fees=fees,
+                    elapsed=elapsed_time,
+                    status='平仓成功'
+                )
+
+                self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.2%}")
+                await self.state_manager.save_state()
+
+                logger.info(
+                    f"✅ 平仓完成，进入IDLE状态: 利润=${profit:.2f}, "
+                    f"价差收敛={entry_spread - close_spread:.2%}"
+                )
+
+            elif ext_closed != lig_closed:
+                # 一边平了，另一边没平 → 强平另一边
+                logger.error(f"⚠️ 单边平仓！Ext={'已平' if ext_closed else f'有仓位{ext_position}'}, "
+                          f"Lig={'已平' if lig_closed else f'有仓位{lig_position}'}")
+                logger.error("立即强平剩余仓位...")
+
+                await self._force_close_positions()
+
+                # 强平后继续检查，循环平仓直到两边都为0
+                max_attempts = 5  # 最多尝试5次
+                for attempt in range(max_attempts):
+                    await asyncio.sleep(1.0)
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    ext_closed = ext_position < tolerance
+                    lig_closed = lig_position < tolerance
+
+                    logger.info(f"强平后检查(尝试{attempt+1}/{max_attempts}): Ext={ext_position} Lig={lig_position}")
+
+                    if ext_closed and lig_closed:
+                        # 都平了，进入IDLE
+                        logger.info("✅ 所有仓位已平仓，进入IDLE状态")
+                        self.state_manager.set_state(BotState.IDLE, "平仓后强制清理完成")
+                        await self.state_manager.save_state()
+                        break
+                    else:
+                        # 还有仓位，继续强平
+                        logger.warning(f"仍有残留仓位 Ext={ext_position} Lig={lig_position}，继续强平...")
+                        await self._force_close_positions()
+                else:
+                    # 重试用尽还有仓位
+                    logger.error(f"❌ 强平{max_attempts}次后仍有仓位 Ext={ext_position} Lig={lig_position}，进入风控模式")
+                    print(f"🛡️ 强平失败，进入风控暂停模式")
+                    import time
+                    self._paused_start_time = time.time()
+                    self._last_api_check_time = time.time()
+                    self.state_manager.set_state(BotState.PAUSED, f"强平失败，仍有残余仓位")
+                    await self.state_manager.save_state()
+
+            else:
+                # 两边都没平 → 也需要强制平仓，不要继续HOLDING
+                logger.warning(f"⚠️ 平仓无效，两边都仍有仓位: Ext={ext_position} Lig={lig_position}")
+                logger.warning("强制平仓所有仓位...")
+
+                # 循环强平直到两边都为0（最多5次）
+                max_attempts = 5
+                for attempt in range(max_attempts):
+                    logger.info(f"强制平仓(尝试{attempt+1}/{max_attempts}): Ext={ext_position} Lig={lig_position}")
+                    await self._force_close_positions()
+
+                    await asyncio.sleep(1.0)
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    ext_closed = ext_position < tolerance
+                    lig_closed = lig_position < tolerance
+
+                    if ext_closed and lig_closed:
+                        # 都平了，进入IDLE
+                        logger.info("✅ 所有仓位已平仓，进入IDLE状态")
+                        self.state_manager.set_state(BotState.IDLE, "平仓后强制清理完成")
+                        await self.state_manager.save_state()
+                        break
+                else:
+                    # 重试用尽还有仓位
+                    logger.error(f"❌ 强平{max_attempts}次后仍有仓位 Ext={ext_position} Lig={lig_position}，进入风控模式")
+                    print(f"🛡️ 强平失败，进入风控暂停模式")
+                    import time
+                    self._paused_start_time = time.time()
+                    self._last_api_check_time = time.time()
+                    self.state_manager.set_state(BotState.PAUSED, f"强平失败，仍有残余仓位")
+                    await self.state_manager.save_state()
 
         else:
             # 平仓失败
             logger.error(f"平仓失败: {result.error_message}")
+
+            # CSV埋点：平仓失败
+            fees = self._calculate_fees_for_portfolio(portfolio)
+            self._log_close_to_csv(
+                entry_spread=entry_spread,
+                close_spread=Decimal("0"),
+                total_qty=total_quantity,
+                profit=Decimal("0"),
+                fees=fees,
+                elapsed=0.0,
+                status=f'平仓失败: {result.error_message}'
+            )
+
             # 保持 HOLDING 状态，等待下一次机会
             self.state_manager.set_state(BotState.HOLDING, f"平仓失败: {result.error_message}")
             await self.state_manager.save_state()
@@ -708,10 +837,42 @@ class SpreadArbBot:
             ext_lig_diff = abs(ext_position - lig_position)
             positions_match = ext_lig_diff < tolerance
 
+            # 检查是否两边都没有开仓
+            both_zero = ext_position < tolerance and lig_position < tolerance
 
             logger.info(f"仓位验证: Ext={ext_position} Lig={lig_position} diff={ext_lig_diff} {('✓' if positions_match else '✗')}")
 
             if positions_match:
+                if both_zero:
+                    # 两边都没有开仓
+                    logger.warning(f"开仓失败：两边都没有仓位")
+
+                    # CSV埋点：开仓失败（两边都没开）
+                    if hasattr(self, '_pending_open_position') and self._pending_open_position:
+                        self._log_open_to_csv(
+                            status='开仓失败_两边无仓位',
+                            ext_pos=ext_position,
+                            lig_pos=lig_position,
+                            position_diff=ext_lig_diff,
+                            target_qty=self.config.target_quantity,
+                            elapsed=elapsed,
+                            open_spread=self._pending_open_position.open_spread,
+                            ext_order_id=self._pending_open_position.ext_order_id,
+                            lig_order_id=self._pending_open_position.lig_order_id
+                        )
+
+                    # 进入冷却期
+                    self._last_open_fail_time = time.time()
+                    logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
+                    self.state_manager.set_state(BotState.IDLE, f"开仓失败：两边都没有仓位")
+                    self._opening_wait_start_time = None
+
+                    # 清除待确认的仓位
+                    if hasattr(self, '_pending_open_position'):
+                        self._pending_open_position = None
+
+                    await self.state_manager.save_state()
+                    return
                 logger.info(f"仓位确认成功 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
                 self.state_manager.set_state(BotState.HOLDING, f"仓位确认成功 Ext={ext_position} Lig={lig_position}")
                 self._opening_wait_start_time = None
@@ -723,6 +884,19 @@ class SpreadArbBot:
                     # 更新上次开仓价差（只在仓位确认成功后才更新）
                     self.open_strategy.update_cached_spread(self._pending_open_position.open_spread)
 
+                    # CSV埋点：开仓成功
+                    self._log_open_to_csv(
+                        status='开仓成功',
+                        ext_pos=ext_position,
+                        lig_pos=lig_position,
+                        position_diff=ext_lig_diff,
+                        target_qty=self.config.target_quantity,
+                        elapsed=elapsed,
+                        open_spread=self._pending_open_position.open_spread,
+                        ext_order_id=self._pending_open_position.ext_order_id,
+                        lig_order_id=self._pending_open_position.lig_order_id
+                    )
+
                     self._pending_open_position = None
 
                 await self.state_manager.save_state()
@@ -732,6 +906,20 @@ class SpreadArbBot:
 
                 # 判断哪边多了仓位，只平掉多出来的部分（本次开仓数量）
                 portfolio = self.state_manager.get_portfolio()
+
+                # CSV埋点：仓位不对等
+                if hasattr(self, '_pending_open_position') and self._pending_open_position:
+                    self._log_open_to_csv(
+                        status='仓位不对等',
+                        ext_pos=ext_position,
+                        lig_pos=lig_position,
+                        position_diff=ext_lig_diff,
+                        target_qty=self.config.target_quantity,
+                        elapsed=elapsed,
+                        open_spread=self._pending_open_position.open_spread,
+                        ext_order_id=self._pending_open_position.ext_order_id,
+                        lig_order_id=self._pending_open_position.lig_order_id
+                    )
                 current_qty = portfolio.total_quantity if portfolio else Decimal("0")
 
                 # 只平掉两边比之前持仓多的部分
@@ -1345,6 +1533,8 @@ class SpreadArbBot:
         # 状态管理器
         state_file = Path("logs") / "spread_arb_state.json"
         self.state_manager = StateManager(state_file)
+        # 设置config引用，用于状态转换时重置策略状态
+        self.state_manager.set_config(self.config)
 
         logger.debug("组件初始化完成")
 
@@ -1531,6 +1721,84 @@ class SpreadArbBot:
         # 使用估算价格
         avg_price = Decimal("3000")
         return total_quantity * avg_price * self.config.total_fee_rate
+
+    def _init_csv_loggers(self) -> None:
+        """初始化CSV日志记录器"""
+        date_str = datetime.now().strftime("%Y%m%d")
+        self._open_csv_path = self._csv_log_dir / f"open_trades_{date_str}.csv"
+        self._close_csv_path = self._csv_log_dir / f"close_trades_{date_str}.csv"
+
+        # 初始化开仓CSV文件
+        if not self._open_csv_path.exists():
+            with open(self._open_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'status', 'ext_position', 'lig_position',
+                    'position_diff', 'target_qty', 'elapsed_time',
+                    'open_spread', 'ext_order_id', 'lig_order_id'
+                ])
+
+        # 初始化平仓CSV文件
+        if not self._close_csv_path.exists():
+            with open(self._close_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'entry_spread', 'close_spread',
+                    'total_quantity', 'profit', 'fees',
+                    'profit_pct', 'elapsed_time', 'status'
+                ])
+
+        logger.info(f"CSV日志文件: 开仓={self._open_csv_path}, 平仓={self._close_csv_path}")
+
+    def _log_open_to_csv(self, status: str, ext_pos: Decimal, lig_pos: Decimal,
+                         position_diff: Decimal, target_qty: Decimal,
+                         elapsed: float, open_spread: Decimal,
+                         ext_order_id: str, lig_order_id: str) -> None:
+        """记录开仓结果到CSV"""
+        try:
+            with open(self._open_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().isoformat(),
+                    status,
+                    str(ext_pos),
+                    str(lig_pos),
+                    str(position_diff),
+                    str(target_qty),
+                    f"{elapsed:.2f}",
+                    str(open_spread),
+                    ext_order_id or '',
+                    lig_order_id or ''
+                ])
+        except Exception as e:
+            logger.warning(f"写入开仓CSV失败: {e}")
+
+    def _log_close_to_csv(self, entry_spread: Decimal, close_spread: Decimal,
+                          total_qty: Decimal, profit: Decimal, fees: Decimal,
+                          elapsed: float, status: str) -> None:
+        """记录平仓结果到CSV"""
+        try:
+            # 计算利润百分比
+            if total_qty > 0 and entry_spread > 0:
+                profit_pct = (profit / (total_qty * entry_spread * Decimal("3000"))) * 100
+            else:
+                profit_pct = Decimal("0")
+
+            with open(self._close_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().isoformat(),
+                    str(entry_spread),
+                    str(close_spread),
+                    str(total_qty),
+                    str(profit),
+                    str(fees),
+                    f"{profit_pct:.2f}%",
+                    f"{elapsed:.2f}",
+                    status
+                ])
+        except Exception as e:
+            logger.warning(f"写入平仓CSV失败: {e}")
 
 
 # ========================================================================

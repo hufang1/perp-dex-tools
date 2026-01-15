@@ -70,6 +70,9 @@ class StateManager:
         self._auto_save_interval: int = 60  # 60 秒
         self._save_task: Optional[asyncio.Task] = None
 
+        # 配置对象引用（用于重置策略状态）
+        self._config: Optional[BotConfig] = None
+
         logger.info(f"状态管理器初始化: {state_file}")
 
     async def load_state(self) -> BotState:
@@ -325,6 +328,15 @@ class StateManager:
         BotState.ERROR: "错误",
     }
 
+    def set_config(self, config: BotConfig) -> None:
+        """
+        设置配置对象引用
+
+        Args:
+            config: 机器人配置对象
+        """
+        self._config = config
+
     def set_state(self, state: BotState, reason: str = "") -> None:
         """
         设置机器人状态
@@ -347,6 +359,12 @@ class StateManager:
 
         # 仍然记录到logger（如果日志级别允许）
         logger.info(f"状态转换: {old_state.value} -> {state.value}")
+
+        # 进入IDLE状态时重置开仓价差
+        if state == BotState.IDLE and self._config and self._config.cached_open_spread != 0:
+            old_spread = self._config.cached_open_spread
+            self._config.cached_open_spread = Decimal("0")
+            logger.info(f"进入空闲状态，重置开仓价差: {old_spread:.2%} -> 0%")
 
     def get_stats(self) -> BotStats:
         """获取统计信息"""
