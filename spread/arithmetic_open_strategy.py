@@ -71,7 +71,7 @@ class ArithmeticOpenStrategy:
         threshold = cached_spread + spread_step
         if current_spread > threshold:
             self._state = OpenStrategyState.READY
-            reason = f"开仓: 价差{current_spread:.2%} > 阈值{threshold:.2%} (上次开仓{cached_spread:.2%} + 步长{spread_step:.2%})"
+            reason = f"开仓: 价差{current_spread:.2%} > 阈值{threshold:.2%} (上次开仓{cached_spread:.2%} + 步长{spread_step:.3%})"
             return True, reason
         else:
             self._state = OpenStrategyState.WAITING

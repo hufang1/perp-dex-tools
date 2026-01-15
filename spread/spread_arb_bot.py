@@ -93,6 +93,8 @@ class SpreadArbBot:
 
         # 开仓等待确认
         self._opening_wait_start_time: Optional[float] = None
+        # 待确认的仓位（仓位确认成功后才添加到智能平仓系统）
+        self._pending_open_position = None
         # 开仓失败冷却期（秒）
         self._open_cooldown: float = 10.0  # 增加到10秒
         self._last_open_fail_time: Optional[float] = None
@@ -295,19 +297,39 @@ class SpreadArbBot:
                 logger.debug(f"成功冷却中，剩余{self._open_success_cooldown - elapsed:.1f}秒")
                 return
 
-        # 检查是否有残留仓位（防止强平失败后继续开仓）
+        # 检查是否有仓位需要处理（回滚后的仓位恢复）
         try:
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
             tolerance = Decimal("0.001")
 
-            if abs(ext_position) >= tolerance or abs(lig_position) >= tolerance:
-                logger.error(f"发现残留仓位 Ext={ext_position} Lig={lig_position}，强制清理中...")
-                await self._force_close_positions()
-                # 清理后返回，等待下一个循环
-                return
+            # 检查是否有仓位
+            has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+            if has_position:
+                # 有仓位：检查是否平衡（两边相等）
+                position_diff = abs(ext_position - lig_position)
+
+                if position_diff < tolerance:
+                    # 两边仓位相等，说明是正常持仓
+                    if abs(ext_position) >= tolerance:
+                        # 有正常持仓，进入 HOLDING 状态
+                        logger.info(f"检测到正常持仓 Ext={ext_position} Lig={lig_position}，进入持仓状态")
+                        self.state_manager.set_state(BotState.HOLDING, "回滚后恢复持仓状态")
+                        await self.state_manager.save_state()
+                        return
+                    else:
+                        # 没有实际持仓，保持 IDLE 状态
+                        logger.info(f"无实际持仓 Ext={ext_position} Lig={lig_position}，保持空闲状态")
+                        return
+                else:
+                    # 两边仓位不相等，说明是异常（残留），需要强制清理
+                    logger.error(f"发现异常仓位（不平衡） Ext={ext_position} Lig={lig_position}，强制清理中...")
+                    await self._force_close_positions()
+                    # 清理后返回，等待下一个循环
+                    return
         except Exception as e:
-            logger.warning(f"检查残留仓位失败: {e}")
+            logger.warning(f"检查仓位失败: {e}")
             # 如果检查失败，不阻止开仓（避免卡死）
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
@@ -333,7 +355,7 @@ class SpreadArbBot:
                 threshold_info = f"阈值{next_threshold:.2%}"
             else:
                 next_threshold = cached_spread + spread_step
-                threshold_info = f"上次开仓{cached_spread:.2%}+步长{spread_step:.2%}={next_threshold:.2%}"
+                threshold_info = f"上次开仓{cached_spread:.2%}+步长{spread_step:.3%}={next_threshold:.2%}"
 
             status_text = "开仓" if should_open else "不开仓"
             print(f"📊 状态「空闲」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
@@ -378,25 +400,15 @@ class SpreadArbBot:
             spread_info
         )
 
-        # 检查是否完全失败（没有订单ID）
-        if result.extended_order_id is None and result.lighter_order_id is None:
-            # 完全失败，进入IDLE和冷却期
-            logger.error(f"开仓完全失败: {result.error_message}")
-            # 检测是否是API错误
-            self._handle_api_error(result.error_message)
-            import time
-            self._last_open_fail_time = time.time()
-            logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
-            # 只有在未进入风控模式时才切换状态
-            if self.state_manager.get_state() != BotState.PAUSED:
-                self.state_manager.set_state(BotState.IDLE, f"开仓失败: {result.error_message}")
-            self._opening_wait_start_time = None
-            await self.state_manager.save_state()
-            return
+        # 不管订单状态如何，都进入 OPENING_WAIT 状态检查实际仓位
+        # 即使订单返回失败，也可能有部分成交（或者订单还在处理中）
+        # 通过实际仓位检查来判断是否真的开仓成功，避免遗漏单边成交
 
-        # 不管订单状态如何，只要有订单ID就进入OPENING_WAIT状态
-        # 在OPENING_WAIT状态中通过实际仓位检查来判断是否真的开仓成功
-        # 这样可以避免订单状态查询延迟导致的误判
+        # 检查是否完全失败（两边都没有订单ID）
+        if result.extended_order_id is None and result.lighter_order_id is None:
+            logger.error(f"订单发送完全失败: {result.error_message}，仍需检查仓位以防部分成交")
+        else:
+            logger.info(f"订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
 
         # 创建持仓记录（先创建，后续在OPENING_WAIT中验证）
         position = Position(
@@ -416,8 +428,10 @@ class SpreadArbBot:
         # 更新上次开仓价差 (016-spread-optimize)
         self.open_strategy.update_cached_spread(spread_info.spread_pct)
 
-        # 添加仓位到智能平仓系统 (016-spread-optimize)
-        open_position = OpenPosition(
+        # 注意：不在这里添加仓位到智能平仓系统！
+        # 需要等到仓位确认成功后再添加（在 OPENING_WAIT 状态中）
+        # 预创建 OpenPosition 对象，等待确认后添加
+        self._pending_open_position = OpenPosition(
             position_id=str(uuid.uuid4()),
             open_time=datetime.now().timestamp(),
             ext_price=result.extended_price or spread_info.ext_ask,
@@ -428,20 +442,26 @@ class SpreadArbBot:
             lig_order_id=result.lighter_order_id,
             is_active=True,
         )
-        self.close_strategy.add_position(open_position)
 
+        # 输出订单状态信息
         if result.success:
             logger.info(
                 f"订单发送成功: Ext={result.extended_price} Lig={result.lighter_price} "
                 f"价差={spread_info.spread_pct:.2%}"
             )
-        else:
+        elif result.extended_order_id or result.lighter_order_id:
+            # 有订单ID但订单状态不是成功
             logger.warning(
                 f"订单发送超时/部分成功: Ext_filled={result.extended_filled} "
                 f"Lig_filled={result.lighter_filled}，等待仓位确认..."
             )
+        else:
+            # 完全失败（没有订单ID）
+            logger.error(
+                f"订单发送失败: {result.error_message}，仍需检查仓位以防部分成交"
+            )
 
-        # 进入 OPENING_WAIT 状态验证仓位（首次开仓和加仓都需要验证）
+        # 进入 OPENING_WAIT 状态验证仓位（不管订单状态如何）
         import time
         self._opening_wait_start_time = time.time()
         self._last_open_success_time = time.time()
@@ -529,7 +549,7 @@ class SpreadArbBot:
                 open_formula = f">={next_open_threshold:.2%}"
             else:
                 next_open_threshold = cached_spread + spread_step
-                open_formula = f">=(上次开仓{cached_spread:.2%}+步长{spread_step:.2%}={next_open_threshold:.2%})"
+                open_formula = f">=(上次开仓{cached_spread:.2%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
 
             # 计算平仓价差（从 portfolio 获取加权平均开仓价差）
             portfolio = self.state_manager.get_portfolio()
@@ -667,17 +687,34 @@ class SpreadArbBot:
                 logger.info(f"仓位确认成功 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
                 self.state_manager.set_state(BotState.HOLDING, f"仓位确认成功 Ext={ext_position} Lig={lig_position}")
                 self._opening_wait_start_time = None
+
+                # 仓位确认成功后，添加到智能平仓系统
+                if hasattr(self, '_pending_open_position') and self._pending_open_position:
+                    self.close_strategy.add_position(self._pending_open_position)
+                    self._pending_open_position = None
+
                 await self.state_manager.save_state()
             elif elapsed >= 2.0 and not positions_match:
-                # 等待2秒后，如果仓位仍不一致，强平
+                # 等待2秒后，如果仓位仍不一致，只平掉本次开仓的数量（不平全仓）
                 logger.warning(f"仓位验证失败 (elapsed={elapsed:.1f}s >= 2.0s): Ext={ext_position} Lig={lig_position} diff={ext_lig_diff}")
-                logger.warning(f"仓位不一致，强平")
-                await self._force_close_positions()
+
+                # 判断哪边多了仓位，只平掉多出来的部分（本次开仓数量）
+                portfolio = self.state_manager.get_portfolio()
+                current_qty = portfolio.total_quantity if portfolio else Decimal("0")
+
+                # 只平掉两边比之前持仓多的部分
+                await self._rollback_partial_positions(current_qty, ext_position, lig_position)
+
                 # 强平后进入冷却期
                 self._last_open_fail_time = time.time()
-                logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-                self.state_manager.set_state(BotState.IDLE, f"仓位不一致 Ext={ext_position} Lig={lig_position}，已强平")
+                logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
+                self.state_manager.set_state(BotState.IDLE, f"仓位不一致，已回滚本次开仓")
                 self._opening_wait_start_time = None
+
+                # 清除待确认的仓位
+                if hasattr(self, '_pending_open_position'):
+                    self._pending_open_position = None
+
                 await self.state_manager.save_state()
             else:
                 # 继续等待
@@ -856,6 +893,100 @@ class SpreadArbBot:
                     await asyncio.sleep(retry_delay)
 
         logger.error("强制平仓重试用尽，可能存在残余仓位")
+
+    async def _rollback_partial_positions(self, before_qty: Decimal, ext_current: Decimal, lig_current: Decimal) -> None:
+        """
+        只回滚多出来的仓位，使两边相等（不平全仓）
+
+        策略：取两边较小的仓位作为基准，回滚多出来的部分
+
+        Args:
+            before_qty: 开仓前的持仓量（记录值，仅供参考）
+            ext_current: Extended当前仓位
+            lig_current: Lighter当前仓位
+        """
+        tolerance = Decimal("0.001")
+
+        # 策略：取两边较小的仓位作为基准
+        base_qty = min(ext_current, lig_current)
+
+        # 计算两边比基准多出的部分
+        ext_extra = max(Decimal("0"), ext_current - base_qty)
+        lig_extra = max(Decimal("0"), lig_current - base_qty)
+
+        print(f"🔧 回滚计算:")
+        print(f"   Extended当前: {ext_current}")
+        print(f"   Lighter当前: {lig_current}")
+        print(f"   基准仓位(取较小): {base_qty}")
+        print(f"   Extended需平: {ext_extra}")
+        print(f"   Lighter需平: {lig_extra}")
+
+        # 检查是否需要回滚
+        if ext_extra < tolerance and lig_extra < tolerance:
+            logger.info("两边仓位已相等，无需回滚")
+            return
+
+        logger.info(f"回滚多出的仓位: Ext平{ext_extra}, Lig平{lig_extra}")
+
+        max_retries = 3
+        retry_delay = 1.0
+
+        for attempt in range(max_retries):
+            try:
+                # 并发回滚两边多出来的仓位
+                close_tasks = []
+
+                if ext_extra >= tolerance:
+                    side = "sell"  # 多头平仓 = 卖出
+                    close_tasks.append(("extended", ext_extra, side))
+                    logger.info(f"回滚 Extended {ext_extra}")
+
+                if lig_extra >= tolerance:
+                    side = "buy"  # 空头平仓 = 买入
+                    close_tasks.append(("lighter", lig_extra, side))
+                    logger.info(f"回滚 Lighter {lig_extra}")
+
+                if not close_tasks:
+                    logger.info("回滚完成")
+                    return
+
+                # 并发执行回滚
+                rollback_results = await asyncio.gather(
+                    *[self.trade_executor.rollback_position(exchange, qty, side)
+                      for exchange, qty, side in close_tasks],
+                    return_exceptions=True
+                )
+
+                for i, result in enumerate(rollback_results):
+                    exchange = close_tasks[i][0]
+                    if isinstance(result, Exception):
+                        logger.error(f"{exchange.capitalize()}回滚异常: {result}")
+                    elif not result:
+                        logger.error(f"{exchange.capitalize()}回滚失败")
+
+                # 等待订单生效
+                await asyncio.sleep(1.0)
+
+                # 验证回滚结果：两边是否相等
+                final_ext = await self.extended_client.get_account_positions()
+                final_lig = await self.lighter_client.get_account_positions()
+
+                final_diff = abs(final_ext - final_lig)
+
+                if final_diff < tolerance:
+                    logger.info(f"回滚成功 Ext={final_ext} Lig={final_lig}")
+                    return
+                else:
+                    logger.warning(f"回滚后仍不平衡 Ext={final_ext} Lig={final_lig} (diff={final_diff})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+
+            except Exception as e:
+                logger.error(f"回滚异常(尝试{attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+
+        logger.warning("回滚重试用尽，可能存在残余仓位")
 
     async def _handle_single_side_execution(self, result: ExecutionResult) -> None:
         """处理单边成交"""
