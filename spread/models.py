@@ -282,7 +282,7 @@ class BotConfig:
     # 等差数列开仓策略相关
     cached_open_spread: Decimal = field(default_factory=lambda: Decimal("0"))
     """
-    缓存的开仓价差（用于等差数列策略）
+    上次开仓价差（用于等差数列策略）
     - 初始值为0
     - 首次开仓时设置为当前价差
     - 后续每次开仓后更新为新的价差
@@ -291,7 +291,7 @@ class BotConfig:
 
     spread_step: Decimal = field(default_factory=lambda: Decimal("0.00005"))
     """
-    价差步进值（用于等差数列策略）
+    价差步长值（用于等差数列策略）
     - 默认0.05% = 0.0005
     - 下次开仓阈值 = cached_open_spread + spread_step
     """

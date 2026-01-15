@@ -530,7 +530,14 @@ class LighterClient(BaseExchangeClient):
         # Find position for current market
         for position in positions:
             if position.market_id == self.config.contract_id:
-                return Decimal(position.position)
+                # 返回绝对值（仓位大小），与 extended.py 保持一致
+                # 注意：如果 position.position 是 float，需要先转换为字符串以保持精度
+                pos_value = position.position
+                if isinstance(pos_value, float):
+                    # 从浮点数构造 Decimal 会丢失精度，先转字符串
+                    return abs(Decimal(str(pos_value)))
+                else:
+                    return abs(Decimal(pos_value))
 
         return Decimal(0)
 

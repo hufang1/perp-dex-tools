@@ -315,7 +315,7 @@ class ExtendedClient(BaseExchangeClient):
         Returns:
             OrderResult with execution details
         """
-        max_retries = 5
+        max_retries = 10
         retry_count = 0
 
         while retry_count < max_retries:
@@ -691,7 +691,7 @@ class ExtendedClient(BaseExchangeClient):
         positions_data = await self.perpetual_trading_client.account.get_positions(market_names=[self.config.ticker+"-USD"])
         if not positions_data or not hasattr(positions_data, 'data'):
             self.logger.log("No positions or failed to get positions", "WARNING")
-            position_amt = 0
+            position_amt = Decimal(0)
         else:
             # The API returns positions under data
             positions = positions_data.data
@@ -704,11 +704,16 @@ class ExtendedClient(BaseExchangeClient):
                         break
 
                 if position:
-                    position_amt = abs(Decimal(position.size))
+                    # 注意：如果 position.size 是 float，需要先转换为字符串以保持精度
+                    size_value = position.size
+                    if isinstance(size_value, float):
+                        position_amt = abs(Decimal(str(size_value)))
+                    else:
+                        position_amt = abs(Decimal(size_value))
                 else:
-                    position_amt = 0
+                    position_amt = Decimal(0)
             else:
-                position_amt = 0
+                position_amt = Decimal(0)
         return position_amt
     
     async def handle_account(self, message):

@@ -333,7 +333,7 @@ class SpreadArbBot:
                 threshold_info = f"阈值{next_threshold:.2%}"
             else:
                 next_threshold = cached_spread + spread_step
-                threshold_info = f"缓存{cached_spread:.2%}+步进{spread_step:.2%}={next_threshold:.2%}"
+                threshold_info = f"上次开仓{cached_spread:.2%}+步长{spread_step:.2%}={next_threshold:.2%}"
 
             status_text = "开仓" if should_open else "不开仓"
             print(f"📊 状态「空闲」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
@@ -413,7 +413,7 @@ class SpreadArbBot:
 
         self.state_manager.update_position(position)
 
-        # 更新缓存价差 (016-spread-optimize)
+        # 更新上次开仓价差 (016-spread-optimize)
         self.open_strategy.update_cached_spread(spread_info.spread_pct)
 
         # 添加仓位到智能平仓系统 (016-spread-optimize)
@@ -441,9 +441,9 @@ class SpreadArbBot:
                 f"Lig_filled={result.lighter_filled}，等待仓位确认..."
             )
 
+        # 进入 OPENING_WAIT 状态验证仓位（首次开仓和加仓都需要验证）
         import time
         self._opening_wait_start_time = time.time()
-        # 记录开仓成功时间，触发成功冷却期
         self._last_open_success_time = time.time()
         logger.info(f"等待仓位确认 (超时{self.config.open_wait_timeout}s)")
         self.state_manager.set_state(BotState.OPENING_WAIT, f"订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
@@ -501,22 +501,11 @@ class SpreadArbBot:
 
                 if has_existing_position:
                     # 已有持仓，这是继续开仓（加仓）
-                    # 加仓后直接进入 HOLDING 状态，不需要 OPENING_WAIT 验证
-                    logger.info(f"继续开仓（加仓）：当前{portfolio.total_quantity} + {self.config.target_quantity}")
-
-                    # 执行开仓
-                    result = await self.trade_executor.execute_open_position(
-                        self.config.target_quantity,
-                        spread_info
-                    )
-
-                    if result.success or (result.extended_order_id and result.lighter_order_id):
-                        # 开仓成功，更新 Portfolio 并保持在 HOLDING 状态
-                        # 注意：Portfolio 更新在仓位确认时进行，这里只更新状态
-                        logger.info(f"加仓订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
-                        # 不切换状态，保持在 HOLDING
-                    else:
-                        logger.error(f"加仓失败: {result.error_message}")
+                    # 切换到 OPENING 状态（输出状态转换日志）
+                    self.state_manager.set_state(BotState.OPENING, f"继续开仓（加仓）: {reason}")
+                    self._last_open_time = current_time  # 记录开仓时间
+                    await self.state_manager.save_state()
+                    # 加仓逻辑会在 OPENING 状态中处理
                 else:
                     # 首次开仓，正常走 OPENING 流程
                     self.state_manager.set_state(BotState.OPENING, f"首次开仓: {reason}")
@@ -525,7 +514,7 @@ class SpreadArbBot:
 
                 return  # 直接返回，不再执行后续逻辑
 
-        # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差 下次阈值 开仓/不开仓）
+        # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差，下一次开仓价差，平仓需要价差，结果）
         # 限制频率：每5秒输出一次
         import time
         current_time = time.time()
@@ -534,23 +523,43 @@ class SpreadArbBot:
             cached_spread = self.config.cached_open_spread
             spread_step = self.config.spread_step
 
+            # 计算下一次开仓价差
             if cached_spread == 0:
-                next_threshold = self.config.min_spread_threshold
-                threshold_info = f"阈值{next_threshold:.2%}"
+                next_open_threshold = self.config.min_spread_threshold
+                open_formula = f">={next_open_threshold:.2%}"
             else:
-                next_threshold = cached_spread + spread_step
-                threshold_info = f"缓存{cached_spread:.2%}+步进{spread_step:.2%}={next_threshold:.2%}"
+                next_open_threshold = cached_spread + spread_step
+                open_formula = f">=(上次开仓{cached_spread:.2%}+步长{spread_step:.2%}={next_open_threshold:.2%})"
 
-            status_text = "开仓" if should_open else "不开仓"
-            print(f"📊 状态「持仓中」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
+            # 计算平仓价差（从 portfolio 获取加权平均开仓价差）
+            portfolio = self.state_manager.get_portfolio()
+            entry_spread = portfolio.get_total_entry_spread() if portfolio else Decimal("0")
+            if entry_spread > 0:
+                close_threshold = entry_spread - self.config.min_profit - self.config.total_fee_rate
+                close_formula = f"<=(开仓{entry_spread:.2%}-利润{self.config.min_profit:.2%}-手续费{self.config.total_fee_rate:.2%}={close_threshold:.2%})"
+            else:
+                close_formula = ""
+
+            # 判断结果
+            should_close = self.close_strategy.should_close(spread_info).is_triggered
+            if should_close:
+                result = "平仓"
+            elif should_open:
+                result = "开仓"
+            else:
+                result = "不开仓不平仓"
+
+            # 组合日志，用括号组织逻辑
+            if close_formula:
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.2%}（下一次开仓需价差{open_formula}，平仓需价差{close_formula}），结果：{result}")
+            else:
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.2%}（下一次开仓需价差{open_formula}），结果：{result}")
             self._last_holding_log_time = current_time
 
         # 使用智能平仓策略判断 (016-spread-optimize)
         trigger = self.close_strategy.should_close(spread_info)
 
         if trigger.is_triggered:
-            logger.info(trigger.format_log())
-
             # 切换到平仓状态
             self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {trigger.reason}")
             await self.state_manager.save_state()
@@ -639,31 +648,40 @@ class SpreadArbBot:
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
 
-            logger.debug(f"仓位检查 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
+            # 注意：Extended 返回绝对值（正数），Lighter 返回原始值（空头为负数）
+            # 详细日志：显示类型和精确值
+            logger.info(f"仓位检查 Ext={ext_position} (type:{type(ext_position).__name__}, repr:{repr(ext_position)}) "
+                       f"Lig={lig_position} (type:{type(lig_position).__name__}, repr:{repr(lig_position)}) ({elapsed:.1f}s)")
 
             tolerance = Decimal("0.001")
-            expected_qty = self.config.target_quantity
 
-            # 使用绝对值检查（Lighter 是空头，返回负数）
-            ext_has_position = abs(ext_position - expected_qty) < tolerance
-            lig_has_position = abs(abs(lig_position) - expected_qty) < tolerance
+            # 正确的逻辑：比较 Extended 和 Lighter 的仓位是否相等
+            # 只要两边的仓位一致（ext ≈ lig），就说明套利成功
+            ext_lig_diff = abs(ext_position - lig_position)
+            positions_match = ext_lig_diff < tolerance
 
-            if ext_has_position and lig_has_position:
-                logger.info(f"仓位确认 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
+
+            logger.info(f"仓位验证: Ext={ext_position} Lig={lig_position} diff={ext_lig_diff} {('✓' if positions_match else '✗')}")
+
+            if positions_match:
+                logger.info(f"仓位确认成功 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
                 self.state_manager.set_state(BotState.HOLDING, f"仓位确认成功 Ext={ext_position} Lig={lig_position}")
                 self._opening_wait_start_time = None
                 await self.state_manager.save_state()
-            elif elapsed >= 2.0:
-                # 检查仓位是否不一致（任何一边没有预期仓位）
-                if not ext_has_position or not lig_has_position:
-                    logger.warning(f"仓位不一致 Ext={ext_position} Lig={lig_position}，强平")
-                    await self._force_close_positions()
-                    # 强平后进入冷却期
-                    self._last_open_fail_time = time.time()
-                    logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-                    self.state_manager.set_state(BotState.IDLE, f"仓位不一致 Ext={ext_position} Lig={lig_position}，已强平")
-                    self._opening_wait_start_time = None
-                    await self.state_manager.save_state()
+            elif elapsed >= 2.0 and not positions_match:
+                # 等待2秒后，如果仓位仍不一致，强平
+                logger.warning(f"仓位验证失败 (elapsed={elapsed:.1f}s >= 2.0s): Ext={ext_position} Lig={lig_position} diff={ext_lig_diff}")
+                logger.warning(f"仓位不一致，强平")
+                await self._force_close_positions()
+                # 强平后进入冷却期
+                self._last_open_fail_time = time.time()
+                logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
+                self.state_manager.set_state(BotState.IDLE, f"仓位不一致 Ext={ext_position} Lig={lig_position}，已强平")
+                self._opening_wait_start_time = None
+                await self.state_manager.save_state()
+            else:
+                # 继续等待
+                logger.debug(f"继续等待仓位确认 (elapsed={elapsed:.1f}s < 2.0s)")
 
         except Exception as e:
             error_msg = str(e)
@@ -794,8 +812,11 @@ class SpreadArbBot:
                     close_tasks.append(("extended", abs(ext_position), side))
 
                 if lig_has_pos:
-                    side = "sell" if lig_position > 0 else "buy"
-                    close_tasks.append(("lighter", abs(lig_position), side))
+                    # 注意：Lighter 在套利策略中是空头（卖出开仓）
+                    # get_account_positions() 返回绝对值，但实际仓位是负数
+                    # 所以强平时应该买入平仓
+                    side = "buy"  # 空头强平 = 买入
+                    close_tasks.append(("lighter", lig_position, side))  # lig_position 已经是绝对值
 
                 # 并发执行强平（两边互不影响，避免一边API失败导致另一边无法强平）
                 rollback_results = await asyncio.gather(
@@ -859,8 +880,11 @@ class SpreadArbBot:
                     rollback_tasks.append(("extended", abs(ext_position), side))
 
                 if lig_position != 0:
-                    side = "sell" if lig_position > 0 else "buy"
-                    rollback_tasks.append(("lighter", abs(lig_position), side))
+                    # 注意：Lighter 在套利策略中是空头（卖出开仓）
+                    # get_account_positions() 返回绝对值，但实际仓位是负数
+                    # 所以强平时应该买入平仓
+                    side = "buy"  # 空头强平 = 买入
+                    rollback_tasks.append(("lighter", lig_position, side))  # lig_position 已经是绝对值
 
                 # 并发执行强平
                 if rollback_tasks:
@@ -938,8 +962,11 @@ class SpreadArbBot:
                         cleanup_tasks.append(("extended", abs(ext_position), side))
 
                     if abs(lig_position) >= tolerance:
-                        side = "sell" if lig_position > 0 else "buy"
-                        cleanup_tasks.append(("lighter", abs(lig_position), side))
+                        # 注意：Lighter 在套利策略中是空头（卖出开仓）
+                        # get_account_positions() 返回绝对值，但实际仓位是负数
+                        # 所以强平时应该买入平仓
+                        side = "buy"  # 空头强平 = 买入
+                        cleanup_tasks.append(("lighter", lig_position, side))  # lig_position 已经是绝对值
 
                     # 并发执行清理
                     if cleanup_tasks:
@@ -1376,7 +1403,7 @@ def parse_arguments() -> BotConfig:
         type=Decimal,
         default=Decimal("0.00005"),
         dest="spread_step",
-        help="价差步进值 (默认: 0.00005 = 0.005%%) (016-spread-optimize)"
+        help="价差步长值 (默认: 0.00005 = 0.005%%) (016-spread-optimize)"
     )
 
     parser.add_argument(
