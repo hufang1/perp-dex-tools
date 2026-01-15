@@ -264,7 +264,7 @@ class BotConfig:
 
     # 风控参数
     slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护 0.05%
-    min_profit: Decimal = Decimal("0.0001")                 # 最小利润 0.1%
+    min_profit: Decimal = Decimal("0")                      # 最小利润 0%
     max_spread: Decimal = Decimal("0.05")                  # 极端价差阈值 5%
     single_side_timeout: float = 3.0                       # 单边超时 3 秒
 
@@ -339,18 +339,20 @@ class BotConfig:
             return False
         if self.slippage_buffer < 0:
             return False
-        if self.min_profit <= 0:
+        if self.min_profit < 0:  # 允许 0 利润
             return False
         if self.max_spread <= 0 or self.max_spread > 1:
             return False
         if self.single_side_timeout <= 0:
             return False
 
-        # 检查利润阈值必须大于滑点缓冲 + 手续费
+        # 检查利润阈值（如果设置了利润）必须大于滑点缓冲 + 手续费
         # Lighter 0% taker fee, Extended 0.025% taker fee
-        min_required_profit = self.slippage_buffer + Decimal("0.00025")
-        if self.min_profit < min_required_profit:
-            return False
+        # 如果 min_profit = 0，则跳过此检查
+        if self.min_profit > 0:
+            min_required_profit = self.slippage_buffer + Decimal("0.00025")
+            if self.min_profit < min_required_profit:
+                return False
 
         # 新增字段验证 (016-spread-optimize)
         if self.spread_step <= 0:
@@ -361,7 +363,8 @@ class BotConfig:
             return False
         if self.total_fee_rate < 0:
             return False
-        if self.min_profit <= self.total_fee_rate:
+        # 只有当设置了利润目标时，才检查利润空间
+        if self.min_profit > 0 and self.min_profit <= self.total_fee_rate:
             return False  # 确保有利润空间
 
         return True

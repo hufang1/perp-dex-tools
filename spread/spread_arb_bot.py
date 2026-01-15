@@ -1518,8 +1518,8 @@ def parse_arguments() -> BotConfig:
     parser.add_argument(
         "--min-profit",
         type=Decimal,
-        default=Decimal("0.001"),
-        help="最小利润 (默认: 0.001 = 0.1%%)"
+        default=Decimal("0"),
+        help="最小利润 (默认: 0 = 0%%)"
     )
 
     parser.add_argument(
