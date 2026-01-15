@@ -43,9 +43,9 @@ from arithmetic_open_strategy import ArithmeticOpenStrategy
 from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
 
-# 设置日志（仅输出错误）
+# 设置日志
 logging.basicConfig(
-    level=logging.ERROR,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
