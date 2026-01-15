@@ -23,6 +23,7 @@ class BotState(Enum):
     OPENING_WAIT = "OPENING_WAIT"  # 开仓后等待确认仓位
     HOLDING = "HOLDING"     # 持仓中
     CLOSING = "CLOSING"     # 平仓中
+    PAUSED = "PAUSED"       # 风控暂停模式（API异常时）
     ERROR = "ERROR"         # 错误状态
 
 

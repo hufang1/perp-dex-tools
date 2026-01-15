@@ -102,6 +102,12 @@ class SpreadArbBot:
         # 持仓日志输出间隔（秒）
         self._last_holding_log_time: float = 0
         self._holding_log_interval: float = 5.0  # 每5秒输出一次
+        # API错误计数和风控模式
+        self._api_error_count: int = 0
+        self._api_error_threshold: int = 3  # 连续3次错误进入风控模式
+        self._paused_start_time: Optional[float] = None
+        self._paused_check_interval: float = 10.0  # 每10秒检查API是否恢复
+        self._last_api_check_time: float = 0
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -246,6 +252,9 @@ class SpreadArbBot:
                 elif state == BotState.CLOSING:
                     await self._process_closing_state()
 
+                elif state == BotState.PAUSED:
+                    await self._process_paused_state()
+
                 elif state == BotState.ERROR:
                     logger.error("处于错误状态，停止交易")
                     break
@@ -342,10 +351,14 @@ class SpreadArbBot:
         if result.extended_order_id is None and result.lighter_order_id is None:
             # 完全失败，进入IDLE和冷却期
             logger.error(f"开仓完全失败: {result.error_message}")
+            # 检测是否是API错误
+            self._handle_api_error(result.error_message)
             import time
             self._last_open_fail_time = time.time()
             logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
-            self.state_manager.set_state(BotState.IDLE, f"开仓失败: {result.error_message}")
+            # 只有在未进入风控模式时才切换状态
+            if self.state_manager.get_state() != BotState.PAUSED:
+                self.state_manager.set_state(BotState.IDLE, f"开仓失败: {result.error_message}")
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
             return
@@ -541,7 +554,12 @@ class SpreadArbBot:
             # 强平后进入冷却期
             self._last_open_fail_time = time.time()
             logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-            self.state_manager.set_state(BotState.IDLE, f"等待超时({elapsed:.1f}s)，已强平")
+            # 检查是否有API错误记录，如果有则进入风控模式而不是IDLE
+            if self._api_error_count > 0:
+                print(f"🛡️ 等待超时且API异常，进入风控暂停模式")
+                self.state_manager.set_state(BotState.PAUSED, f"等待超时且API异常，已强平")
+            else:
+                self.state_manager.set_state(BotState.IDLE, f"等待超时({elapsed:.1f}s)，已强平")
             self._opening_wait_start_time = None
             await self.state_manager.save_state()
             return
@@ -576,7 +594,102 @@ class SpreadArbBot:
                     await self.state_manager.save_state()
 
         except Exception as e:
-            logger.error(f"仓位检查失败: {e}")
+            error_msg = str(e)
+            logger.error(f"仓位检查失败: {error_msg}")
+            # 检测是否是API错误
+            self._handle_api_error(error_msg)
+            # 如果进入风控模式，直接返回
+            if self.state_manager.get_state() == BotState.PAUSED:
+                return
+            # 其他异常也要暂停，避免死循环
+            print(f"🛡️ 仓位检查异常，进入风控暂停模式: {error_msg}")
+            import time
+            self._paused_start_time = time.time()
+            self._last_api_check_time = time.time()
+            self.state_manager.set_state(BotState.PAUSED, f"仓位检查异常: {error_msg}")
+            await self.state_manager.save_state()
+            return
+
+    async def _process_paused_state(self) -> None:
+        """处理 PAUSED 状态：风控暂停模式，定期检测API是否恢复"""
+        import time
+        current_time = time.time()
+
+        # 定期检测API是否恢复
+        if current_time - self._last_api_check_time >= self._paused_check_interval:
+            self._last_api_check_time = current_time
+
+            # 尝试调用API检测是否恢复
+            api_recovered = await self._check_api_recovery()
+
+            if api_recovered:
+                # API已恢复，退出风控模式
+                print(f"✅ API已恢复，退出风控模式")
+                self._api_error_count = 0
+                self._paused_start_time = None
+
+                # 检查是否有持仓，决定返回哪个状态
+                position = self.state_manager.get_position()
+                if position and position.is_open():
+                    # 有持仓，返回持仓状态
+                    self.state_manager.set_state(BotState.HOLDING, "API恢复，继续监控持仓")
+                else:
+                    # 无持仓，返回空闲状态
+                    self.state_manager.set_state(BotState.IDLE, "API恢复，等待交易机会")
+                await self.state_manager.save_state()
+            else:
+                # API未恢复
+                if self._paused_start_time:
+                    paused_duration = current_time - self._paused_start_time
+                    print(f"⚠️ API异常中，已暂停{paused_duration:.0f}秒，继续等待...")
+                else:
+                    print(f"⚠️ API异常，进入风控暂停模式，等待恢复...")
+
+    async def _check_api_recovery(self) -> bool:
+        """
+        检测API是否已恢复
+
+        Returns:
+            True表示API已恢复，False表示仍然异常
+        """
+        try:
+            # 简单检测：尝试获取订单簿数据
+            spread_info = self.spread_monitor.get_current_spread()
+            if spread_info and spread_info.is_valid():
+                return True
+            return False
+        except Exception as e:
+            logger.debug(f"API检测失败: {e}")
+            return False
+
+    def _handle_api_error(self, error_message: str) -> None:
+        """
+        处理API错误，决定是否进入风控模式
+
+        Args:
+            error_message: 错误信息
+        """
+        # 检测是否是API错误（HTTP 400, 500, 超时等）
+        api_error_keywords = ["HTTP 400", "HTTP 500", "timeout", "connection", "500", "502", "503", "504"]
+        is_api_error = any(keyword in error_message.lower() for keyword in api_error_keywords)
+
+        if is_api_error:
+            self._api_error_count += 1
+            logger.warning(f"API错误计数: {self._api_error_count}/{self._api_error_threshold} - {error_message}")
+
+            # 达到阈值，进入风控模式
+            if self._api_error_count >= self._api_error_threshold:
+                import time
+                self._paused_start_time = time.time()
+                self._last_api_check_time = time.time()
+                self._api_error_count = 0  # 重置计数
+
+                print(f"🛡️ API连续异常{self._api_error_threshold}次，进入风控暂停模式")
+                self.state_manager.set_state(BotState.PAUSED, f"API异常: {error_message}")
+                # 注意：这里不保存状态，避免重启后还是PAUSED状态
+        else:
+            # 非API错误，重置计数
+            self._api_error_count = 0
 
     async def _force_close_positions(self) -> None:
         """强制平掉所有仓位"""

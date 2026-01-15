@@ -313,21 +313,49 @@ class TradeExecutor:
 
         Returns:
             执行状态字典
+
+        Raises:
+            Exception: 订单查询连续失败时抛出异常
         """
         start_time = time.time()
         check_interval = 0.1  # 100ms 检查一次
 
         extended_filled = False
         lighter_filled = False
+        # 连续失败计数
+        extended_fail_count = 0
+        lighter_fail_count = 0
+        max_fail_count = 10  # 连续10次失败则抛出异常
 
         while time.time() - start_time < timeout:
-            # 检查订单状态
-            extended_status = await self._check_order_status(
-                "extended", extended_order_id
-            )
-            lighter_status = await self._check_order_status(
-                "lighter", lighter_order_id
-            )
+            # 检查订单状态（分别检查，一边失败不影响另一边）
+            # Extended
+            try:
+                extended_status = await self._check_order_status(
+                    "extended", extended_order_id,
+                    allow_retries=False  # 不允许重试，失败就抛出异常
+                )
+                extended_fail_count = 0  # 成功则重置计数
+            except Exception as e:
+                extended_fail_count += 1
+                logger.warning(f"Extended订单查询失败 ({extended_fail_count}/{max_fail_count}): {e}")
+                extended_status = {"filled": False}
+                if extended_fail_count >= max_fail_count:
+                    raise Exception(f"Extended订单查询连续失败{max_fail_count}次，可能API异常")
+
+            # Lighter
+            try:
+                lighter_status = await self._check_order_status(
+                    "lighter", lighter_order_id,
+                    allow_retries=False
+                )
+                lighter_fail_count = 0
+            except Exception as e:
+                lighter_fail_count += 1
+                logger.warning(f"Lighter订单查询失败 ({lighter_fail_count}/{max_fail_count}): {e}")
+                lighter_status = {"filled": False}
+                if lighter_fail_count >= max_fail_count:
+                    raise Exception(f"Lighter订单查询连续失败{max_fail_count}次，可能API异常")
 
             extended_filled = extended_status.get("filled", False)
             lighter_filled = lighter_status.get("filled", False)
@@ -621,7 +649,8 @@ class TradeExecutor:
     async def _check_order_status(
         self,
         exchange: str,
-        order_id: str
+        order_id: str,
+        allow_retries: bool = True
     ) -> Dict[str, Any]:
         """
         检查订单状态
@@ -629,10 +658,22 @@ class TradeExecutor:
         Args:
             exchange: "extended" 或 "lighter"
             order_id: 订单 ID
+            allow_retries: 是否允许重试（首次查询允许重试，连续失败则抛出异常）
 
         Returns:
             订单状态字典
+
+        Raises:
+            Exception: 订单查询连续失败时抛出异常
         """
+        # 检查订单ID是否有效
+        if order_id is None or order_id == "None":
+            error_msg = f"{exchange}订单ID无效: {order_id}"
+            if not allow_retries:
+                raise Exception(error_msg)
+            logger.warning(error_msg)
+            return {"filled": False}
+
         try:
             if exchange == "extended":
                 order_info = await self.extended_client.get_order_info(order_id)
@@ -640,6 +681,10 @@ class TradeExecutor:
                 order_info = await self.lighter_client.get_order_info(order_id)
 
             if order_info is None:
+                error_msg = f"{exchange}订单查询失败: order_id={order_id}"
+                if not allow_retries:
+                    raise Exception(error_msg)
+                logger.warning(error_msg)
                 return {"filled": False}
 
             # OrderInfo has status and filled_size attributes
@@ -656,7 +701,10 @@ class TradeExecutor:
             }
 
         except Exception as e:
-            logger.error(f"检查订单状态失败 ({exchange}): {e}")
+            error_msg = f"{exchange}订单查询异常: {e}"
+            if not allow_retries:
+                raise Exception(error_msg)
+            logger.error(error_msg)
             return {"filled": False}
 
     async def _cancel_orders(
