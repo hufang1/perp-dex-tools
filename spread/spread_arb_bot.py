@@ -99,6 +99,8 @@ class SpreadArbBot:
         # 开仓成功冷却期（防止频繁开仓）
         self._last_open_success_time: Optional[float] = None
         self._open_success_cooldown: float = 3.0  # 成功后3秒冷却
+        # 最后开仓时间（用于防止连续开仓导致 API 限流）
+        self._last_open_time: Optional[float] = None
         # 持仓日志输出间隔（秒）
         self._last_holding_log_time: float = 0
         self._holding_log_interval: float = 5.0  # 每5秒输出一次
@@ -293,6 +295,21 @@ class SpreadArbBot:
                 logger.debug(f"成功冷却中，剩余{self._open_success_cooldown - elapsed:.1f}秒")
                 return
 
+        # 检查是否有残留仓位（防止强平失败后继续开仓）
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+
+            if abs(ext_position) >= tolerance or abs(lig_position) >= tolerance:
+                logger.error(f"发现残留仓位 Ext={ext_position} Lig={lig_position}，强制清理中...")
+                await self._force_close_positions()
+                # 清理后返回，等待下一个循环
+                return
+        except Exception as e:
+            logger.warning(f"检查残留仓位失败: {e}")
+            # 如果检查失败，不阻止开仓（避免卡死）
+
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
         spread_info = self.spread_monitor.get_current_spread()
 
@@ -302,9 +319,27 @@ class SpreadArbBot:
         # 使用等差数列开仓策略判断 (016-spread-optimize)
         should_open, reason = self.open_strategy.should_open(spread_info)
 
-        if should_open:
-            logger.info(reason)
+        # 输出空闲状态监控日志（每5秒一次）
+        if not hasattr(self, '_last_idle_log_time'):
+            self._last_idle_log_time = 0
+        current_time = time.time()
+        if current_time - self._last_idle_log_time >= 5.0:
+            current_spread = spread_info.spread_pct
+            cached_spread = self.config.cached_open_spread
+            spread_step = self.config.spread_step
 
+            if cached_spread == 0:
+                next_threshold = self.config.min_spread_threshold
+                threshold_info = f"阈值{next_threshold:.2%}"
+            else:
+                next_threshold = cached_spread + spread_step
+                threshold_info = f"缓存{cached_spread:.2%}+步进{spread_step:.2%}={next_threshold:.2%}"
+
+            status_text = "开仓" if should_open else "不开仓"
+            print(f"📊 状态「空闲」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
+            self._last_idle_log_time = current_time
+
+        if should_open:
             # 风控验证
             validation = await self.risk_manager.validate_open_position(
                 self.order_book_manager,
@@ -319,18 +354,14 @@ class SpreadArbBot:
             # 切换到开仓状态
             self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.2%} > 阈值{self.config.min_spread_threshold:.2%}")
             await self.state_manager.save_state()
-        else:
-            # 输出不能开仓的原因，但限制频率（每5秒一次）
-            if not hasattr(self, '_last_open_check_log_time'):
-                self._last_open_check_log_time = 0
-            current_time = time.time()
-            if current_time - self._last_open_check_log_time >= 5.0:
-                logger.info(reason)
-                self._last_open_check_log_time = current_time
 
     async def _process_opening_state(self) -> None:
         """处理 OPENING 状态：执行开仓"""
         logger.info("执行开仓...")
+
+        # 记录开仓时间（用于防止连续开仓导致 API 限流）
+        import time
+        self._last_open_time = time.time()
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
         spread_info = self.spread_monitor.get_current_spread()
@@ -449,9 +480,49 @@ class SpreadArbBot:
             if not validation.is_valid:
                 print(f"⚠️ 继续开仓风控失败: {validation.reason}")
             else:
-                # 风控通过，切换到开仓状态
-                self.state_manager.set_state(BotState.OPENING, f"继续开仓: {reason}")
-                await self.state_manager.save_state()
+                # 风控通过，等待一段时间确保前一次开仓的订单查询已完成
+                # 防止 Extended API 限流（两次开仓太近会导致订单查询冲突）
+                import time
+                current_time = time.time()
+
+                # 检查距离上次开仓的时间
+                if hasattr(self, '_last_open_time'):
+                    elapsed_since_last_open = current_time - self._last_open_time
+                    min_interval = 5.0  # 最小间隔 5 秒
+
+                    if elapsed_since_last_open < min_interval:
+                        wait_time = min_interval - elapsed_since_last_open
+                        logger.info(f"等待 {wait_time:.1f} 秒后继续开仓（避免 API 限流）")
+                        await asyncio.sleep(wait_time)
+
+                # 检查是否已有持仓（继续开仓 vs 首次开仓）
+                portfolio = self.state_manager.get_portfolio()
+                has_existing_position = portfolio and portfolio.total_quantity > 0
+
+                if has_existing_position:
+                    # 已有持仓，这是继续开仓（加仓）
+                    # 加仓后直接进入 HOLDING 状态，不需要 OPENING_WAIT 验证
+                    logger.info(f"继续开仓（加仓）：当前{portfolio.total_quantity} + {self.config.target_quantity}")
+
+                    # 执行开仓
+                    result = await self.trade_executor.execute_open_position(
+                        self.config.target_quantity,
+                        spread_info
+                    )
+
+                    if result.success or (result.extended_order_id and result.lighter_order_id):
+                        # 开仓成功，更新 Portfolio 并保持在 HOLDING 状态
+                        # 注意：Portfolio 更新在仓位确认时进行，这里只更新状态
+                        logger.info(f"加仓订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
+                        # 不切换状态，保持在 HOLDING
+                    else:
+                        logger.error(f"加仓失败: {result.error_message}")
+                else:
+                    # 首次开仓，正常走 OPENING 流程
+                    self.state_manager.set_state(BotState.OPENING, f"首次开仓: {reason}")
+                    self._last_open_time = current_time  # 记录开仓时间
+                    await self.state_manager.save_state()
+
                 return  # 直接返回，不再执行后续逻辑
 
         # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差 下次阈值 开仓/不开仓）
@@ -573,8 +644,9 @@ class SpreadArbBot:
             tolerance = Decimal("0.001")
             expected_qty = self.config.target_quantity
 
+            # 使用绝对值检查（Lighter 是空头，返回负数）
             ext_has_position = abs(ext_position - expected_qty) < tolerance
-            lig_has_position = abs(lig_position - expected_qty) < tolerance
+            lig_has_position = abs(abs(lig_position) - expected_qty) < tolerance
 
             if ext_has_position and lig_has_position:
                 logger.info(f"仓位确认 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
@@ -725,10 +797,18 @@ class SpreadArbBot:
                     side = "sell" if lig_position > 0 else "buy"
                     close_tasks.append(("lighter", abs(lig_position), side))
 
-                # 执行强平
-                for exchange, qty, side in close_tasks:
-                    success = await self.trade_executor.rollback_position(exchange, qty, side)
-                    if not success:
+                # 并发执行强平（两边互不影响，避免一边API失败导致另一边无法强平）
+                rollback_results = await asyncio.gather(
+                    *[self.trade_executor.rollback_position(exchange, qty, side)
+                      for exchange, qty, side in close_tasks],
+                    return_exceptions=True
+                )
+
+                for i, result in enumerate(rollback_results):
+                    exchange = close_tasks[i][0]
+                    if isinstance(result, Exception):
+                        logger.error(f"{exchange.capitalize()}强平异常: {result}")
+                    elif not result:
                         logger.error(f"{exchange.capitalize()}强平失败")
 
                 # 等待订单生效
@@ -772,28 +852,30 @@ class SpreadArbBot:
 
                 logger.warning(f"当前仓位 Ext={ext_position} Lig={lig_position}")
 
-                # 强平有仓位的一边
+                # 并发强平有仓位的一边（两边互不影响，避免一边API失败导致另一边无法强平）
+                rollback_tasks = []
                 if ext_position != 0:
                     side = "sell" if ext_position > 0 else "buy"
-                    success = await self.trade_executor.rollback_position(
-                        "extended", abs(ext_position), side
-                    )
-                    if not success:
-                        logger.error(f"Extended强平失败(尝试{attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            continue
+                    rollback_tasks.append(("extended", abs(ext_position), side))
 
                 if lig_position != 0:
                     side = "sell" if lig_position > 0 else "buy"
-                    success = await self.trade_executor.rollback_position(
-                        "lighter", abs(lig_position), side
+                    rollback_tasks.append(("lighter", abs(lig_position), side))
+
+                # 并发执行强平
+                if rollback_tasks:
+                    rollback_results = await asyncio.gather(
+                        *[self.trade_executor.rollback_position(exchange, qty, side)
+                          for exchange, qty, side in rollback_tasks],
+                        return_exceptions=True
                     )
-                    if not success:
-                        logger.error(f"Lighter强平失败(尝试{attempt+1}/{max_retries})")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            continue
+
+                    for i, result in enumerate(rollback_results):
+                        exchange = rollback_tasks[i][0]
+                        if isinstance(result, Exception):
+                            logger.error(f"{exchange.capitalize()}强平异常(尝试{attempt+1}/{max_retries}): {result}")
+                        elif not result:
+                            logger.error(f"{exchange.capitalize()}强平失败(尝试{attempt+1}/{max_retries})")
 
                 # 验证最终仓位
                 await asyncio.sleep(0.5)  # 等待订单生效
@@ -849,13 +931,23 @@ class SpreadArbBot:
             max_retries = 3
             for attempt in range(max_retries):
                 try:
+                    # 并发清理残留仓位（两边互不影响，避免一边API失败导致另一边无法清理）
+                    cleanup_tasks = []
                     if abs(ext_position) >= tolerance:
                         side = "sell" if ext_position > 0 else "buy"
-                        await self.trade_executor.rollback_position("extended", abs(ext_position), side)
+                        cleanup_tasks.append(("extended", abs(ext_position), side))
 
                     if abs(lig_position) >= tolerance:
                         side = "sell" if lig_position > 0 else "buy"
-                        await self.trade_executor.rollback_position("lighter", abs(lig_position), side)
+                        cleanup_tasks.append(("lighter", abs(lig_position), side))
+
+                    # 并发执行清理
+                    if cleanup_tasks:
+                        await asyncio.gather(
+                            *[self.trade_executor.rollback_position(exchange, qty, side)
+                              for exchange, qty, side in cleanup_tasks],
+                            return_exceptions=True
+                        )
 
                     await asyncio.sleep(0.5)
                     final_ext = await self.extended_client.get_account_positions()

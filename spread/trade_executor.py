@@ -424,20 +424,39 @@ class TradeExecutor:
 
             # 等待强平订单成交（最多3秒）
             if order_id:
-                execution_status = await self.wait_for_execution(
-                    order_id if exchange == "extended" else None,
-                    order_id if exchange == "lighter" else None,
-                    timeout=3.0
-                )
+                try:
+                    execution_status = await self.wait_for_execution(
+                        order_id if exchange == "extended" else None,
+                        order_id if exchange == "lighter" else None,
+                        timeout=3.0
+                    )
 
-                if execution_status["both_filled"] or execution_status[f"{exchange}_filled"]:
-                    # logger.info(f"强平成交: {order_id}")
-                    return True
-                else:
-                    logger.error(f"强平未成交/超时: {order_id}")
-                    return False
+                    if execution_status["both_filled"] or execution_status[f"{exchange}_filled"]:
+                        # logger.info(f"强平成交: {order_id}")
+                        return True
+                    else:
+                        # 订单超时，但可能已经成交（API查询有延迟）
+                        # 等待1秒后通过实际仓位判断
+                        await asyncio.sleep(1.0)
+                except Exception as e:
+                    # wait_for_execution 抛出异常（通常是API异常）
+                    # 订单可能已经成交，等待2秒后通过实际仓位判断
+                    logger.warning(f"强平订单状态查询异常: {e}，等待2秒后检查实际仓位")
+                    await asyncio.sleep(2.0)
 
-            return False
+            # 通过实际仓位判断是否强平成功
+            client = self.extended_client if exchange == "extended" else self.lighter_client
+            actual_position = await client.get_account_positions()
+            tolerance = Decimal("0.001")
+
+            # 强平成功：仓位接近0或已反向（如果原有多头，强平后应为空头或0）
+            if abs(actual_position) < tolerance:
+                logger.info(f"{exchange}强平成功（仓位确认）: {actual_position}")
+                return True
+            else:
+                # 仍有仓位，强平失败
+                logger.error(f"{exchange}强平失败（仍有仓位）: {actual_position}")
+                return False
 
         except Exception as e:
             logger.error(f"强平异常: {e}")
