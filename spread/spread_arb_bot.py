@@ -517,7 +517,7 @@ class SpreadArbBot:
                 current_time = time.time()
 
                 # 检查距离上次开仓的时间
-                if hasattr(self, '_last_open_time'):
+                if hasattr(self, '_last_open_time') and self._last_open_time is not None:
                     elapsed_since_last_open = current_time - self._last_open_time
                     min_interval = 5.0  # 最小间隔 5 秒
 
