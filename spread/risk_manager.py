@@ -102,7 +102,7 @@ class RiskManager:
             if not self.is_spread_reasonable(spread.spread_pct):
                 return ValidationResult(
                     False,
-                    f"极端价差: {spread.spread_pct:.2%} > {self.config.max_spread:.2%}"
+                    f"极端价差: {spread.spread_pct:.3%} > {self.config.max_spread:.3%}"
                 )
 
             logger.info("开仓风控验证通过")

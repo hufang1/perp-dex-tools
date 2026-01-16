@@ -331,6 +331,95 @@ python hedge_mode.py --exchange edgex --ticker BTC --size 0.001 --iter 20
 - `--sleep`: 每一笔交易之后的暂停时间，增加持仓时间（秒，默认 0）
 - `--max-position`: 当设置了这个参数后，对冲模式会在对冲的同时逐渐建仓到设置的最大仓位，单位是币本位，比如在跑btc时设置0.1，就是指逐渐建仓到0.1btc，并逐渐建仓。达到这个最大仓位后，会逐渐建仓，以此循环。
 
+---
+
+## 🔧 Spread套利脚本价格同步修复 (Feature 001-fix-spread-price)
+
+### 问题描述
+
+在spread套利脚本中发现以下问题：
+1. **价格获取不同步**：两个交易所独立获取BBO价格，时间差无法控制
+2. **Extended缺乏滑点保护**：使用0%滑点导致IOC订单频繁被取消并重试
+3. **重试期间价格变化**：Extended重试时重新获取价格，导致最终成交价不一致
+4. **Ext开仓成本高于Lig**：违背套利逻辑（应该Ext买入 < Lig卖出）
+
+### 解决方案
+
+**核心改进**：
+1. **统一价格获取**：在`execute_open_position`层面并发获取两个交易所BBO价格
+2. **时间戳验证**：计算并验证`time_delta < 10ms`，确保价格同步
+3. **Ext滑点保护**：加入0.2%滑点（与Lighter保持一致）
+   - 买入价 = ask * 1.002
+   - 卖出价 = bid * 0.998
+4. **限制重试**：Extended最多重试1次，使用原始价格
+5. **价格一致性验证**：跳过ext_price >= lig_price的套利机会
+
+### 新增组件
+
+**PriceSnapshot类** (`spread/price_snapshot.py`):
+```python
+@dataclass
+class PriceSnapshot:
+    ext_bid: Decimal
+    ext_ask: Decimal
+    ext_timestamp: float
+    lig_bid: Decimal
+    lig_ask: Decimal
+    lig_timestamp: float
+    time_delta: float
+
+    def is_valid(self) -> bool:
+        # 验证 time_delta < 10ms, 价格 > 0, bid < ask
+
+    def calculate_taker_prices(self) -> Tuple[Decimal, Decimal]:
+        # ext_price = ext_ask * 1.002
+        # lig_price = lig_bid * 0.998
+
+    def validate_price_consistency(self) -> bool:
+        # 验证 ext_price < lig_price
+```
+
+### 日志输出
+
+**价格同步日志**：
+```
+[价格同步] ext_bid=3000.00, ext_ask=3000.50, lig_bid=2999.50, lig_ask=3000.00, time_delta=5.2ms, ext_price=3006.50, lig_price=2993.01, spread=0.45%
+```
+
+**开仓成功日志**：
+```
+[开仓成功] ext_order_id=ext_123, lig_order_id=lig_456, ext_price=3006.50, lig_price=2993.01, 耗时=0.327s
+```
+
+### 监控指标
+
+| 指标 | 目标值 | 测量方法 |
+|------|--------|----------|
+| 价格获取时间差 | <10ms | time_delta字段 |
+| Ext IOC失败率 | <5% | 日志统计 |
+| Ext成本>Lig成本 | 0次 | 仓位分析 |
+| 开仓成功率 | >95% | 功能测试 |
+
+### 向后兼容性
+
+- **已弃用**：`exchanges/lighter.py`中的`place_open_order()`和`get_order_price()`方法
+- **迁移指南**：
+  - 旧代码：`await client.place_open_order(contract_id, qty, direction)`
+  - 新代码：`await client.place_limit_order(contract_id, qty, ask*1.002 or bid*0.998, direction, time_in_force=0)`
+
+### 技术文档
+
+详细设计文档位于 `specs/001-fix-spread-price/`:
+- `spec.md` - 功能规格说明
+- `plan.md` - 实施计划
+- `tasks.md` - 任务列表（35个任务，已完成）
+- `research.md` - 技术决策文档
+- `data-model.md` - 数据模型定义
+- `quickstart.md` - 快速开始指南
+- `contracts/api.md` - API契约定义
+
+---
+
 ## 配置
 
 ### 环境变量

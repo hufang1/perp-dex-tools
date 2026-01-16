@@ -101,7 +101,7 @@ class SmartCloseStrategy:
         # 检查价差是否扩大（警告）
         if current_spread > entry_spread:
             logger.warning(
-                f"价差扩大: 当前{current_spread:.2%} > 开仓{entry_spread:.2%}"
+                f"价差扩大: 当前{current_spread:.3%} > 开仓{entry_spread:.3%}"
             )
 
         return CloseTrigger(

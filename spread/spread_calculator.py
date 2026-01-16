@@ -56,10 +56,10 @@ class SpreadCalculator:
         self.max_spread = max_spread
 
         logger.info(
-            f"价差计算器初始化: 开仓阈值={open_threshold:.2%}, "
-            f"滑点保护={slippage_buffer:.2%}, "
-            f"最小利润={min_profit:.2%}, "
-            f"最大价差={max_spread:.2%}"
+            f"价差计算器初始化: 开仓阈值={open_threshold:.3%}, "
+            f"滑点保护={slippage_buffer:.3%}, "
+            f"最小利润={min_profit:.3%}, "
+            f"最大价差={max_spread:.3%}"
         )
 
     async def calculate_open_spread(
@@ -112,7 +112,7 @@ class SpreadCalculator:
             # 检查是否为极端价差
             if not self.is_spread_reasonable(spread):
                 logger.warning(
-                    f"检测到极端价差: {spread:.2%}，跳过此次机会"
+                    f"检测到极端价差: {spread:.3%}，跳过此次机会"
                 )
                 return None
 
@@ -125,7 +125,7 @@ class SpreadCalculator:
             )
 
             logger.info(
-                f"开仓价差: {spread:.2%} "
+                f"开仓价差: {spread:.3%} "
                 f"(Lighter Bid: {lighter_bid_vwap}, "
                 f"Extended Ask: {extended_ask_vwap})"
             )
@@ -190,7 +190,7 @@ class SpreadCalculator:
             )
 
             logger.debug(
-                f"平仓价差: {spread:.2%} "
+                f"平仓价差: {spread:.3%} "
                 f"(Lighter Ask: {lighter_ask_vwap}, "
                 f"Extended Bid: {extended_bid_vwap})"
             )
@@ -221,13 +221,13 @@ class SpreadCalculator:
 
         if should:
             logger.info(
-                f"价差 {spread:.2%} 满足开仓条件 "
-                f"(阈值: {self.open_threshold:.2%} + 滑点: {self.slippage_buffer:.2%})"
+                f"价差 {spread:.3%} 满足开仓条件 "
+                f"(阈值: {self.open_threshold:.3%} + 滑点: {self.slippage_buffer:.3%})"
             )
         else:
             logger.debug(
-                f"价差 {spread:.2%} 不满足开仓条件 "
-                f"(需要: {required_spread:.2%})"
+                f"价差 {spread:.3%} 不满足开仓条件 "
+                f"(需要: {required_spread:.3%})"
             )
 
         return should
@@ -260,14 +260,14 @@ class SpreadCalculator:
 
         if should:
             logger.info(
-                f"价差收敛 {spread_convergence:.2%} "
-                f"(开仓: {open_spread:.2%} -> 平仓: {close_spread:.2%}) "
-                f"满足平仓条件 (最小利润: {self.min_profit:.2%})"
+                f"价差收敛 {spread_convergence:.3%} "
+                f"(开仓: {open_spread:.3%} -> 平仓: {close_spread:.3%}) "
+                f"满足平仓条件 (最小利润: {self.min_profit:.3%})"
             )
         else:
             logger.debug(
-                f"价差收敛 {spread_convergence:.2%} 不满足平仓条件 "
-                f"(需要: {self.min_profit:.2%})"
+                f"价差收敛 {spread_convergence:.3%} 不满足平仓条件 "
+                f"(需要: {self.min_profit:.3%})"
             )
 
         return should
@@ -286,7 +286,7 @@ class SpreadCalculator:
 
         if not reasonable:
             logger.warning(
-                f"极端价差检测: {spread:.2%} > {self.max_spread:.2%}"
+                f"极端价差检测: {spread:.3%} > {self.max_spread:.3%}"
             )
 
         return reasonable

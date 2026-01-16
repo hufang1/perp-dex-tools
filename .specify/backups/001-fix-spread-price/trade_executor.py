@@ -21,7 +21,6 @@ from exceptions import (
     SingleSideExecutionError,
     RiskValidationFailedError,
 )
-from price_snapshot import PriceSnapshot
 
 
 logger = logging.getLogger(__name__)
@@ -89,98 +88,35 @@ class TradeExecutor:
         spread
     ) -> ExecutionResult:
         """
-        执行开仓（001-fix-spread-price优化：统一价格获取+滑点保护）
+        执行开仓（并发发送订单）- Taker模式 (016-spread-optimize)
 
         开仓方向（Taker模式，即时成交）：
-        - Extended: 买入（使用 ask 价格 + 0.2%滑点保护）
-        - Lighter: 卖出（使用 bid 价格 + 0.2%滑点保护）
-
-        价格同步机制：
-        1. 在execute_open_position层面统一并发获取两个交易所BBO价格
-        2. 记录时间戳并计算time_delta（目标<10ms）
-        3. 创建PriceSnapshot并验证有效性
-        4. 计算带0.2%滑点保护的taker价格
-        5. 验证价格一致性（ext买入 < lig卖出）
+        - Extended: 买入（使用 ask 价格）
+        - Lighter: 卖出（使用 bid 价格）
 
         Args:
             quantity: 交易数量
-            spread: 价差信息（仅用于日志记录，实际价格重新获取）
+            spread: 价差信息（RealTimeSpreadInfo或SpreadInfo）
 
         Returns:
             ExecutionResult 对象
         """
         start_time = time.time()
+        # logger.info(f"开仓[Taker]: 数量={quantity}")
 
         try:
-            # Step 1: 并发获取两个交易所的BBO价格
-            ext_bbo_future = self.extended_client.fetch_bbo_prices(
-                self.extended_client.config.contract_id
-            )
-            lig_bbo_future = self.lighter_client.fetch_bbo_prices(
-                self.lighter_client.config.contract_id
-            )
+            # Taker模式价格计算 (016-spread-optimize)
+            # 买入用ask，卖出用bid
+            if hasattr(spread, 'ext_ask'):
+                # RealTimeSpreadInfo
+                ext_price = spread.ext_ask
+                lig_price = spread.lig_bid
+            else:
+                # SpreadInfo（向后兼容）
+                ext_price = getattr(spread, 'extended_ask_vwap', None)
+                lig_price = getattr(spread, 'lighter_bid_vwap', None)
 
-            # 获取Ext价格并记录时间戳
-            ext_fetch_time = time.time()
-            ext_bid, ext_ask = await ext_bbo_future
-
-            # 获取Lig价格并记录时间戳
-            lig_fetch_time = time.time()
-            lig_bid, lig_ask = await lig_bbo_future
-
-            # 计算时间差
-            time_delta = abs(lig_fetch_time - ext_fetch_time)
-
-            # Step 2: 创建价格快照
-            price_snapshot = PriceSnapshot(
-                ext_bid=ext_bid,
-                ext_ask=ext_ask,
-                ext_timestamp=ext_fetch_time,
-                lig_bid=lig_bid,
-                lig_ask=lig_ask,
-                lig_timestamp=lig_fetch_time,
-                time_delta=time_delta
-            )
-
-            # Step 3: 验证价格快照
-            if not price_snapshot.is_valid():
-                logger.warning(
-                    f"价格快照无效: time_delta={time_delta*1000:.1f}ms (阈值<10ms), "
-                    f"跳过此次开仓"
-                )
-                return ExecutionResult(
-                    success=False,
-                    error_message=f"价格快照无效: time_delta={time_delta*1000:.1f}ms",
-                    execution_time=time.time() - start_time
-                )
-
-            # Step 4: 计算taker价格（0.2%滑点）
-            ext_price, lig_price = price_snapshot.calculate_taker_prices()
-
-            # Step 5: 验证价格一致性
-            if not price_snapshot.validate_price_consistency():
-                logger.error(
-                    f"价差异常: ext买入={ext_price:.2f} >= lig卖出={lig_price:.2f}, "
-                    f"跳过此次开仓（套利无盈利空间）"
-                )
-                return ExecutionResult(
-                    success=False,
-                    error_message=f"价差异常: ext={ext_price:.2f} >= lig={lig_price:.2f}",
-                    execution_time=time.time() - start_time
-                )
-
-            # Step 6: 记录价格同步日志
-            spread_pct = (ext_price / lig_price - 1) * 100 if lig_price > 0 else 0
-            logger.info(
-                f"[价格同步] "
-                f"ext_bid={ext_bid:.2f}, ext_ask={ext_ask:.2f}, "
-                f"lig_bid={lig_bid:.2f}, lig_ask={lig_ask:.2f}, "
-                f"time_delta={time_delta*1000:.1f}ms, "
-                f"ext_price={ext_price:.2f}, lig_price={lig_price:.2f}, "
-                f"spread={spread_pct:.2f}%"
-            )
-
-            # Step 7: 并发发送订单（使用计算好的价格）
+            # 并发发送两个订单（Taker模式）
             results = await asyncio.gather(
                 self._place_extended_order_taker("buy", quantity, ext_price),
                 self._place_lighter_order_taker("sell", quantity, lig_price),
@@ -214,14 +150,11 @@ class TradeExecutor:
 
             # 处理执行结果
             if execution_status["both_filled"]:
-                logger.info(
-                    f"[开仓成功] "
-                    f"ext_order_id={extended_result['order_id']}, "
-                    f"lig_order_id={lighter_result['order_id']}, "
-                    f"ext_price={extended_result.get('price'):.2f}, "
-                    f"lig_price={lighter_result.get('price'):.2f}, "
-                    f"耗时={execution_time:.3f}s"
-                )
+                # logger.info(
+                #     f"开仓成功[Taker]: Ext={extended_result['order_id']}, "
+                #     f"Lig={lighter_result['order_id']}, "
+                #     f"耗时={execution_time:.3f}秒"
+                # )
                 return ExecutionResult(
                     success=True,
                     extended_order_id=extended_result["order_id"],
@@ -233,7 +166,9 @@ class TradeExecutor:
                     lighter_filled=True
                 )
             elif execution_status["timeout"]:
-                logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
+                # logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
+                # 不取消订单！订单可能已经成交，但状态查询有延迟
+                # 让OPENING_WAIT状态通过查询实际仓位来判断
                 return ExecutionResult(
                     success=False,
                     extended_order_id=extended_result["order_id"],
@@ -246,10 +181,12 @@ class TradeExecutor:
                     lighter_filled=execution_status["lighter_filled"]
                 )
             else:
+                # 单边成交（这种情况现在不应该发生，因为我们修改了wait_for_execution）
                 logger.error(
                     f"单边成交: Extended={execution_status['extended_filled']}, "
                     f"Lighter={execution_status['lighter_filled']}"
                 )
+                # 也返回order_id，让上层逻辑进入OPENING_WAIT状态检查实际仓位
                 return ExecutionResult(
                     success=False,
                     extended_order_id=extended_result["order_id"],
@@ -622,18 +559,16 @@ class TradeExecutor:
         price: Optional[Decimal]
     ) -> Dict[str, Any]:
         """
-        下 Extended Taker 订单 (001-fix-spread-price优化：加入0.05%滑点保护)
+        下 Extended Taker 订单 (016-spread-optimize)
 
         Taker模式：使用对手价确保即时成交
-        - 买入：使用ask价格 + 0.05%滑点保护 (ask * 1.0005)
-        - 卖出：使用bid价格 - 0.05%滑点保护 (bid * 0.9995)
-
-        注意：滑点从0.2%降低到0.05%，避免吃掉小价差的利润空间
+        - 买入：使用ask价格（或更高）
+        - 卖出：使用bid价格（或更低）
 
         Args:
             side: "buy" 或 "sell"
             quantity: 数量
-            price: 价格（None表示自动计算带滑点保护的价格，或指定具体价格）
+            price: 价格（None表示自动获取对手价，或指定具体价格）
 
         Returns:
             订单结果字典
@@ -641,15 +576,15 @@ class TradeExecutor:
         try:
             contract_id = self.extended_client.config.contract_id
 
-            # Taker模式：获取对手价并加入0.2%滑点保护确保即时成交
+            # Taker模式：获取对手价确保即时成交
             if price is None:
                 best_bid, best_ask = await self.extended_client.fetch_bbo_prices(contract_id)
                 if side == "buy":
-                    # 买入使用ask价格 + 0.05%滑点保护
-                    price = best_ask * Decimal('1.0002')
+                    # 买入使用ask价格确保成交
+                    price = best_ask
                 else:
-                    # 卖出使用bid价格 - 0.05%滑点保护
-                    price = best_bid * Decimal('0.9998')
+                    # 卖出使用bid价格确保成交
+                    price = best_bid
 
             # 调用 Extended 客户端的 taker 订单方法
             # 使用 place_open_order 但不使用 post_only，且价格跨越价差
@@ -659,7 +594,7 @@ class TradeExecutor:
                 side=side,
                 price=price
             )
-            logger.info(f"Ext Taker订单: {side} {quantity} @ {price:.2f}")
+            # logger.debug(f"Ext Taker订单: {side} {quantity} @ {price}")
 
             if result.success:
                 return {

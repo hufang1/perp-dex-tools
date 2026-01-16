@@ -172,7 +172,7 @@ class StateManager:
                     "cached_open_spread": Decimal(str(config_state_data.get("cached_open_spread", 0))),
                     "spread_step": Decimal(str(config_state_data.get("spread_step", "0.00005"))),
                 }
-                logger.info(f"策略状态已恢复: cached_spread={self._config_state['cached_open_spread']:.2%}")
+                logger.info(f"策略状态已恢复: cached_spread={self._config_state['cached_open_spread']:.3%}")
             else:
                 self._config_state = None
 
@@ -364,7 +364,7 @@ class StateManager:
         if state == BotState.IDLE and self._config and self._config.cached_open_spread != 0:
             old_spread = self._config.cached_open_spread
             self._config.cached_open_spread = Decimal("0")
-            logger.info(f"进入空闲状态，重置开仓价差: {old_spread:.2%} -> 0%")
+            logger.info(f"进入空闲状态，重置开仓价差: {old_spread:.3%} -> 0%")
 
     def get_stats(self) -> BotStats:
         """获取统计信息"""

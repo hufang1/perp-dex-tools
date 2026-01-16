@@ -160,5 +160,5 @@ class ExtremeSpreadError(SpreadArbError):
         self.spread = spread
         self.max_allowed = max_allowed
         super().__init__(
-            f"极端价差检测：{spread:.2%} 超过最大允许值 {max_allowed:.2%}"
+            f"极端价差检测：{spread:.3%} 超过最大允许值 {max_allowed:.3%}"
         )

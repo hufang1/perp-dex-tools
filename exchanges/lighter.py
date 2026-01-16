@@ -6,6 +6,7 @@ import os
 import asyncio
 import time
 import logging
+import warnings
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -324,7 +325,34 @@ class LighterClient(BaseExchangeClient):
         return order_result
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
-        """Place an open order with Lighter using official SDK."""
+        """
+        ⚠️ DEPRECATED: 此方法使用Maker模式（中间价+GTT+等待循环）
+
+        此方法将于未来版本移除。
+
+        请使用以下Taker模式替代：
+        - spread套利：使用 trade_executor._place_lighter_order_taker()
+        - 直接调用：使用 place_limit_order(..., time_in_force=0)
+
+        Migration Guide:
+        - 旧代码：await client.place_open_order(contract_id, qty, direction)
+        - 新代码：await client.place_limit_order(contract_id, qty, ask*1.002 or bid*0.998, direction, time_in_force=0)
+
+        Args:
+            contract_id: 合约ID
+            quantity: 数量
+            direction: 方向 ('buy' or 'sell')
+
+        Returns:
+            OrderResult: 订单结果
+        """
+        warnings.warn(
+            "place_open_order is DEPRECATED and uses Maker mode. "
+            "Use Taker mode with time_in_force=0 instead. "
+            "This method will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
         self.current_order = None
         self.current_order_client_id = None
@@ -383,7 +411,29 @@ class LighterClient(BaseExchangeClient):
             raise Exception(f"[CLOSE] Error placing order: {order_result.error_message}")
     
     async def get_order_price(self, side: str = '') -> Decimal:
-        """Get the price of an order with Lighter using official SDK."""
+        """
+        ⚠️ DEPRECATED: 此方法使用中间价计算，不适合Taker模式
+
+        此方法将于未来版本移除。
+
+        Migration Guide:
+        - Taker买入价：best_ask * 1.002
+        - Taker卖出价：best_bid * 0.998
+
+        Args:
+            side: 方向
+
+        Returns:
+            Decimal: 订单价格（中间价）
+        """
+        warnings.warn(
+            "get_order_price is DEPRECATED. "
+            "For Taker mode, use: ask*1.002 (buy) or bid*0.998 (sell). "
+            "This method will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+
         # Get current market prices
         best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:

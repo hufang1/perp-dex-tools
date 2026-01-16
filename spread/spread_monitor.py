@@ -74,8 +74,11 @@ class SpreadMonitor:
 
     async def _monitor_loop(self) -> None:
         """监控循环：定期计算价差"""
+        loop_count = 0
         while self._running:
             try:
+                loop_count += 1
+
                 # 计算价差
                 spread_info = self._calculate_spread()
 
@@ -90,14 +93,18 @@ class SpreadMonitor:
                         # 使用配置的开仓阈值和滑点保护
                         logger.info(spread_info.format_log(self.open_threshold, self.slippage_buffer))
                         self._last_log_time = current_time
+                else:
+                    # 每10秒输出一次调试信息
+                    if loop_count % 100 == 1:  # 约10秒（100 * 0.1s）
+                        logger.warning("价差计算返回None，无法获取有效数据")
 
                 # 等待下一次检查
                 await asyncio.sleep(0.1)  # 100ms更新频率
 
             except asyncio.CancelledError:
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"价差监控异常: {e}")
 
     def _calculate_spread(self) -> Optional[RealTimeSpreadInfo]:
         """
@@ -106,12 +113,18 @@ class SpreadMonitor:
         Returns:
             RealTimeSpreadInfo对象，如果数据无效则返回None
         """
+        # 第一次调用时输出确认信息
+        if not hasattr(self, '_debug_first_call'):
+            logger.warning("=== 价差监控 _calculate_spread 被调用 ===")
+            self._debug_first_call = True
+
         try:
             # 获取两个交易所的订单簿
             ext_orderbook = self.order_book_manager.get_order_book("extended")
             lig_orderbook = self.order_book_manager.get_order_book("lighter")
 
             if ext_orderbook is None or lig_orderbook is None:
+                logger.warning(f"[订单簿未就绪] ext={ext_orderbook is not None}, lig={lig_orderbook is not None}")
                 return None
 
             # 获取最佳买卖价
@@ -121,8 +134,10 @@ class SpreadMonitor:
             lig_best_ask = lig_orderbook.get_best_ask()
 
             if ext_best_bid is None or ext_best_ask is None:
+                logger.warning(f"[Extended订单簿为空] bid={ext_best_bid}, ask={ext_best_ask}")
                 return None
             if lig_best_bid is None or lig_best_ask is None:
+                logger.warning(f"[Lighter订单簿为空] bid={lig_best_bid}, ask={lig_best_ask}")
                 return None
 
             # 提取价格
@@ -133,8 +148,10 @@ class SpreadMonitor:
 
             # 验证价格有效性
             if ext_bid <= 0 or ext_ask <= 0 or lig_bid <= 0 or lig_ask <= 0:
+                logger.warning(f"[价格无效] ext_bid={ext_bid}, ext_ask={ext_ask}, lig_bid={lig_bid}, lig_ask={lig_ask}")
                 return None
             if ext_bid >= ext_ask or lig_bid >= lig_ask:
+                logger.warning(f"[买卖价错误] bid>=ask: ext({ext_bid}>={ext_ask}), lig({lig_bid}>={lig_ask})")
                 return None
 
             # 计算价差（与开仓策略对齐）
@@ -158,7 +175,8 @@ class SpreadMonitor:
 
             return spread_info
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"[价差计算异常] {type(e).__name__}: {e}")
             return None
 
     def get_current_spread(self) -> Optional[RealTimeSpreadInfo]:
