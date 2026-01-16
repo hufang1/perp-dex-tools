@@ -46,6 +46,7 @@ class StateManager:
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",
         BotState.CLOSING: "平仓中",
+        BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
     }
@@ -324,6 +325,7 @@ class StateManager:
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",
         BotState.CLOSING: "平仓中",
+        BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
     }

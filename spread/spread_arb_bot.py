@@ -105,6 +105,11 @@ class SpreadArbBot:
         self._open_success_cooldown: float = 3.0  # 成功后3秒冷却
         # 最后开仓时间（用于防止连续开仓导致 API 限流）
         self._last_open_time: Optional[float] = None
+
+        # 平仓等待确认
+        self._closing_wait_start_time: Optional[float] = None
+        # 平仓等待超时时间（秒）
+        self._close_wait_timeout: float = 10.0
         # 持仓日志输出间隔（秒）
         self._last_holding_log_time: float = 0
         self._holding_log_interval: float = 5.0  # 每5秒输出一次
@@ -265,6 +270,9 @@ class SpreadArbBot:
 
                 elif state == BotState.CLOSING:
                     await self._process_closing_state()
+
+                elif state == BotState.CLOSING_WAIT:
+                    await self._process_closing_wait_state()
 
                 elif state == BotState.PAUSED:
                     await self._process_paused_state()
@@ -527,8 +535,7 @@ class SpreadArbBot:
                         await asyncio.sleep(wait_time)
 
                 # 检查是否已有持仓（继续开仓 vs 首次开仓）
-                portfolio = self.state_manager.get_portfolio()
-                has_existing_position = portfolio and portfolio.total_quantity > 0
+                has_existing_position = self.close_strategy.get_total_quantity() > 0
 
                 if has_existing_position:
                     # 已有持仓，这是继续开仓（加仓）
@@ -562,9 +569,8 @@ class SpreadArbBot:
                 next_open_threshold = cached_spread + spread_step
                 open_formula = f">=(上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
 
-            # 计算平仓价差（从 portfolio 获取加权平均开仓价差）
-            portfolio = self.state_manager.get_portfolio()
-            entry_spread = portfolio.get_total_entry_spread() if portfolio else Decimal("0")
+            # 计算平仓价差（从 close_strategy 的 portfolio 获取加权平均开仓价差，与实际平仓判断保持一致）
+            entry_spread = self.close_strategy.get_weighted_avg_spread()
             if entry_spread > 0:
                 close_threshold = entry_spread - self.config.min_profit - self.config.total_fee_rate
                 close_formula = f"<=(开仓{entry_spread:.3%}-利润{self.config.min_profit:.3%}-手续费{self.config.total_fee_rate:.3%}={close_threshold:.3%})"
@@ -603,16 +609,17 @@ class SpreadArbBot:
         logger.info("执行平仓...")
 
         # 获取 Portfolio（多笔仓位）
-        portfolio = self.state_manager.get_portfolio()
+        portfolio = self.close_strategy.get_portfolio()
         if portfolio is None or portfolio.total_quantity == 0:
             logger.warning("持仓信息丢失或无持仓")
             self.state_manager.set_state(BotState.IDLE, "持仓信息丢失或无持仓")
             await self.state_manager.save_state()
             return
 
-        # 获取总持仓数量
+        # 获取总持仓数量和开仓价差（用于后续记录）
         total_quantity = portfolio.total_quantity
         entry_spread = portfolio.get_total_entry_spread()
+        first_open_time = portfolio.first_open_time
 
         logger.info(f"平仓总数量: {total_quantity} ETH, 加权开仓价差: {entry_spread:.3%}")
 
@@ -636,163 +643,17 @@ class SpreadArbBot:
             total_quantity
         )
 
-        if result.success:
-            logger.info("平仓订单已发送，等待确认实际仓位...")
-
-            # 等待订单生效
-            await asyncio.sleep(1.0)
-
-            # 检查实际仓位
-            ext_position = await self.extended_client.get_account_positions()
-            lig_position = await self.lighter_client.get_account_positions()
-            tolerance = Decimal("0.001")
-
-            logger.info(f"平仓后仓位检查: Ext={ext_position} Lig={lig_position}")
-
-            # 检查是否都已平仓
-            ext_closed = ext_position < tolerance
-            lig_closed = lig_position < tolerance
-
-            if ext_closed and lig_closed:
-                # 两边都平了，计算利润并进入IDLE
-                close_spread = await self._calculate_close_spread_from_result(result)
-                profit = self._calculate_profit_for_portfolio(portfolio, result)
-
-                # 更新统计
-                stats = self.state_manager.get_stats()
-                stats.total_trades += 1
-                if profit > 0:
-                    stats.profitable_trades += 1
-                stats.total_profit += profit
-                stats.total_fees += self._calculate_fees_for_portfolio(portfolio)
-                stats.last_trade_time = datetime.now()
-                self.state_manager.update_stats(stats)
-
-                # 清除所有持仓记录
-                self.close_strategy.close_all()
-
-                # 清除旧的 Position（向后兼容）
-                old_position = self.state_manager.get_position()
-                if old_position:
-                    self.state_manager.update_position(None)
-
-                # 计算持仓时长（从第一笔开仓到平仓）
-                if portfolio.first_open_time:
-                    elapsed_time = time.time() - portfolio.first_open_time
-                else:
-                    elapsed_time = 0.0
-
-                # CSV埋点：平仓成功
-                fees = self._calculate_fees_for_portfolio(portfolio)
-                self._log_close_to_csv(
-                    entry_spread=entry_spread,
-                    close_spread=close_spread,
-                    total_qty=total_quantity,
-                    profit=profit,
-                    fees=fees,
-                    elapsed=elapsed_time,
-                    status='平仓成功'
-                )
-
-                self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.3%}")
-                await self.state_manager.save_state()
-
-                logger.info(
-                    f"✅ 平仓完成，进入IDLE状态: 利润=${profit:.2f}, "
-                    f"价差收敛={entry_spread - close_spread:.3%}"
-                )
-
-            elif ext_closed != lig_closed:
-                # 一边平了，另一边没平 → 强平另一边
-                logger.error(f"⚠️ 单边平仓！Ext={'已平' if ext_closed else f'有仓位{ext_position}'}, "
-                          f"Lig={'已平' if lig_closed else f'有仓位{lig_position}'}")
-                logger.error("立即强平剩余仓位...")
-
-                await self._force_close_positions()
-
-                # 强平后继续检查，循环平仓直到两边都为0
-                max_attempts = 5  # 最多尝试5次
-                for attempt in range(max_attempts):
-                    await asyncio.sleep(1.0)
-                    ext_position = await self.extended_client.get_account_positions()
-                    lig_position = await self.lighter_client.get_account_positions()
-                    ext_closed = ext_position < tolerance
-                    lig_closed = lig_position < tolerance
-
-                    logger.info(f"强平后检查(尝试{attempt+1}/{max_attempts}): Ext={ext_position} Lig={lig_position}")
-
-                    if ext_closed and lig_closed:
-                        # 都平了，进入IDLE
-                        logger.info("✅ 所有仓位已平仓，进入IDLE状态")
-                        self.state_manager.set_state(BotState.IDLE, "平仓后强制清理完成")
-                        await self.state_manager.save_state()
-                        break
-                    else:
-                        # 还有仓位，继续强平
-                        logger.warning(f"仍有残留仓位 Ext={ext_position} Lig={lig_position}，继续强平...")
-                        await self._force_close_positions()
-                else:
-                    # 重试用尽还有仓位
-                    logger.error(f"❌ 强平{max_attempts}次后仍有仓位 Ext={ext_position} Lig={lig_position}，进入风控模式")
-                    print(f"🛡️ 强平失败，进入风控暂停模式")
-                    import time
-                    self._paused_start_time = time.time()
-                    self._last_api_check_time = time.time()
-                    self.state_manager.set_state(BotState.PAUSED, f"强平失败，仍有残余仓位")
-                    await self.state_manager.save_state()
-
-            else:
-                # 两边都没平 → 也需要强制平仓，不要继续HOLDING
-                logger.warning(f"⚠️ 平仓无效，两边都仍有仓位: Ext={ext_position} Lig={lig_position}")
-                logger.warning("强制平仓所有仓位...")
-
-                # 循环强平直到两边都为0（最多5次）
-                max_attempts = 5
-                for attempt in range(max_attempts):
-                    logger.info(f"强制平仓(尝试{attempt+1}/{max_attempts}): Ext={ext_position} Lig={lig_position}")
-                    await self._force_close_positions()
-
-                    await asyncio.sleep(1.0)
-                    ext_position = await self.extended_client.get_account_positions()
-                    lig_position = await self.lighter_client.get_account_positions()
-                    ext_closed = ext_position < tolerance
-                    lig_closed = lig_position < tolerance
-
-                    if ext_closed and lig_closed:
-                        # 都平了，进入IDLE
-                        logger.info("✅ 所有仓位已平仓，进入IDLE状态")
-                        self.state_manager.set_state(BotState.IDLE, "平仓后强制清理完成")
-                        await self.state_manager.save_state()
-                        break
-                else:
-                    # 重试用尽还有仓位
-                    logger.error(f"❌ 强平{max_attempts}次后仍有仓位 Ext={ext_position} Lig={lig_position}，进入风控模式")
-                    print(f"🛡️ 强平失败，进入风控暂停模式")
-                    import time
-                    self._paused_start_time = time.time()
-                    self._last_api_check_time = time.time()
-                    self.state_manager.set_state(BotState.PAUSED, f"强平失败，仍有残余仓位")
-                    await self.state_manager.save_state()
-
+        # 不管订单状态如何，都进入 CLOSING_WAIT 状态检查实际仓位
+        if result.success or result.extended_order_id or result.lighter_order_id:
+            logger.info(f"平仓订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
         else:
-            # 平仓失败
-            logger.error(f"平仓失败: {result.error_message}")
+            logger.error(f"平仓订单发送失败: {result.error_message}")
 
-            # CSV埋点：平仓失败
-            fees = self._calculate_fees_for_portfolio(portfolio)
-            self._log_close_to_csv(
-                entry_spread=entry_spread,
-                close_spread=Decimal("0"),
-                total_qty=total_quantity,
-                profit=Decimal("0"),
-                fees=fees,
-                elapsed=0.0,
-                status=f'平仓失败: {result.error_message}'
-            )
-
-            # 保持 HOLDING 状态，等待下一次机会
-            self.state_manager.set_state(BotState.HOLDING, f"平仓失败: {result.error_message}")
-            await self.state_manager.save_state()
+        # 进入 CLOSING_WAIT 状态验证仓位（不管订单状态如何）
+        import time
+        self._closing_wait_start_time = time.time()
+        self.state_manager.set_state(BotState.CLOSING_WAIT, f"平仓订单已发送，等待确认")
+        await self.state_manager.save_state()
 
     async def _process_opening_wait_state(self) -> None:
         """处理 OPENING_WAIT 状态：等待确认仓位"""
@@ -907,7 +768,7 @@ class SpreadArbBot:
                 logger.warning(f"仓位验证失败 (elapsed={elapsed:.1f}s >= 2.0s): Ext={ext_position} Lig={lig_position} diff={ext_lig_diff}")
 
                 # 判断哪边多了仓位，只平掉多出来的部分（本次开仓数量）
-                portfolio = self.state_manager.get_portfolio()
+                portfolio = self.close_strategy.get_portfolio()
 
                 # CSV埋点：仓位不对等
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
@@ -927,15 +788,58 @@ class SpreadArbBot:
                 # 只平掉两边比之前持仓多的部分
                 await self._rollback_partial_positions(current_qty, ext_position, lig_position)
 
+                # 回滚后检查实际仓位，决定下一步状态
+                await asyncio.sleep(0.5)  # 等待回平订单生效
+                ext_position_after = await self.extended_client.get_account_positions()
+                lig_position_after = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+
+                ext_has_pos = abs(ext_position_after) >= tolerance
+                lig_has_pos = abs(lig_position_after) >= tolerance
+                both_zero = not ext_has_pos and not lig_has_pos
+                both_match = abs(ext_position_after - lig_position_after) < tolerance
+
                 # 强平后进入冷却期
                 self._last_open_fail_time = time.time()
-                logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
-                self.state_manager.set_state(BotState.IDLE, f"仓位不一致，已回滚本次开仓")
-                self._opening_wait_start_time = None
 
                 # 清除待确认的仓位
                 if hasattr(self, '_pending_open_position'):
                     self._pending_open_position = None
+
+                if both_zero:
+                    # 两边都平了，进入 IDLE
+                    logger.info(f"回滚后无仓位 Ext={ext_position_after} Lig={lig_position_after}，进入空闲状态")
+                    logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
+                    self.state_manager.set_state(BotState.IDLE, "仓位回滚完成，无持仓")
+                    self._opening_wait_start_time = None
+                elif both_match:
+                    # 两边都有持仓且相等，进入 HOLDING
+                    logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
+                    self.state_manager.set_state(BotState.HOLDING, f"回滚后恢复持仓状态")
+                    self._opening_wait_start_time = None
+                else:
+                    # 仓位仍不一致，强制全平
+                    logger.error(f"回滚后仓位仍不一致 Ext={ext_position_after} Lig={lig_position_after}，强制全平")
+                    await self._force_close_positions()
+
+                    # 等待强制平仓生效
+                    await asyncio.sleep(0.5)
+                    ext_final = await self.extended_client.get_account_positions()
+                    lig_final = await self.lighter_client.get_account_positions()
+
+                    if abs(ext_final) < tolerance and abs(lig_final) < tolerance:
+                        logger.info("强制平仓完成，进入空闲状态")
+                        self.state_manager.set_state(BotState.IDLE, "回滚后强制清理完成")
+                    else:
+                        # 强平失败，进入风控模式
+                        logger.error(f"强制平仓失败 Ext={ext_final} Lig={lig_final}，进入风控模式")
+                        print(f"🛡️ 强平失败，进入风控暂停模式")
+                        import time
+                        self._paused_start_time = time.time()
+                        self._last_api_check_time = time.time()
+                        self.state_manager.set_state(BotState.PAUSED, f"回滚后强平失败，仍有残余仓位")
+
+                    self._opening_wait_start_time = None
 
                 await self.state_manager.save_state()
             else:
@@ -956,6 +860,124 @@ class SpreadArbBot:
             self._paused_start_time = time.time()
             self._last_api_check_time = time.time()
             self.state_manager.set_state(BotState.PAUSED, f"仓位检查异常: {error_msg}")
+            await self.state_manager.save_state()
+            return
+
+    async def _process_closing_wait_state(self) -> None:
+        """处理 CLOSING_WAIT 状态：等待确认平仓结果"""
+        import time
+
+        current_time = time.time()
+        if self._closing_wait_start_time is None:
+            self._closing_wait_start_time = current_time
+
+        elapsed = current_time - self._closing_wait_start_time
+
+        # 等待 3 秒后检查仓位
+        if elapsed < 3.0:
+            return
+
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+
+            logger.info(f"平仓后仓位检查 ({elapsed:.1f}s): Ext={ext_position} Lig={lig_position}")
+
+            # 检查两边仓位情况
+            ext_closed = ext_position < tolerance
+            lig_closed = lig_position < tolerance
+
+            if ext_closed and lig_closed:
+                # 两边都平了，平仓成功
+                portfolio = self.close_strategy.get_portfolio()
+                total_quantity = portfolio.total_quantity if portfolio else Decimal("0")
+                entry_spread = portfolio.get_total_entry_spread() if portfolio else Decimal("0")
+                first_open_time = portfolio.first_open_time if portfolio else None
+
+                # 计算利润（简化计算）
+                if portfolio:
+                    # 简化计算：使用加权平均开仓价差
+                    avg_price = Decimal("3000")  # 估算价格
+                    profit = total_quantity * (entry_spread - self.config.total_fee_rate) * avg_price
+                else:
+                    profit = Decimal("0")
+                close_spread = Decimal("0.001")
+
+                # 更新统计
+                stats = self.state_manager.get_stats()
+                stats.total_trades += 1
+                if profit > 0:
+                    stats.profitable_trades += 1
+                stats.total_profit += profit
+                stats.total_fees += self._calculate_fees_for_portfolio(portfolio) if portfolio else Decimal("0")
+                stats.last_trade_time = datetime.now()
+                self.state_manager.update_stats(stats)
+
+                # 清除所有持仓记录
+                self.close_strategy.close_all()
+
+                # 清除旧的 Position（向后兼容）
+                old_position = self.state_manager.get_position()
+                if old_position:
+                    self.state_manager.update_position(None)
+
+                # 计算持仓时长
+                elapsed_time = time.time() - first_open_time if first_open_time else 0.0
+
+                # CSV埋点：平仓成功
+                fees = self._calculate_fees_for_portfolio(portfolio) if portfolio else Decimal("0")
+                self._log_close_to_csv(
+                    entry_spread=entry_spread,
+                    close_spread=close_spread,
+                    total_qty=total_quantity,
+                    profit=profit,
+                    fees=fees,
+                    elapsed=elapsed_time,
+                    status='平仓成功'
+                )
+
+                self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}")
+                await self.state_manager.save_state()
+
+                logger.info(f"✅ 平仓确认成功，进入IDLE状态: 利润=${profit:.2f}")
+
+            elif ext_closed or lig_closed:
+                # 两边有差异，强平
+                logger.error(f"⚠️ 平仓后仓位不一致！Ext={'已平' if ext_closed else f'有仓位{ext_position}'}, "
+                          f"Lig={'已平' if lig_closed else f'有仓位{lig_position}'}")
+                logger.error("立即强平所有仓位...")
+
+                await self._force_close_positions()
+
+                # 强平后进入 IDLE 状态
+                logger.info("✅ 强平完成，进入IDLE状态")
+                self.state_manager.set_state(BotState.IDLE, "平仓后仓位不一致，已强制清理")
+                await self.state_manager.save_state()
+
+            else:
+                # 两边都有持仓，平仓失败
+                logger.warning(f"⚠️ 平仓失败：两边都仍有仓位 Ext={ext_position} Lig={lig_position}")
+
+                # 保持 HOLDING 状态，等待下一次机会
+                self.state_manager.set_state(BotState.HOLDING, "平仓失败，仍有持仓")
+                await self.state_manager.save_state()
+
+            # 清除平仓等待时间
+            self._closing_wait_start_time = None
+
+        except Exception as e:
+            logger.error(f"平仓后仓位检查失败: {e}", exc_info=True)
+            # 检测是否是API错误
+            self._handle_api_error(str(e))
+            # 如果进入风控模式，直接返回
+            if self.state_manager.get_state() == BotState.PAUSED:
+                return
+            # 其他异常也要暂停
+            print(f"🛡️ 仓位检查异常，进入风控暂停模式: {e}")
+            self._paused_start_time = time.time()
+            self._last_api_check_time = time.time()
+            self.state_manager.set_state(BotState.PAUSED, f"仓位检查异常: {e}")
             await self.state_manager.save_state()
             return
 
@@ -1547,15 +1569,15 @@ class SpreadArbBot:
         state = await self.state_manager.load_state()
         logger.debug(f"当前状态: {state.value}")
 
-        # 程序重启后，如果是OPENING或OPENING_WAIT状态，重置为IDLE
-        # 因为之前的开仓流程已经失效，需要重新开始
-        if state in [BotState.OPENING, BotState.OPENING_WAIT]:
+        # 程序重启后，如果是OPENING、OPENING_WAIT、CLOSING、CLOSING_WAIT状态，重置为IDLE
+        # 因为之前的交易流程已经失效，需要重新开始
+        if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.CLOSING, BotState.CLOSING_WAIT]:
             logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
-            self.state_manager.set_state(BotState.IDLE, "程序重启，重置未完成的开仓状态")
+            self.state_manager.set_state(BotState.IDLE, "程序重启，重置未完成的交易状态")
             await self.state_manager.save_state()
 
-        # 检查HOLDING/CLOSING状态但实际没有持仓的情况
-        if state in [BotState.HOLDING, BotState.CLOSING]:
+        # 检查HOLDING状态但实际没有持仓的情况
+        if state == BotState.HOLDING:
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
             tolerance = Decimal("0.001")
