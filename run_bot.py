@@ -13,6 +13,11 @@ from pathlib import Path
 project_root = Path(__file__).parent.absolute()
 sys.path.insert(0, str(project_root))
 
+# 添加 spread 目录到 Python 路径
+spread_dir = project_root / "spread"
+if str(spread_dir) not in sys.path:
+    sys.path.insert(0, str(spread_dir))
+
 # 导入并运行主函数
 if __name__ == "__main__":
     import asyncio

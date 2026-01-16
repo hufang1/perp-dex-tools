@@ -22,8 +22,8 @@ class ArithmeticOpenStrategy:
     """
     等差数列开仓策略
 
-    首次开仓：价差 > min_threshold
-    后续开仓：价差 > cached_open_spread + spread_step
+    首次开仓：价差 >= min_threshold
+    后续开仓：价差 >= cached_open_spread + spread_step
     价差缩小时不降低上次开仓价差
     """
 
@@ -58,27 +58,27 @@ class ArithmeticOpenStrategy:
 
         # 首次开仓：上次开仓价差为0时，使用最小阈值
         if cached_spread == 0:
-            if current_spread > min_threshold:
+            if current_spread >= min_threshold:
                 self._state = OpenStrategyState.READY
-                reason = f"开仓: 价差{current_spread:.2%} > 阈值{min_threshold:.2%}"
+                reason = f"开仓: 价差{current_spread:.3%} >= 阈值{min_threshold:.3%}"
                 return True, reason
             else:
                 self._state = OpenStrategyState.WAITING
-                reason = f"价差{current_spread:.2%}未达到开仓阈值{min_threshold:.2%}"
+                reason = f"价差{current_spread:.3%}未达到开仓阈值{min_threshold:.3%}"
                 return False, reason
 
-        # 后续开仓：价差必须大于上次开仓价差+步长
+        # 后续开仓：价差必须大于等于上次开仓价差+步长
         threshold = cached_spread + spread_step
-        if current_spread > threshold:
+        if current_spread >= threshold:
             self._state = OpenStrategyState.READY
-            reason = f"开仓: 价差{current_spread:.2%} > 阈值{threshold:.2%} (上次开仓{cached_spread:.2%} + 步长{spread_step:.3%})"
+            reason = f"开仓: 价差{current_spread:.3%} >= 阈值{threshold:.3%} (上次开仓{cached_spread:.3%} + 步长{spread_step:.3%})"
             return True, reason
         else:
             self._state = OpenStrategyState.WAITING
             if current_spread > cached_spread:
-                reason = f"价差{current_spread:.2%}未达到开仓条件{threshold:.2%}"
+                reason = f"价差{current_spread:.3%}未达到开仓条件{threshold:.3%}"
             else:
-                reason = f"价差{current_spread:.2%} < 上次开仓{cached_spread:.2%}，等待价差扩大"
+                reason = f"价差{current_spread:.3%} < 上次开仓{cached_spread:.3%}，等待价差扩大"
             return False, reason
 
     def update_cached_spread(self, new_spread: Decimal) -> None:
@@ -95,9 +95,9 @@ class ArithmeticOpenStrategy:
         # 只增不减原则
         if new_spread > old_spread:
             self.config.cached_open_spread = new_spread
-            logger.info(f"上次开仓价差更新: {old_spread:.2%} -> {new_spread:.2%}")
+            logger.info(f"上次开仓价差更新: {old_spread:.3%} -> {new_spread:.3%}")
         else:
-            logger.debug(f"上次开仓价差保持: {old_spread:.2%} (新价差{new_spread:.2%}未超过)")
+            logger.info(f"上次开仓价差保持: {old_spread:.3%} (新价差{new_spread:.3%} <= 上次价差，未更新)")
 
     def get_state(self) -> OpenStrategyState:
         """获取当前策略状态"""
@@ -126,6 +126,6 @@ class ArithmeticOpenStrategy:
         threshold = self.get_next_threshold()
 
         if cached == 0:
-            return f"策略: 首次开仓 | 阈值{threshold:.2%}"
+            return f"策略: 首次开仓 | 阈值{threshold:.3%}"
         else:
-            return f"策略: 上次开仓{cached:.2%} | 步长{step:.2%} | 阈值{threshold:.2%}"
+            return f"策略: 上次开仓{cached:.3%} | 步长{step:.3%} | 阈值{threshold:.3%}"

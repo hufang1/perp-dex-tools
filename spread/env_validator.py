@@ -121,7 +121,7 @@ def format_config_summary(symbol: str, size: float, open_threshold: float,
     Returns:
         单行配置摘要字符串
     """
-    return f"配置: {symbol}|{size}|开仓{open_threshold:.2%}|盈利{profit_target:.2%}|缓冲{buffer}s"
+    return f"配置: {symbol}|{size}|开仓{open_threshold:.3%}|盈利{profit_target:.3%}|缓冲{buffer}s"
 
 
 def check_env_before_start():

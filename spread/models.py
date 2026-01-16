@@ -446,8 +446,8 @@ class RealTimeSpreadInfo:
         return (
             f"价差: Ext[{self.ext_bid:.1f}/{self.ext_ask:.1f}] "
             f"Lig[{self.lig_bid:.1f}/{self.lig_ask:.1f}] = "
-            f"{self.spread_abs:.1f} ({self.spread_pct:.2%}) "
-            f"< {required_threshold:.2%} ({open_threshold:.2%}阈值+{slippage_buffer:.2%}滑点) {action}"
+            f"{self.spread_abs:.1f} ({self.spread_pct:.3%}) "
+            f"< {required_threshold:.3%} ({open_threshold:.3%}阈值+{slippage_buffer:.3%}滑点) {action}"
         )
 
 
@@ -482,7 +482,7 @@ class OpenPosition:
             f"仓位[{self.position_id[:8]}]: "
             f"{status} | "
             f"数量={self.quantity} | "
-            f"价差={self.open_spread:.2%} | "
+            f"价差={self.open_spread:.3%} | "
             f"Ext={self.ext_price:.1f} | "
             f"Lig={self.lig_price:.1f}"
         )
@@ -569,7 +569,7 @@ class Portfolio:
         return (
             f"持仓: {active_count}笔 | "
             f"总量={self.total_quantity} | "
-            f"均价差={self.weighted_avg_entry_spread:.2%}"
+            f"均价差={self.weighted_avg_entry_spread:.3%}"
         )
 
 
@@ -623,15 +623,15 @@ class CloseTrigger:
         """格式化为单行日志"""
         if self.is_triggered:
             return (
-                f"平仓触发: 开仓{self.entry_spread:.2%} >= "
-                f"当前{self.current_spread:.2%} + "
-                f"盈利{self.profit_target:.2%} + "
-                f"手续费{self.fee_rate:.2%} | "
+                f"平仓触发: 开仓{self.entry_spread:.3%} >= "
+                f"当前{self.current_spread:.3%} + "
+                f"盈利{self.profit_target:.3%} + "
+                f"手续费{self.fee_rate:.3%} | "
                 f"利润={self.actual_profit:.2f}"
             )
         else:
             return (
-                f"持仓监控: 开仓{self.entry_spread:.2%} vs "
-                f"当前{self.current_spread:.2%} | "
-                f"利润={self.expected_profit:.2%}"
+                f"持仓监控: 开仓{self.entry_spread:.3%} vs "
+                f"当前{self.current_spread:.3%} | "
+                f"利润={self.expected_profit:.3%}"
             )

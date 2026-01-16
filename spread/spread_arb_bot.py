@@ -45,9 +45,9 @@ from arithmetic_open_strategy import ArithmeticOpenStrategy
 from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
 
-# 设置日志（仅输出错误）
+# 设置日志（输出 INFO 及以上级别）
 logging.basicConfig(
-    level=logging.ERROR,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -126,8 +126,8 @@ class SpreadArbBot:
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
                    f"数量={config.target_quantity}, "
-                   f"开仓阈值={config.min_spread_threshold:.2%}, "
-                   f"最小利润={config.min_profit:.2%}")
+                   f"开仓阈值={config.min_spread_threshold:.3%}, "
+                   f"最小利润={config.min_profit:.3%}")
 
     async def start(self) -> None:
         """启动机器人"""
@@ -362,13 +362,13 @@ class SpreadArbBot:
 
             if cached_spread == 0:
                 next_threshold = self.config.min_spread_threshold
-                threshold_info = f"阈值{next_threshold:.2%}"
+                threshold_info = f"阈值{next_threshold:.3%}"
             else:
                 next_threshold = cached_spread + spread_step
-                threshold_info = f"上次开仓{cached_spread:.2%}+步长{spread_step:.3%}={next_threshold:.2%}"
+                threshold_info = f"上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_threshold:.3%}"
 
             status_text = "开仓" if should_open else "不开仓"
-            print(f"📊 状态「空闲」 实时价差{current_spread:.2%} 下次{threshold_info} {status_text}")
+            print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} {status_text}")
             self._last_idle_log_time = current_time
 
         if should_open:
@@ -384,7 +384,7 @@ class SpreadArbBot:
                 return
 
             # 切换到开仓状态
-            self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.2%} > 阈值{self.config.min_spread_threshold:.2%}")
+            self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} > 阈值{self.config.min_spread_threshold:.3%}")
             await self.state_manager.save_state()
 
     async def _process_opening_state(self) -> None:
@@ -458,7 +458,7 @@ class SpreadArbBot:
         if result.success:
             logger.info(
                 f"订单发送成功: Ext={result.extended_price} Lig={result.lighter_price} "
-                f"价差={spread_info.spread_pct:.2%}"
+                f"价差={spread_info.spread_pct:.3%}"
             )
         elif result.extended_order_id or result.lighter_order_id:
             # 有订单ID但订单状态不是成功
@@ -557,17 +557,17 @@ class SpreadArbBot:
             # 计算下一次开仓价差
             if cached_spread == 0:
                 next_open_threshold = self.config.min_spread_threshold
-                open_formula = f">={next_open_threshold:.2%}"
+                open_formula = f">={next_open_threshold:.3%}"
             else:
                 next_open_threshold = cached_spread + spread_step
-                open_formula = f">=(上次开仓{cached_spread:.2%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
+                open_formula = f">=(上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
 
             # 计算平仓价差（从 portfolio 获取加权平均开仓价差）
             portfolio = self.state_manager.get_portfolio()
             entry_spread = portfolio.get_total_entry_spread() if portfolio else Decimal("0")
             if entry_spread > 0:
                 close_threshold = entry_spread - self.config.min_profit - self.config.total_fee_rate
-                close_formula = f"<=(开仓{entry_spread:.2%}-利润{self.config.min_profit:.2%}-手续费{self.config.total_fee_rate:.2%}={close_threshold:.2%})"
+                close_formula = f"<=(开仓{entry_spread:.3%}-利润{self.config.min_profit:.3%}-手续费{self.config.total_fee_rate:.3%}={close_threshold:.3%})"
             else:
                 close_formula = ""
 
@@ -582,9 +582,9 @@ class SpreadArbBot:
 
             # 组合日志，用括号组织逻辑
             if close_formula:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.2%}（下一次开仓需价差{open_formula}，平仓需价差{close_formula}），结果：{result}")
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（下一次开仓需价差{open_formula}，平仓需价差{close_formula}），结果：{result}")
             else:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.2%}（下一次开仓需价差{open_formula}），结果：{result}")
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（下一次开仓需价差{open_formula}），结果：{result}")
             self._last_holding_log_time = current_time
 
         # 使用智能平仓策略判断 (016-spread-optimize)
@@ -592,9 +592,9 @@ class SpreadArbBot:
 
         if trigger.is_triggered:
             # 切换到平仓状态
-            close_reason = (f"开仓{trigger.entry_spread:.2%} >= 当前{trigger.current_spread:.2%} + "
-                          f"利润{trigger.profit_target:.2%} + 手续费{trigger.fee_rate:.2%} | "
-                          f"预期利润{trigger.expected_profit:.2%}")
+            close_reason = (f"开仓{trigger.entry_spread:.3%} >= 当前{trigger.current_spread:.3%} + "
+                          f"利润{trigger.profit_target:.3%} + 手续费{trigger.fee_rate:.3%} | "
+                          f"预期利润{trigger.expected_profit:.3%}")
             self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {close_reason}")
             await self.state_manager.save_state()
 
@@ -614,7 +614,7 @@ class SpreadArbBot:
         total_quantity = portfolio.total_quantity
         entry_spread = portfolio.get_total_entry_spread()
 
-        logger.info(f"平仓总数量: {total_quantity} ETH, 加权开仓价差: {entry_spread:.2%}")
+        logger.info(f"平仓总数量: {total_quantity} ETH, 加权开仓价差: {entry_spread:.3%}")
 
         # 创建一个临时 Position 对象用于 execute_close_position
         # 因为 execute_close_position 需要 Position 参数
@@ -694,12 +694,12 @@ class SpreadArbBot:
                     status='平仓成功'
                 )
 
-                self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.2%}")
+                self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}, 价差收敛={entry_spread - close_spread:.3%}")
                 await self.state_manager.save_state()
 
                 logger.info(
                     f"✅ 平仓完成，进入IDLE状态: 利润=${profit:.2f}, "
-                    f"价差收敛={entry_spread - close_spread:.2%}"
+                    f"价差收敛={entry_spread - close_spread:.3%}"
                 )
 
             elif ext_closed != lig_closed:
@@ -882,7 +882,9 @@ class SpreadArbBot:
                     self.close_strategy.add_position(self._pending_open_position)
 
                     # 更新上次开仓价差（只在仓位确认成功后才更新）
+                    logger.info(f"准备更新开仓价差: 当前={self.config.cached_open_spread:.3%}, 新值={self._pending_open_position.open_spread:.3%}")
                     self.open_strategy.update_cached_spread(self._pending_open_position.open_spread)
+                    logger.info(f"更新后开仓价差: {self.config.cached_open_spread:.3%}")
 
                     # CSV埋点：开仓成功
                     self._log_open_to_csv(
@@ -1569,7 +1571,7 @@ class SpreadArbBot:
         if position:
             logger.debug(f"持仓: {position.state.value}, "
                        f"数量={abs(position.extended_quantity)}, "
-                       f"开仓价差={position.entry_spread:.2%}")
+                       f"开仓价差={position.entry_spread:.3%}")
 
         # 检查交易所实际仓位
         await self._check_and_clean_positions()

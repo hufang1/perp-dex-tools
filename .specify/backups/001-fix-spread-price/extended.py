@@ -298,7 +298,7 @@ class ExtendedClient(BaseExchangeClient):
 
         return OrderResult(success=False, error_message='Max retries exceeded')
     
-    async def place_taker_order(self, contract_id: str, quantity: Decimal, side: str, price: Decimal, max_retries: int = 1) -> OrderResult:
+    async def place_taker_order(self, contract_id: str, quantity: Decimal, side: str, price: Decimal) -> OrderResult:
         """
         Place a taker order (market order) that executes immediately.
 
@@ -311,28 +311,27 @@ class ExtendedClient(BaseExchangeClient):
             quantity: Order quantity
             side: "buy" or "sell"
             price: The price to use (should cross the spread for immediate execution)
-            max_retries: Maximum retry attempts (default: 1, uses original price on retry)
 
         Returns:
             OrderResult with execution details
         """
+        max_retries = 10
         retry_count = 0
-        original_price = price  # Cache original price to use on retry
 
         while retry_count < max_retries:
             try:
                 # Convert side string to OrderSide enum
                 order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
 
-                # Round price to appropriate precision (use original price)
-                rounded_price = self.round_to_tick(original_price)
+                # Round price to appropriate precision
+                rounded_price = self.round_to_tick(price)
                 quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
 
                 # Place the order WITHOUT post_only to allow taker execution
                 order_result = await self.perpetual_trading_client.place_order(
                     market_name=contract_id,
                     amount_of_synthetic=quantity,
-                    price=rounded_price,  # Use original price, don't refetch BBO
+                    price=rounded_price,
                     side=order_side,
                     time_in_force=TimeInForce.IOC,  # Immediate or Cancel for taker
                     post_only=False,  # Allow taker execution
@@ -359,9 +358,8 @@ class ExtendedClient(BaseExchangeClient):
                 if order_info:
                     if order_info.status in ['CANCELED', 'REJECTED']:
                         if retry_count < max_retries - 1:
-                            self.logger.log(f"Taker order not filled, retrying ({retry_count+1}/{max_retries})...", level="INFO")
+                            self.logger.log(f"Taker order not filled, retrying...", level="INFO")
                             retry_count += 1
-                            await asyncio.sleep(0.05)
                             continue
                         else:
                             return OrderResult(success=False, error_message=f'Taker order not filled after {max_retries} attempts')
