@@ -47,7 +47,7 @@ from position_balance_checker import PositionBalanceChecker
 
 # 设置日志（输出 INFO 及以上级别）
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.ERROR,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
