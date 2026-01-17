@@ -123,6 +123,10 @@ class SpreadArbBot:
         self._csv_log_dir.mkdir(parents=True, exist_ok=True)
         self._init_csv_loggers()
         self._api_error_count: int = 0
+
+        # 实时价差CSV记录
+        self._last_spread_log_time: float = 0
+        self._spread_log_interval: float = 10.0  # 每10秒记录一次实时价差
         self._api_error_threshold: int = 3  # 连续3次错误进入风控模式
         self._paused_start_time: Optional[float] = None
         self._paused_check_interval: float = 10.0  # 每10秒检查API是否恢复
@@ -379,6 +383,11 @@ class SpreadArbBot:
             print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} {status_text}")
             self._last_idle_log_time = current_time
 
+        # 记录实时价差到CSV（每10秒一次）
+        if current_time - self._last_spread_log_time >= self._spread_log_interval:
+            self._log_spread_to_csv(spread_info)
+            self._last_spread_log_time = current_time
+
         if should_open:
             # 风控验证
             validation = await self.risk_manager.validate_open_position(
@@ -592,6 +601,11 @@ class SpreadArbBot:
             else:
                 print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（下一次开仓需价差{open_formula}），结果：{result}")
             self._last_holding_log_time = current_time
+
+        # 记录实时价差到CSV（每10秒一次）
+        if current_time - self._last_spread_log_time >= self._spread_log_interval:
+            self._log_spread_to_csv(spread_info)
+            self._last_spread_log_time = current_time
 
         # 使用智能平仓策略判断 (016-spread-optimize)
         trigger = self.close_strategy.should_close(spread_info)
@@ -1751,6 +1765,7 @@ class SpreadArbBot:
         date_str = datetime.now().strftime("%Y%m%d")
         self._open_csv_path = self._csv_log_dir / f"open_trades_{date_str}.csv"
         self._close_csv_path = self._csv_log_dir / f"close_trades_{date_str}.csv"
+        self._spread_csv_path = self._csv_log_dir / f"spread_data_{date_str}.csv"
 
         # 初始化开仓CSV文件
         if not self._open_csv_path.exists():
@@ -1772,35 +1787,70 @@ class SpreadArbBot:
                     'profit_pct', 'elapsed_time', 'status'
                 ])
 
-        logger.info(f"CSV日志文件: 开仓={self._open_csv_path}, 平仓={self._close_csv_path}")
+        # 初始化实时价差CSV文件
+        if not self._spread_csv_path.exists():
+            with open(self._spread_csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'state', 'ext_bid', 'ext_ask',
+                    'lig_bid', 'lig_ask', 'spread_abs', 'spread_pct',
+                    'cached_open_spread', 'portfolio_qty', 'total_entry_spread'
+                ])
+
+        logger.info(f"CSV日志文件: 开仓={self._open_csv_path}, 平仓={self._close_csv_path}, 价差={self._spread_csv_path}")
 
     def _log_open_to_csv(self, status: str, ext_pos: Decimal, lig_pos: Decimal,
                          position_diff: Decimal, target_qty: Decimal,
                          elapsed: float, open_spread: Decimal,
                          ext_order_id: str, lig_order_id: str) -> None:
-        """记录开仓结果到CSV"""
+        """记录开仓结果到CSV（异步执行，不阻塞主程序）"""
+        asyncio.create_task(self._log_open_to_csv_async(
+            status, ext_pos, lig_pos, position_diff, target_qty,
+            elapsed, open_spread, ext_order_id, lig_order_id
+        ))
+
+    async def _log_open_to_csv_async(self, status: str, ext_pos: Decimal, lig_pos: Decimal,
+                                     position_diff: Decimal, target_qty: Decimal,
+                                     elapsed: float, open_spread: Decimal,
+                                     ext_order_id: str, lig_order_id: str) -> None:
+        """异步记录开仓结果到CSV"""
+        try:
+            await asyncio.to_thread(self._write_open_to_csv_file,
+                datetime.now().isoformat(),
+                status,
+                str(ext_pos),
+                str(lig_pos),
+                str(position_diff),
+                str(target_qty),
+                f"{elapsed:.2f}",
+                str(open_spread),
+                ext_order_id or '',
+                lig_order_id or ''
+            )
+        except Exception as e:
+            logger.warning(f"写入开仓CSV失败: {e}")
+
+    def _write_open_to_csv_file(self, *args) -> None:
+        """同步写入开仓CSV文件（在线程池中执行）"""
         try:
             with open(self._open_csv_path, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    datetime.now().isoformat(),
-                    status,
-                    str(ext_pos),
-                    str(lig_pos),
-                    str(position_diff),
-                    str(target_qty),
-                    f"{elapsed:.2f}",
-                    str(open_spread),
-                    ext_order_id or '',
-                    lig_order_id or ''
-                ])
+                writer.writerow(args)
         except Exception as e:
-            logger.warning(f"写入开仓CSV失败: {e}")
+            logger.warning(f"写入开仓CSV文件失败: {e}")
 
     def _log_close_to_csv(self, entry_spread: Decimal, close_spread: Decimal,
                           total_qty: Decimal, profit: Decimal, fees: Decimal,
                           elapsed: float, status: str) -> None:
-        """记录平仓结果到CSV"""
+        """记录平仓结果到CSV（异步执行，不阻塞主程序）"""
+        asyncio.create_task(self._log_close_to_csv_async(
+            entry_spread, close_spread, total_qty, profit, fees, elapsed, status
+        ))
+
+    async def _log_close_to_csv_async(self, entry_spread: Decimal, close_spread: Decimal,
+                                     total_qty: Decimal, profit: Decimal, fees: Decimal,
+                                     elapsed: float, status: str) -> None:
+        """异步记录平仓结果到CSV"""
         try:
             # 计算利润百分比
             if total_qty > 0 and entry_spread > 0:
@@ -1808,21 +1858,65 @@ class SpreadArbBot:
             else:
                 profit_pct = Decimal("0")
 
-            with open(self._close_csv_path, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    datetime.now().isoformat(),
-                    str(entry_spread),
-                    str(close_spread),
-                    str(total_qty),
-                    str(profit),
-                    str(fees),
-                    f"{profit_pct:.2f}%",
-                    f"{elapsed:.2f}",
-                    status
-                ])
+            await asyncio.to_thread(self._write_close_to_csv_file,
+                datetime.now().isoformat(),
+                str(entry_spread),
+                str(close_spread),
+                str(total_qty),
+                str(profit),
+                str(fees),
+                f"{profit_pct:.2f}%",
+                f"{elapsed:.2f}",
+                status
+            )
         except Exception as e:
             logger.warning(f"写入平仓CSV失败: {e}")
+
+    def _write_close_to_csv_file(self, *args) -> None:
+        """同步写入平仓CSV文件（在线程池中执行）"""
+        try:
+            with open(self._close_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(args)
+        except Exception as e:
+            logger.warning(f"写入平仓CSV文件失败: {e}")
+
+    def _log_spread_to_csv(self, spread_info) -> None:
+        """记录实时价差到CSV（异步执行，不阻塞主程序）"""
+        # 在后台线程中执行CSV写入，避免阻塞主循环
+        asyncio.create_task(self._log_spread_to_csv_async(spread_info))
+
+    async def _log_spread_to_csv_async(self, spread_info) -> None:
+        """异步记录实时价差到CSV"""
+        try:
+            portfolio = self.close_strategy.get_portfolio()
+            state = self.state_manager.get_state().value
+
+            # 使用 asyncio.to_thread 在后台线程中执行同步IO操作
+            await asyncio.to_thread(self._write_spread_to_csv_file,
+                datetime.now().isoformat(),
+                state,
+                str(spread_info.ext_bid),
+                str(spread_info.ext_ask),
+                str(spread_info.lig_bid),
+                str(spread_info.lig_ask),
+                str(spread_info.spread_abs),
+                str(spread_info.spread_pct),
+                str(self.config.cached_open_spread),
+                str(portfolio.total_quantity if portfolio else 0),
+                str(portfolio.get_total_entry_spread() if portfolio else 0)
+            )
+        except Exception as e:
+            logger.warning(f"写入价差CSV失败: {e}")
+
+    def _write_spread_to_csv_file(self, *args) -> None:
+        """同步写入CSV文件（在线程池中执行）"""
+        try:
+            with open(self._spread_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(args)
+        except Exception as e:
+            logger.warning(f"写入价差CSV文件失败: {e}")
 
 
 # ========================================================================
