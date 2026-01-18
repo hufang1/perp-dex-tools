@@ -41,6 +41,7 @@ from trade_executor import TradeExecutor, ExecutionResult
 from state_manager import StateManager
 from exceptions import SpreadArbError, SingleSideExecutionError
 from spread_monitor import SpreadMonitor
+from price_monitor import PriceMonitor
 from arithmetic_open_strategy import ArithmeticOpenStrategy
 from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
@@ -73,6 +74,7 @@ class SpreadArbBot:
         # 组件初始化（稍后在 start 方法中完成）
         self.order_book_manager: Optional[OrderBookManager] = None
         self.spread_monitor: Optional[SpreadMonitor] = None
+        self.price_monitor: Optional[PriceMonitor] = None
         self.open_strategy: Optional[ArithmeticOpenStrategy] = None
         self.close_strategy: Optional[SmartCloseStrategy] = None
         self.balance_checker: Optional[PositionBalanceChecker] = None
@@ -1656,6 +1658,16 @@ class SpreadArbBot:
             slippage_buffer=self.config.slippage_buffer
         )
 
+        # 价格监控器 (017-ext-maker-mode)
+        from price_monitor import SpreadConfig as PriceSpreadConfig
+        price_config = PriceSpreadConfig(
+            open_threshold=self.config.fixed_open_threshold,
+            close_threshold=self.config.fixed_close_threshold,
+            monitor_interval=self.config.price_monitor_interval,
+            price_deviation_threshold=1  # 1 tick
+        )
+        self.price_monitor = PriceMonitor(config=price_config)
+
         # 等差数列开仓策略 (016-spread-optimize)
         self.open_strategy = ArithmeticOpenStrategy(self.config)
 
@@ -1794,6 +1806,9 @@ class SpreadArbBot:
                             sequence=0,
                             is_snapshot=True
                         )
+                        # 同时更新 PriceMonitor
+                        if self.price_monitor:
+                            await self.price_monitor.update_ext_orderbook(orderbook)
 
                 # 从 Lighter 客户端获取订单簿
                 if hasattr(self.lighter_client, 'ws_manager') and self.lighter_client.ws_manager:
@@ -1814,6 +1829,13 @@ class SpreadArbBot:
                             sequence=0,
                             is_snapshot=True
                         )
+                        # 同时更新 PriceMonitor
+                        if self.price_monitor:
+                            lighter_orderbook = {
+                                'bids': {str(best_bid_dec): "1.0"},
+                                'asks': {str(best_ask_dec): "1.0"}
+                            }
+                            await self.price_monitor.update_lig_orderbook(lighter_orderbook)
 
             except asyncio.CancelledError:
                 break
