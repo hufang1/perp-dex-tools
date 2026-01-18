@@ -131,25 +131,70 @@ class PositionBalanceMonitor:
 
             account_info = account_data.accounts[0]
 
+            # 打印调试信息
+            logger.debug(f"Lighter account_info类型: {type(account_info)}")
+
             # 提取可用余额（保证金）
-            # 注意：根据SDK的实际字段名称调整
+            # 尝试多种可能的字段名称
             available_balance = Decimal('0')
-            if hasattr(account_info, 'collateral'):
-                available_balance = Decimal(str(account_info.collateral))
-            elif hasattr(account_info, 'balance'):
-                available_balance = Decimal(str(account_info.balance))
-            elif hasattr(account_info, 'total_collateral'):
-                available_balance = Decimal(str(account_info.total_collateral))
+            balance_found = False
+
+            # 优先级顺序：尝试不同的字段名称
+            field_candidates = [
+                'collateral', 'total_collateral', 'collateral_balance',
+                'balance', 'available_balance', 'free_balance',
+                'margin_balance', 'account_balance', 'total_balance',
+                'withdrawable', 'available', 'free',
+                'equity', 'total_equity'
+            ]
+
+            # 尝试从account_info获取
+            for field in field_candidates:
+                if hasattr(account_info, field):
+                    value = getattr(account_info, field)
+                    if value is not None:
+                        try:
+                            available_balance = Decimal(str(value))
+                            balance_found = True
+                            logger.info(f"Lighter余额字段: {field} = {available_balance}")
+                            break
+                        except (ValueError, TypeError):
+                            continue
+
+            # 如果直接字段都没找到，尝试遍历所有属性
+            if not balance_found:
+                for attr_name in dir(account_info):
+                    if not attr_name.startswith('_'):
+                        attr_value = getattr(account_info, attr_name, None)
+                        if attr_value is not None and not callable(attr_value):
+                            # 尝试判断是否是余额相关的字段
+                            attr_lower = attr_name.lower()
+                            if any(keyword in attr_lower for keyword in ['balance', 'collateral', 'margin', 'equity', 'available', 'free']):
+                                try:
+                                    if isinstance(attr_value, (int, float, str)):
+                                        potential_balance = Decimal(str(attr_value))
+                                        if potential_balance > 0:  # 只有大于0的才可能是余额
+                                            available_balance = potential_balance
+                                            balance_found = True
+                                            logger.info(f"Lighter通过遍历找到余额字段: {attr_name} = {available_balance}")
+                                            break
+                                except (ValueError, TypeError):
+                                    continue
+
+            if not balance_found:
+                logger.warning(f"无法找到Lighter余额字段")
+                logger.warning(f"account_info的属性列表: {[attr for attr in dir(account_info) if not attr.startswith('_')]}")
 
             # 计算最大可开仓数量
-            # 最大仓位 = 可用余额 * 杠杆 / 当前价格
-            # 这里简化处理，假设1:1的保证金比例
+            # 最大仓位 = 可用余额 * 杠杆
             max_position = available_balance * self._lighter_leverage
 
             # 如果有当前持仓，计算已使用的保证金
             margin_used = Decimal('0')
             if hasattr(account_info, 'margin_used'):
                 margin_used = Decimal(str(account_info.margin_used))
+            elif hasattr(account_info, 'used_margin'):
+                margin_used = Decimal(str(account_info.used_margin))
 
             return ExchangePositionBalance(
                 exchange="lighter",
@@ -162,7 +207,7 @@ class PositionBalanceMonitor:
             )
 
         except Exception as e:
-            logger.error(f"获取Lighter仓位余额失败: {e}")
+            logger.error(f"获取Lighter仓位余额失败: {e}", exc_info=True)
             return None
 
     async def _get_extended_balance(self) -> Optional[ExchangePositionBalance]:
@@ -180,35 +225,98 @@ class PositionBalanceMonitor:
             # 注意：这里使用SDK的账户API来获取余额信息
             account_info = await self.extended_client.perpetual_trading_client.account.get_account()
 
-            if not account_info or not hasattr(account_info, 'data'):
-                logger.warning("无法获取Extended账户信息")
+            if not account_info:
+                logger.warning(f"Extended账户信息为空，account_info类型: {type(account_info)}")
                 return None
 
-            data = account_info.data
-            if not data:
-                return None
+            # 打印调试信息
+            logger.debug(f"Extended account_info类型: {type(account_info)}")
+            logger.debug(f"Extended account_info属性: {dir(account_info)}")
+
+            # 尝试获取data属性
+            data = None
+            if hasattr(account_info, 'data'):
+                data = account_info.data
+                logger.debug(f"Extended data类型: {type(data)}")
+                logger.debug(f"Extended data属性: {dir(data) if data else 'None'}")
 
             # 提取可用余额（保证金）
-            # 注意：根据SDK的实际字段名称调整
+            # 尝试多种可能的字段名称
             available_balance = Decimal('0')
-            if hasattr(data, 'collateral'):
-                available_balance = Decimal(str(data.collateral))
-            elif hasattr(data, 'balance'):
-                available_balance = Decimal(str(data.balance))
-            elif hasattr(data, 'available_balance'):
-                available_balance = Decimal(str(data.available_balance))
-            elif hasattr(data, 'total_collateral'):
-                available_balance = Decimal(str(data.total_collateral))
+            balance_found = False
+
+            # 优先级顺序：尝试不同的字段名称
+            field_candidates = [
+                'collateral', 'total_collateral', 'collateral_balance',
+                'balance', 'available_balance', 'free_balance',
+                'margin_balance', 'account_balance', 'total_balance',
+                'withdrawable', 'available', 'free'
+            ]
+
+            # 尝试从data对象获取
+            if data:
+                for field in field_candidates:
+                    if hasattr(data, field):
+                        value = getattr(data, field)
+                        if value is not None:
+                            try:
+                                available_balance = Decimal(str(value))
+                                balance_found = True
+                                logger.info(f"Extended余额字段: {field} = {available_balance}")
+                                break
+                            except (ValueError, TypeError):
+                                continue
+
+                # 如果直接字段都没找到，尝试遍历所有属性
+                if not balance_found:
+                    for attr_name in dir(data):
+                        if not attr_name.startswith('_'):
+                            attr_value = getattr(data, attr_name, None)
+                            if attr_value is not None and not callable(attr_value):
+                                # 尝试判断是否是余额相关的字段
+                                attr_lower = attr_name.lower()
+                                if any(keyword in attr_lower for keyword in ['balance', 'collateral', 'margin', 'equity', 'available', 'free']):
+                                    try:
+                                        # 跳过已经是 Decimal 的值
+                                        if isinstance(attr_value, (int, float, str)):
+                                            potential_balance = Decimal(str(attr_value))
+                                            if potential_balance > 0:  # 只有大于0的才可能是余额
+                                                available_balance = potential_balance
+                                                balance_found = True
+                                                logger.info(f"Extended通过遍历找到余额字段: {attr_name} = {available_balance}")
+                                                break
+                                    except (ValueError, TypeError):
+                                        continue
+
+            # 尝试从account_info直接获取
+            if not balance_found:
+                for field in field_candidates:
+                    if hasattr(account_info, field):
+                        value = getattr(account_info, field)
+                        if value is not None:
+                            try:
+                                available_balance = Decimal(str(value))
+                                balance_found = True
+                                logger.info(f"Extended从account_info获取余额字段: {field} = {available_balance}")
+                                break
+                            except (ValueError, TypeError):
+                                continue
+
+            if not balance_found:
+                logger.warning(f"无法找到Extended余额字段，data类型: {type(data)}")
+                logger.warning(f"data的属性列表: {[attr for attr in dir(data) if not attr.startswith('_')] if data else 'None'}")
 
             # 计算最大可开仓数量
-            # 最大仓位 = 可用余额 * 杠杆 / 当前价格
-            # 这里简化处理，假设1:1的保证金比例
+            # 最大仓位 = 可用余额 * 杠杆
             max_position = available_balance * self._extended_leverage
 
             # 如果有当前持仓，计算已使用的保证金
             margin_used = Decimal('0')
-            if hasattr(data, 'margin_used'):
-                margin_used = Decimal(str(data.margin_used))
+            if data:
+                if hasattr(data, 'margin_used'):
+                    margin_used = Decimal(str(data.margin_used))
+                elif hasattr(data, 'used_margin'):
+                    margin_used = Decimal(str(data.used_margin))
 
             return ExchangePositionBalance(
                 exchange="extended",
@@ -221,7 +329,7 @@ class PositionBalanceMonitor:
             )
 
         except Exception as e:
-            logger.error(f"获取Extended仓位余额失败: {e}")
+            logger.error(f"获取Extended仓位余额失败: {e}", exc_info=True)
             return None
 
     async def can_open_position(self, quantity: Decimal) -> tuple[bool, str]:
