@@ -234,15 +234,17 @@ class MakerOrderMonitor:
                 self.on_order_filled(self._order)
 
         # Partially filled callback
-        elif self._order.is_partially_filled and new_fill := (self._order.filled_quantity - old_filled):
-            logger.info(
-                f"✅ Maker订单部分成交: {self._order.order_id} | "
-                f"新增成交: {new_fill} | "
-                f"累计成交: {self._order.filled_quantity}/{self._order.quantity} | "
-                f"成交均价: {self._order.avg_fill_price}"
-            )
-            if self.on_order_partially_filled:
-                self.on_order_partially_filled(self._order)
+        elif self._order.is_partially_filled:
+            new_fill = self._order.filled_quantity - old_filled
+            if new_fill > 0:
+                logger.info(
+                    f"✅ Maker订单部分成交: {self._order.order_id} | "
+                    f"新增成交: {new_fill} | "
+                    f"累计成交: {self._order.filled_quantity}/{self._order.quantity} | "
+                    f"成交均价: {self._order.avg_fill_price}"
+                )
+                if self.on_order_partially_filled:
+                    self.on_order_partially_filled(self._order)
 
         # Canceled callback
         elif self._order.is_canceled and old_status not in ['CANCELED', 'CANCELLED']:

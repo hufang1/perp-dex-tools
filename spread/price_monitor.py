@@ -331,9 +331,9 @@ class PriceMonitor:
         #     f"快照有效: {self.current_snapshot.is_valid()} | "
         #     f"ext_bid: {self.current_snapshot.ext_bid:.2f} | "
         #     f"ext_ask: {self.current_snapshot.ext_ask:.2f} | "
-        #     f"tick_size: {self._tick_size}"
+        #     f"tick_size: {self._tick_size}" 
         # )
-
+  
         if not self.current_snapshot.is_valid():
             print(f"❌ 快照无效，跳过价格检查")
             return False
