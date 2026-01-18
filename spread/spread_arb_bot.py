@@ -1745,9 +1745,10 @@ class SpreadArbBot:
         state = await self.state_manager.load_state()
         logger.debug(f"当前状态: {state.value}")
 
-        # 程序重启后，如果是OPENING、OPENING_WAIT、CLOSING、CLOSING_WAIT状态，重置为IDLE
+        # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
-        if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.CLOSING, BotState.CLOSING_WAIT]:
+        if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
+                     BotState.CLOSING, BotState.CLOSING_WAIT, BotState.CLOSING_MAKER_WAIT]:
             logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
             self.state_manager.set_state(BotState.IDLE, "程序重启，重置未完成的交易状态")
             await self.state_manager.save_state()
@@ -1874,9 +1875,9 @@ class SpreadArbBot:
     # 私有方法：订单处理（WebSocket 订单监控）
     # ========================================================================
 
-    async def _handle_extended_order_update(self, order_data: Dict) -> None:
+    def _handle_extended_order_update(self, order_data: Dict) -> None:
         """
-        处理 Extended WebSocket 订单更新
+        处理 Extended WebSocket 订单更新（同步函数，由 WebSocket 回调调用）
 
         Args:
             order_data: 订单数据字典，包含：
@@ -1898,8 +1899,8 @@ class SpreadArbBot:
                 'filledQty': order_data.get('filled_size', '0')
             }
 
-            # 传递给监控器处理
-            await self.maker_order_monitor.handle_order_update(monitor_order_data)
+            # 使用 create_task 异步处理，避免阻塞 WebSocket 回调
+            asyncio.create_task(self.maker_order_monitor.handle_order_update(monitor_order_data))
 
         except Exception as e:
             logger.error(f"处理订单更新异常: {e}")
