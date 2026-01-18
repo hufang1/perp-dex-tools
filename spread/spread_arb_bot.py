@@ -2059,6 +2059,21 @@ class SpreadArbBot:
             return
 
         try:
+            # ========== 监控日志：实时价差和订单簿BBO ==========
+            spread_info = self.spread_monitor.get_current_spread()
+            if spread_info and spread_info.is_valid():
+                # 获取Extended订单簿BBO价格
+                ext_bid, ext_ask = await self.extended_client.fetch_bbo_prices(
+                    self.extended_client.config.contract_id
+                )
+
+                # 输出监控日志（每秒一次）
+                print(
+                    f"📊 状态「开仓挂单等待成交」 | "
+                    f"实时价差{spread_info.spread_pct:.3%} | "
+                    f"ext_bid={ext_bid:.2f} ext_ask={ext_ask:.2f}"
+                )
+
             # 检查订单状态（通过查询API或WebSocket更新）
             order_id = self._maker_wait_state.current_order.order_id
             order_info = await self.trade_executor.get_extended_order_info(order_id)
@@ -2072,7 +2087,6 @@ class SpreadArbBot:
             self._maker_wait_state.current_order.filled_quantity = order_info['filled_size']
 
             # 检查价差保护
-            spread_info = self.spread_monitor.get_current_spread()
             if spread_info and spread_info.is_valid():
                 if spread_info.spread_pct < self.config.fixed_open_threshold:
                     # 价差不满足条件，取消订单
