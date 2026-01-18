@@ -162,7 +162,7 @@ class PriceMonitor:
             if bids:
                 # Lighter uses dict format: {price: quantity}
                 best_bid_price = max(bids.keys(), key=lambda x: Decimal(x))
-                ext_bid = Decimal(best_bid_price)
+                lig_bid = Decimal(best_bid_price)  # 修复：应该是 lig_bid
             if asks:
                 best_ask_price = min(asks.keys(), key=lambda x: Decimal(x))
                 lig_ask = Decimal(best_ask_price)
@@ -321,7 +321,20 @@ class PriceMonitor:
         Returns:
             True if price has deviated beyond threshold, False otherwise
         """
+        # 调试：检查快照是否有效
+        print(
+            f"🔍 价格偏离检查入口 | "
+            f"订单: {order_id[:8]} | "
+            f"方向: {order_side} | "
+            f"挂单价: {order_price:.2f} | "
+            f"快照有效: {self.current_snapshot.is_valid()} | "
+            f"ext_bid: {self.current_snapshot.ext_bid:.2f} | "
+            f"ext_ask: {self.current_snapshot.ext_ask:.2f} | "
+            f"tick_size: {self._tick_size}"
+        )
+
         if not self.current_snapshot.is_valid():
+            print(f"❌ 快照无效，跳过价格检查")
             return False
 
         deviation_threshold = self._tick_size * self.config.price_deviation_threshold
