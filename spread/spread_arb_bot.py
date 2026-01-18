@@ -2426,9 +2426,9 @@ def parse_arguments() -> BotConfig:
     parser.add_argument(
         "--spread-threshold",
         type=Decimal,
-        default=Decimal("0.0005"),
+        default=Decimal("0.0004"),
         dest="min_spread_threshold",
-        help="最小价差阈值 (默认: 0.002 = 0.05%%)"
+        help="最小价差阈值 (默认: 0.002 = 0.04%%)"
     )
 
     parser.add_argument(

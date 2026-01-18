@@ -261,7 +261,7 @@ class BotConfig:
     # 交易参数
     symbol: str = "ETH"                                    # 交易对
     target_quantity: Decimal = Decimal("0.01")             # 目标交易数量
-    min_spread_threshold: Decimal = Decimal("0.0005")       # 最小价差阈值 0.2%
+    min_spread_threshold: Decimal = Decimal("0.0004")       # 最小价差阈值 0.2%
 
     # 风控参数
     slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护 0.05%
