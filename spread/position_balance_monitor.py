@@ -13,7 +13,7 @@
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
 
 from models import PositionBalanceSnapshot, ExchangePositionBalance
@@ -117,7 +117,6 @@ class PositionBalanceMonitor:
             current_position = await self.lighter_client.get_account_positions()
 
             # 获取账户信息（包含保证金余额）
-            # 注意：这里使用SDK的账户API来获取余额信息
             from lighter import AccountApi
             account_api = AccountApi(self.lighter_client.api_client)
             account_data = await account_api.account(
@@ -131,15 +130,17 @@ class PositionBalanceMonitor:
 
             account_info = account_data.accounts[0]
 
-            # 打印调试信息
-            logger.debug(f"Lighter account_info类型: {type(account_info)}")
+            # 打印调试信息（临时）
+            print(f"[DEBUG] Lighter account_info类型: {type(account_info)}")
+            print(f"[DEBUG] Lighter account_info值: {account_info}")
+            if hasattr(account_info, '__dict__'):
+                print(f"[DEBUG] Lighter account_info.__dict__: {account_info.__dict__}")
 
-            # 提取可用余额（保证金）
-            # 尝试多种可能的字段名称
-            available_balance = Decimal('0')
+            # 提取总余额（保证金）
+            total_balance = Decimal('0')
             balance_found = False
 
-            # 优先级顺序：尝试不同的字段名称
+            # 尝试不同的字段名称
             field_candidates = [
                 'collateral', 'total_collateral', 'collateral_balance',
                 'balance', 'available_balance', 'free_balance',
@@ -148,53 +149,33 @@ class PositionBalanceMonitor:
                 'equity', 'total_equity'
             ]
 
-            # 尝试从account_info获取
             for field in field_candidates:
                 if hasattr(account_info, field):
                     value = getattr(account_info, field)
                     if value is not None:
                         try:
-                            available_balance = Decimal(str(value))
+                            total_balance = Decimal(str(value))
                             balance_found = True
-                            logger.info(f"Lighter余额字段: {field} = {available_balance}")
                             break
                         except (ValueError, TypeError):
                             continue
 
-            # 如果直接字段都没找到，尝试遍历所有属性
-            if not balance_found:
-                for attr_name in dir(account_info):
-                    if not attr_name.startswith('_'):
-                        attr_value = getattr(account_info, attr_name, None)
-                        if attr_value is not None and not callable(attr_value):
-                            # 尝试判断是否是余额相关的字段
-                            attr_lower = attr_name.lower()
-                            if any(keyword in attr_lower for keyword in ['balance', 'collateral', 'margin', 'equity', 'available', 'free']):
-                                try:
-                                    if isinstance(attr_value, (int, float, str)):
-                                        potential_balance = Decimal(str(attr_value))
-                                        if potential_balance > 0:  # 只有大于0的才可能是余额
-                                            available_balance = potential_balance
-                                            balance_found = True
-                                            logger.info(f"Lighter通过遍历找到余额字段: {attr_name} = {available_balance}")
-                                            break
-                                except (ValueError, TypeError):
-                                    continue
-
             if not balance_found:
                 logger.warning(f"无法找到Lighter余额字段")
-                logger.warning(f"account_info的属性列表: {[attr for attr in dir(account_info) if not attr.startswith('_')]}")
+                return None
 
-            # 计算最大可开仓数量
-            # 最大仓位 = 可用余额 * 杠杆
+            # 计算已使用的保证金
+            # 已使用保证金 = 当前持仓数量 * 当前价格 / 杠杆
+            # 这里简化计算：假设持仓的保证金价值 ≈ 持仓数量 / 杠杆
+            margin_used = current_position / self._lighter_leverage
+
+            # 可用余额 = 总余额 - 已使用保证金
+            available_balance = total_balance - margin_used
+            if available_balance < 0:
+                available_balance = Decimal('0')
+
+            # 最大可开仓数量 = 可用余额 * 杠杆
             max_position = available_balance * self._lighter_leverage
-
-            # 如果有当前持仓，计算已使用的保证金
-            margin_used = Decimal('0')
-            if hasattr(account_info, 'margin_used'):
-                margin_used = Decimal(str(account_info.margin_used))
-            elif hasattr(account_info, 'used_margin'):
-                margin_used = Decimal(str(account_info.used_margin))
 
             return ExchangePositionBalance(
                 exchange="lighter",
@@ -221,76 +202,28 @@ class PositionBalanceMonitor:
             # 获取当前持仓
             current_position = await self.extended_client.get_account_positions()
 
-            # 尝试方法1：使用REST API获取账户余额
             available_balance = Decimal('0')
             balance_found = False
 
-            try:
-                # Extended REST API endpoint for account info
-                url = "https://api.starknet.extended.exchange/api/v1/perp/account"
-                headers = {"X-Api-Key": self.extended_client.api_key}
+            # 使用SDK的get_balance方法
+            account = self.extended_client.perpetual_trading_client.account
+            if hasattr(account, 'get_balance') and callable(getattr(account, 'get_balance')):
+                result = await account.get_balance()
 
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, headers=headers) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            print(f"[DEBUG] Extended REST API响应: {data}")
+                if result and hasattr(result, 'data') and result.data:
+                    balance_model = result.data
+                    # 使用 available_for_trade（可用于交易的余额）
+                    if hasattr(balance_model, 'available_for_trade'):
+                        available_balance = balance_model.available_for_trade
+                        balance_found = True
+                    elif hasattr(balance_model, 'balance'):
+                        available_balance = balance_model.balance
+                        balance_found = True
 
-                            if data.get("status") == "OK" and data.get("data"):
-                                account_data = data["data"]
-
-                                # 尝试不同的字段名称
-                                for field in ['collateral', 'balance', 'availableBalance',
-                                              'available_balance', 'free_balance', 'total_balance',
-                                              'margin_balance', 'accountBalance', 'account_balance',
-                                              'collateralBalance', 'collateral_balance']:
-                                    if field in account_data and account_data[field] is not None:
-                                        try:
-                                            available_balance = Decimal(str(account_data[field]))
-                                            balance_found = True
-                                            print(f"[INFO] Extended从REST API获取余额字段: {field} = {available_balance}")
-                                            break
-                                        except (ValueError, TypeError):
-                                            continue
-
-                                # 如果还没找到，打印所有字段
-                                if not balance_found:
-                                    print(f"[WARNING] Extended REST API返回的字段: {list(account_data.keys())}")
-            except Exception as e:
-                print(f"[DEBUG] Extended REST API请求失败: {e}")
-
-            # 尝试方法2：使用SDK的get_balance方法
             if not balance_found:
-                try:
-                    account = self.extended_client.perpetual_trading_client.account
-                    # 调用get_balance方法
-                    if hasattr(account, 'get_balance') and callable(getattr(account, 'get_balance')):
-                        result = await account.get_balance()
-                        print(f"[DEBUG] Extended调用get_balance结果: {result}")
+                logger.warning("无法获取Extended余额信息")
 
-                        if result and hasattr(result, 'data') and result.data:
-                            balance_model = result.data
-                            # BalanceModel对象有以下字段：
-                            # - balance: 总余额
-                            # - available_for_trade: 可用于交易的余额
-                            # - available_for_withdrawal: 可提取的余额
-                            # 使用 available_for_trade 因为这是真正可以开新仓的资金
-                            if hasattr(balance_model, 'available_for_trade'):
-                                available_balance = balance_model.available_for_trade
-                                balance_found = True
-                                print(f"[INFO] Extended从get_balance获取available_for_trade: {available_balance}")
-                            elif hasattr(balance_model, 'balance'):
-                                available_balance = balance_model.balance
-                                balance_found = True
-                                print(f"[INFO] Extended从get_balance获取balance: {available_balance}")
-                except Exception as e:
-                    print(f"[DEBUG] Extended SDK方法调用失败: {e}")
-                    import traceback
-                    traceback.print_exc()
-
-            # 计算最大可开仓数量
-            # 最大仓位 = 可用余额 * 杠杆
+            # 最大可开仓数量 = 可用余额 * 杠杆
             max_position = available_balance * self._extended_leverage
 
             return ExchangePositionBalance(
@@ -304,9 +237,7 @@ class PositionBalanceMonitor:
             )
 
         except Exception as e:
-            print(f"[ERROR] 获取Extended仓位余额失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"获取Extended仓位余额失败: {e}", exc_info=True)
             return None
 
     async def can_open_position(self, quantity: Decimal) -> tuple[bool, str]:
