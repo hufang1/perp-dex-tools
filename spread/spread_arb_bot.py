@@ -2392,11 +2392,15 @@ class SpreadArbBot:
                     if lighter_ask:
                         lighter_ask_dec = Decimal(str(lighter_ask))
 
+                        # 计算价差率（百分比）
+                        spread_abs = lighter_ask_dec - ext_filled_price
+                        spread_ratio = (spread_abs / ext_filled_price * 100) if ext_filled_price > 0 else Decimal("0")
+
                         print(
                             f"🔍 风控检查 | "
                             f"Ext买入价: {ext_filled_price:.2f} | "
                             f"Lig卖出价: {lighter_ask_dec:.2f} | "
-                            f"价差: {lighter_ask_dec - ext_filled_price:.2f}"
+                            f"价差: {spread_abs:.2f} ({spread_ratio:+.4f}%)"
                         )
 
                         if lighter_ask_dec <= ext_filled_price:
