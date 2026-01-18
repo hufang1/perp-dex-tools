@@ -47,6 +47,7 @@ from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
 from maker_order_monitor import MakerOrderMonitor
 from models import MakerOrder
+from position_balance_monitor import PositionBalanceMonitor
 
 # 设置日志（输出 INFO 及以上级别）
 logging.basicConfig(
@@ -1737,6 +1738,13 @@ class SpreadArbBot:
         self.maker_order_monitor.on_order_partially_filled = self._on_maker_order_partially_filled
         self.maker_order_monitor.on_order_canceled = self._on_maker_order_canceled
 
+        # 仓位余额监控器（用于风控）
+        self.position_balance_monitor = PositionBalanceMonitor(
+            self.lighter_client,
+            self.extended_client,
+            self.config
+        )
+
         logger.debug("组件初始化完成")
 
     async def _load_state(self) -> None:
@@ -2359,11 +2367,21 @@ class SpreadArbBot:
                     self.extended_client.config.contract_id
                 )
 
+                # 获取仓位余额信息（用于风控显示）
+                balance_log = ""
+                try:
+                    balance_snapshot = await self.position_balance_monitor.get_position_balance()
+                    if balance_snapshot.is_valid():
+                        balance_log = f" | {balance_snapshot.format_compact_log()}"
+                except Exception as e:
+                    logger.debug(f"获取仓位余额失败: {e}")
+
                 # 输出监控日志（每秒一次）
                 print(
                     f"📊 状态「开仓挂单等待成交」 | "
                     f"实时价差{spread_info.spread_pct:.3%} | "
                     f"ext_bid={ext_bid:.2f} ext_ask={ext_ask:.2f}"
+                    f"{balance_log}"
                 )
 
             # ========== 订单成交/取消由 WebSocket 处理，主循环不再检测 ==========

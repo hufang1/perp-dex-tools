@@ -946,3 +946,86 @@ class SpreadConfig:
             self.spread_monitor_interval > 0 and
             self.max_reposition_count > 0
         )
+
+
+# ========== 新增数据类 (仓位监控) ==========
+
+@dataclass
+class ExchangePositionBalance:
+    """
+    单个交易所的仓位余额信息
+
+    Attributes:
+        exchange: 交易所名称 ("lighter" 或 "extended")
+        current_position: 当前持仓数量（绝对值）
+        available_balance: 可用余额（保证金）
+        max_position: 最大可开仓数量（基于可用余额和杠杆）
+        leverage: 杠杆倍数
+        margin_used: 已使用保证金
+        timestamp: 查询时间戳
+    """
+    exchange: str
+    current_position: Decimal = field(default_factory=lambda: Decimal('0'))
+    available_balance: Decimal = field(default_factory=lambda: Decimal('0'))
+    max_position: Decimal = field(default_factory=lambda: Decimal('0'))
+    leverage: Decimal = field(default_factory=lambda: Decimal('1'))
+    margin_used: Decimal = field(default_factory=lambda: Decimal('0'))
+    timestamp: float = field(default_factory=lambda: __import__('time').time())
+
+    @property
+    def remaining_capacity(self) -> Decimal:
+        """剩余可开仓量"""
+        return max(Decimal('0'), self.max_position - self.current_position)
+
+    @property
+    def utilization_rate(self) -> Decimal:
+        """仓位利用率"""
+        if self.max_position > 0:
+            return self.current_position / self.max_position
+        return Decimal('0')
+
+    def format_log(self) -> str:
+        """格式化为日志字符串"""
+        exchange_name = "Lig" if self.exchange == "lighter" else "Ext"
+        return (
+            f"{exchange_name}: "
+            f"持仓={self.current_position:.4f} | "
+            f"可用={self.available_balance:.2f} | "
+            f"最大={self.max_position:.4f} | "
+            f"剩余={self.remaining_capacity:.4f}"
+        )
+
+
+@dataclass
+class PositionBalanceSnapshot:
+    """
+    仓位余额快照（包含两个交易所的完整信息）
+
+    Attributes:
+        lighter: Lighter交易所仓位余额
+        extended: Extended交易所仓位余额
+        timestamp: 快照时间戳
+    """
+    lighter: Optional[ExchangePositionBalance] = None
+    extended: Optional[ExchangePositionBalance] = None
+    timestamp: float = field(default_factory=lambda: __import__('time').time())
+
+    def is_valid(self) -> bool:
+        """检查快照是否有效"""
+        return self.lighter is not None and self.extended is not None
+
+    def format_log(self) -> str:
+        """格式化为单行日志字符串"""
+        if not self.is_valid:
+            return "仓位余额: 数据获取中..."
+        return (
+            f"📊 仓位余额 | {self.lighter.format_log()} | {self.extended.format_log()}"
+        )
+
+    def format_compact_log(self) -> str:
+        """格式化为紧凑日志字符串（用于状态栏）"""
+        if not self.is_valid:
+            return "Lig: - | Ext: -"
+        lig_rem = self.lighter.remaining_capacity
+        ext_rem = self.extended.remaining_capacity
+        return f"Lig剩余={lig_rem:.4f} | Ext剩余={ext_rem:.4f}"
