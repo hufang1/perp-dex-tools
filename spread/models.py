@@ -348,7 +348,7 @@ class BotConfig:
     - 替代原有的阶梯式等差数列策略
     """
 
-    fixed_close_threshold: Decimal = field(default_factory=lambda: Decimal("0.0006"))
+    fixed_close_threshold: Decimal = field(default_factory=lambda: Decimal("0.0003"))
     """
     固定平仓阈值（Maker模式使用）
     - 默认0.06% = 0.0006
