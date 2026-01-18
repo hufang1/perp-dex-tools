@@ -323,16 +323,16 @@ class PriceMonitor:
         """
         # 调试：检查快照是否有效
         order_id_str = str(order_id)
-        print(
-            f"🔍 价格偏离检查入口 | "
-            f"订单: {order_id_str[:8]} | "
-            f"方向: {order_side} | "
-            f"挂单价: {order_price:.2f} | "
-            f"快照有效: {self.current_snapshot.is_valid()} | "
-            f"ext_bid: {self.current_snapshot.ext_bid:.2f} | "
-            f"ext_ask: {self.current_snapshot.ext_ask:.2f} | "
-            f"tick_size: {self._tick_size}"
-        )
+        # print(
+        #     f"🔍 价格偏离检查入口 | "
+        #     f"订单: {order_id_str[:8]} | "
+        #     f"方向: {order_side} | "
+        #     f"挂单价: {order_price:.2f} | "
+        #     f"快照有效: {self.current_snapshot.is_valid()} | "
+        #     f"ext_bid: {self.current_snapshot.ext_bid:.2f} | "
+        #     f"ext_ask: {self.current_snapshot.ext_ask:.2f} | "
+        #     f"tick_size: {self._tick_size}"
+        # )
 
         if not self.current_snapshot.is_valid():
             print(f"❌ 快照无效，跳过价格检查")
