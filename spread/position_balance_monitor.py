@@ -130,51 +130,32 @@ class PositionBalanceMonitor:
 
             account_info = account_data.accounts[0]
 
-            # 打印调试信息（临时）
-            print(f"[DEBUG] Lighter account_info类型: {type(account_info)}")
-            print(f"[DEBUG] Lighter account_info值: {account_info}")
-            if hasattr(account_info, '__dict__'):
-                print(f"[DEBUG] Lighter account_info.__dict__: {account_info.__dict__}")
+            # 从数据结构看，Lighter返回的数据包含：
+            # - total_asset_value: 总资产价值（保证金）
+            # - positions: 持仓列表，每个持仓有 allocated_margin（已分配保证金）
+            # - additional_properties.assets: 资产列表（LIT、USDC等）
 
-            # 提取总余额（保证金）
+            # 获取总资产价值作为总保证金
             total_balance = Decimal('0')
-            balance_found = False
+            if hasattr(account_info, 'total_asset_value'):
+                total_balance = Decimal(str(account_info.total_asset_value))
 
-            # 尝试不同的字段名称
-            field_candidates = [
-                'collateral', 'total_collateral', 'collateral_balance',
-                'balance', 'available_balance', 'free_balance',
-                'margin_balance', 'account_balance', 'total_balance',
-                'withdrawable', 'available', 'free',
-                'equity', 'total_equity'
-            ]
-
-            for field in field_candidates:
-                if hasattr(account_info, field):
-                    value = getattr(account_info, field)
-                    if value is not None:
+            # 计算已使用的保证金（所有持仓的allocated_margin之和）
+            margin_used = Decimal('0')
+            if hasattr(account_info, 'positions'):
+                for pos in account_info.positions:
+                    if hasattr(pos, 'allocated_margin'):
                         try:
-                            total_balance = Decimal(str(value))
-                            balance_found = True
-                            break
+                            margin_used += Decimal(str(pos.allocated_margin))
                         except (ValueError, TypeError):
                             continue
 
-            if not balance_found:
-                logger.warning(f"无法找到Lighter余额字段")
-                return None
-
-            # 计算已使用的保证金
-            # 已使用保证金 = 当前持仓数量 * 当前价格 / 杠杆
-            # 这里简化计算：假设持仓的保证金价值 ≈ 持仓数量 / 杠杆
-            margin_used = current_position / self._lighter_leverage
-
-            # 可用余额 = 总余额 - 已使用保证金
+            # 可用保证金 = 总资产价值 - 已分配保证金
             available_balance = total_balance - margin_used
             if available_balance < 0:
                 available_balance = Decimal('0')
 
-            # 最大可开仓数量 = 可用余额 * 杠杆
+            # 最大可开仓数量 = 可用保证金 * 杠杆
             max_position = available_balance * self._lighter_leverage
 
             return ExchangePositionBalance(
