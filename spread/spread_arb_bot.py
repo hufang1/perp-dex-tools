@@ -2116,6 +2116,64 @@ class SpreadArbBot:
             self._maker_wait_state.current_order.status = order_info['status']
             self._maker_wait_state.current_order.filled_quantity = order_info['filled_size']
 
+            # ========== 优先检查订单状态（订单成交 > 价格偏离） ==========
+
+            # 检查订单状态 - 如果已成交或部分成交，直接进入对冲流程
+            if order_info['status'] == 'FILLED':
+                # 完全成交
+                print(
+                    f"✅ Extended Maker订单完全成交 | "
+                    f"order_id={order_id} | "
+                    f"filled_qty={order_info['filled_size']}"
+                )
+                logger.info(
+                    f"✅ Extended Maker订单完全成交 | "
+                    f"order_id={order_id} | "
+                    f"filled_qty={order_info['filled_size']}"
+                )
+                # 进入LIGHTER_HEDGING状态
+                if not hasattr(self, '_hedging_state'):
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = order_info['filled_size']
+                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
+                self._hedging_state.start_time = datetime.now()
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "Extended完全成交，开始Lighter对冲")
+                await self.state_manager.save_state()
+                return
+
+            elif order_info['status'] == 'PARTIALLY_FILLED':
+                # 部分成交
+                filled_qty = order_info['filled_size']
+                print(
+                    f"✅ Extended Maker订单部分成交 | "
+                    f"order_id={order_id} | "
+                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
+                )
+                logger.info(
+                    f"✅ Extended Maker订单部分成交 | "
+                    f"order_id={order_id} | "
+                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
+                )
+                # 进入LIGHTER_HEDGING状态对冲已成交部分
+                if not hasattr(self, '_hedging_state'):
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = filled_qty
+                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
+                self._hedging_state.start_time = datetime.now()
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{filled_qty}，开始Lighter对冲")
+                await self.state_manager.save_state()
+                return
+
+            elif order_info['status'] == 'CANCELED':
+                # 订单已取消
+                logger.warning(f"❌ Extended Maker订单已取消: {order_id}")
+                self.state_manager.set_state(BotState.IDLE, "订单已取消")
+                self._maker_wait_state.reset()
+                await self.state_manager.save_state()
+                return
+
+            # ========== 订单未成交，继续检查 ==========
+
             # 检查价差保护
             if spread_info and spread_info.is_valid():
                 if spread_info.spread_pct < self.config.fixed_open_threshold:
@@ -2134,7 +2192,7 @@ class SpreadArbBot:
                     await self.state_manager.save_state()
                     return
 
-            # 检查价格偏离
+            # 检查价格偏离（只对未成交的订单进行）
             price_deviated = await self.price_monitor.check_and_notify_price_deviation(
                 order_side=self._maker_wait_state.current_order.side,
                 order_price=self._maker_wait_state.current_order.price,
@@ -2159,50 +2217,6 @@ class SpreadArbBot:
             else:
                 # 价格未偏离，无需重挂
                 pass
-
-            # 检查订单状态
-            if order_info['status'] == 'FILLED':
-                # 完全成交
-                logger.info(
-                    f"✅ Extended Maker订单完全成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={order_info['filled_size']}"
-                )
-                # 进入LIGHTER_HEDGING状态
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order_info['filled_size']
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "Extended完全成交，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'PARTIALLY_FILLED':
-                # 部分成交
-                filled_qty = order_info['filled_size']
-                logger.info(
-                    f"✅ Extended Maker订单部分成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
-                )
-                # 进入LIGHTER_HEDGING状态对冲已成交部分
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = filled_qty
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{filled_qty}，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'CANCELED':
-                # 订单已取消
-                logger.warning(f"❌ Extended Maker订单已取消: {order_id}")
-                self.state_manager.set_state(BotState.IDLE, "订单已取消")
-                self._maker_wait_state.reset()
-                await self.state_manager.save_state()
-                return
 
             # 检查超时
             elapsed = (datetime.now() - self._maker_wait_state.start_time).total_seconds()
@@ -2365,6 +2379,46 @@ class SpreadArbBot:
                 f"quantity={ext_filled_qty} | "
                 f"ext_price={ext_filled_price}"
             )
+
+            # ========== 风控检查：Lighter价格是否不利 ==========
+            if is_opening:
+                # 开仓场景：Extended买入，Lighter卖出
+                # 检查：Lighter卖出价应该 > Extended买入价（才能盈利）
+                # 如果 Lighter卖出价 <= Extended买入价，跳过Lighter开仓
+
+                # 获取当前Lighter的卖出价
+                if hasattr(self.lighter_client, 'ws_manager') and self.lighter_client.ws_manager:
+                    lighter_ask = self.lighter_client.ws_manager.best_ask
+                    if lighter_ask:
+                        lighter_ask_dec = Decimal(str(lighter_ask))
+
+                        print(
+                            f"🔍 风控检查 | "
+                            f"Ext买入价: {ext_filled_price:.2f} | "
+                            f"Lig卖出价: {lighter_ask_dec:.2f} | "
+                            f"价差: {lighter_ask_dec - ext_filled_price:.2f}"
+                        )
+
+                        if lighter_ask_dec <= ext_filled_price:
+                            # Lighter价格不利，跳过开仓
+                            print(
+                                f"⚠️ 风控触发：Lig卖出价({lighter_ask_dec:.2f}) <= Ext买入价({ext_filled_price:.2f})，"
+                                f"跳过Lighter开仓，直接进入验证阶段"
+                            )
+                            logger.warning(
+                                f"⚠️ 风控触发：Lig卖出价({lighter_ask_dec:.2f}) <= Ext买入价({ext_filled_price:.2f})，"
+                                f"跳过Lighter开仓，直接进入验证阶段"
+                            )
+
+                            # 直接进入OPENING_WAIT状态
+                            import time
+                            self._opening_wait_start_time = time.time()
+                            self.state_manager.set_state(
+                                BotState.OPENING_WAIT,
+                                f"风控触发跳过Lighter开仓，验证仓位（可能不平衡）"
+                            )
+                            await self.state_manager.save_state()
+                            return
 
             # 执行Lighter对冲
             result = await self.trade_executor.execute_lighter_hedge(
