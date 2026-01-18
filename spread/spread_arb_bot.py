@@ -2492,33 +2492,57 @@ class SpreadArbBot:
         old_order = self._maker_wait_state.current_order
 
         try:
-            # 1. 取消旧订单
+            # 1. 在取消订单之前，先获取订单状态（包括已成交数量）
+            order_info = await self.trade_executor.get_extended_order_info(old_order.order_id)
+
+            filled_qty = Decimal('0')
+            if order_info and 'filled_size' in order_info:
+                # 确保 filled_size 是 Decimal 类型
+                filled_size = order_info['filled_size']
+                if isinstance(filled_size, str):
+                    filled_qty = Decimal(filled_size)
+                elif isinstance(filled_size, (int, float)):
+                    filled_qty = Decimal(str(filled_size))
+                else:
+                    filled_qty = Decimal(filled_size) if filled_size else Decimal('0')
+
+            print(
+                f"🔄 订单状态查询 | "
+                f"原订单数量: {old_order.quantity} | "
+                f"已成交数量: {filled_qty} | "
+                f"剩余数量: {old_order.quantity - filled_qty}"
+            )
+
+            # 2. 取消旧订单
             cancel_result = await self.trade_executor.cancel_extended_maker_order(old_order.order_id)
             if not cancel_result:
                 logger.error(f"取消订单失败: {old_order.order_id}")
                 return
 
-            # 2. 获取订单最新状态以处理部分成交
-            order_info = await self.trade_executor.get_extended_order_info(old_order.order_id)
-            if order_info:
-                filled_qty = order_info.get('filled_size', Decimal('0'))
-                remaining_qty = old_order.quantity - filled_qty
-            else:
-                # 如果无法获取订单信息，使用原订单的filled_quantity
-                remaining_qty = old_order.remaining_quantity
+            # 3. 计算剩余数量（使用原订单数量和已成交数量）
+            remaining_qty = old_order.quantity - filled_qty
+
+            print(
+                f"🔄 准备重挂订单 | "
+                f"原订单数量: {old_order.quantity} | "
+                f"已成交数量: {filled_qty} | "
+                f"剩余数量: {remaining_qty} | "
+                f"剩余数量类型: {type(remaining_qty).__name__}"
+            )
 
             if remaining_qty <= 0:
+                print(f"✅ 订单已完全成交，无需重挂")
                 logger.info(f"订单已完全成交，无需重挂")
                 return
 
-            # 3. 重新挂单
+            # 4. 重新挂单（使用剩余数量）
             if is_opening:
                 result = await self.trade_executor.place_maker_open_order(remaining_qty)
             else:
                 result = await self.trade_executor.place_maker_close_order(remaining_qty)
 
             if result.success:
-                # 4. 更新状态
+                # 5. 更新状态
                 new_order = MakerOrder(
                     order_id=result.extended_order_id,
                     price=result.extended_price,
@@ -2529,6 +2553,13 @@ class SpreadArbBot:
                 self._maker_wait_state.current_order = new_order
                 self._maker_wait_state.reposition_count += 1
 
+                print(
+                    f"✅ 订单重挂成功 | "
+                    f"旧订单: {old_order.order_id} @ {old_order.price:.2f} | "
+                    f"新订单: {new_order.order_id} @ {new_order.price:.2f} | "
+                    f"数量: {remaining_qty} | "
+                    f"重挂次数: {self._maker_wait_state.reposition_count}"
+                )
                 logger.info(
                     f"🔄 订单重挂成功 | "
                     f"旧订单: {old_order.order_id} @ {old_order.price:.2f} | "
@@ -2537,9 +2568,11 @@ class SpreadArbBot:
                     f"重挂次数: {self._maker_wait_state.reposition_count}"
                 )
             else:
+                print(f"❌ 重新挂单失败: {result.error_message}")
                 logger.error(f"重新挂单失败: {result.error_message}")
 
         except Exception as e:
+            print(f"❌ 重挂订单异常: {e}")
             logger.error(f"重挂订单异常: {e}")
 
 
