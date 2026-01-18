@@ -973,16 +973,13 @@ class TradeExecutor:
                     execution_time=time.time() - start_time
                 )
 
+            # ========== 修改：只查询Lighter订单状态，不再查询Extended ==========
             # 等待Lighter订单成交（使用较短超时时间）
-            execution_status = await self.wait_for_execution(
-                None,  # Extended订单已完成，不需要查询
-                lighter_result["order_id"],
-                3.0  # 对冲订单超时3秒
-            )
+            lighter_success = await self._wait_for_lighter_order(lighter_result["order_id"], 3.0)
 
             execution_time = time.time() - start_time
 
-            if execution_status["lighter_filled"]:
+            if lighter_success:
                 logger.info(
                     f"✅ Lighter对冲成功 | "
                     f"order_id={lighter_result['order_id']} | "
@@ -1000,12 +997,12 @@ class TradeExecutor:
                     lighter_filled=True
                 )
             else:
-                logger.error(f"❌ Lighter对冲失败: 未完全成交")
+                logger.error(f"❌ Lighter对冲失败: 未完全成交或超时")
                 return ExecutionResult(
                     success=False,
                     lighter_order_id=lighter_result["order_id"],
                     lighter_price=lighter_result.get("price"),
-                    error_message="Lighter对冲订单未完全成交",
+                    error_message="Lighter对冲订单未完全成交或超时",
                     execution_time=execution_time,
                     lighter_filled=False
                 )
@@ -1017,6 +1014,44 @@ class TradeExecutor:
                 error_message=str(e),
                 execution_time=time.time() - start_time
             )
+
+    async def _wait_for_lighter_order(self, lighter_order_id: str, timeout: float = 3.0) -> bool:
+        """
+        等待Lighter订单成交（专用于Maker模式对冲）
+
+        Args:
+            lighter_order_id: Lighter订单ID
+            timeout: 超时时间（秒）
+
+        Returns:
+            True if filled, False otherwise
+        """
+        start_time = time.time()
+        check_interval = 0.1  # 100ms 检查一次
+        fail_count = 0
+        max_fail_count = 10
+
+        while time.time() - start_time < timeout:
+            try:
+                # 只查询Lighter订单状态
+                lighter_status = await self._check_order_status(
+                    "lighter", lighter_order_id,
+                    allow_retries=False
+                )
+                fail_count = 0  # 成功则重置计数
+
+                if lighter_status.get("filled", False):
+                    return True
+
+            except Exception as e:
+                fail_count += 1
+                logger.warning(f"Lighter订单查询失败 ({fail_count}/{max_fail_count}): {e}")
+                if fail_count >= max_fail_count:
+                    raise Exception(f"Lighter订单查询连续失败{max_fail_count}次，可能API异常")
+
+            await asyncio.sleep(check_interval)
+
+        return False
 
     async def cancel_extended_maker_order(
         self,
