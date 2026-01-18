@@ -1970,6 +1970,45 @@ class SpreadArbBot:
             f"成交: {order.filled_quantity}/{order.quantity}"
         )
 
+        # 使用 create_task 异步处理状态转换
+        asyncio.create_task(self._handle_maker_order_canceled(order))
+
+    async def _handle_maker_order_canceled(self, order: MakerOrder) -> None:
+        """
+        处理 Maker订单取消（异步任务）
+
+        Args:
+            order: 被取消的订单
+        """
+        try:
+            # 检查当前状态，避免重复处理
+            current_state = self.state_manager.get_state()
+
+            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
+            if current_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
+                logger.info(f"当前状态={current_state.value}，跳过WebSocket取消回调")
+                return
+
+            # 停止监控
+            self.maker_order_monitor.stop_monitoring()
+
+            # 根据订单类型决定下一个状态
+            if order.is_opening:
+                # 开仓订单取消 -> IDLE
+                self.state_manager.set_state(BotState.IDLE, "开仓订单已取消（WebSocket）")
+            else:
+                # 平仓订单取消 -> HOLDING
+                self.state_manager.set_state(BotState.HOLDING, "平仓订单已取消（WebSocket）")
+
+            # 重置等待状态
+            if hasattr(self, '_maker_wait_state'):
+                self._maker_wait_state.reset()
+
+            await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"处理订单取消异常: {e}", exc_info=True)
+
     async def _handle_maker_order_filled(self, order: MakerOrder) -> None:
         """
         处理 Maker订单完全成交（异步任务）
@@ -2324,85 +2363,13 @@ class SpreadArbBot:
                     f"ext_bid={ext_bid:.2f} ext_ask={ext_ask:.2f}"
                 )
 
-            # 检查订单状态（通过查询API或WebSocket更新）
-            order_id = self._maker_wait_state.current_order.order_id
-            order_info = await self.trade_executor.get_extended_order_info(order_id)
+            # ========== 订单成交/取消由 WebSocket 处理，主循环不再检测 ==========
+            # WebSocket 回调会处理：
+            # - FILLED: 完全成交 -> LIGHTER_HEDGING
+            # - PARTIALLY_FILLED: 部分成交 -> LIGHTER_HEDGING
+            # - CANCELED: 订单取消 -> IDLE
 
-            if order_info is None:
-                logger.warning(f"无法查询订单信息: {order_id}")
-                return
-
-            # 更新订单状态
-            self._maker_wait_state.current_order.status = order_info['status']
-            self._maker_wait_state.current_order.filled_quantity = order_info['filled_size']
-
-            # ========== 优先检查订单状态（订单成交 > 价格偏离） ==========
-
-            # 检查订单状态 - 如果已成交或部分成交，直接进入对冲流程
-            if order_info['status'] == 'FILLED':
-                # 完全成交
-                # 检查是否已经在处理中（避免与WebSocket回调重复）
-                if hasattr(self, '_hedging_state') and self._hedging_state.ext_filled_quantity > 0:
-                    logger.info(f"订单成交已在处理中，跳过API轮询检测")
-                    return
-
-                print(
-                    f"✅ Extended Maker订单完全成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={order_info['filled_size']}"
-                )
-                logger.info(
-                    f"✅ Extended Maker订单完全成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={order_info['filled_size']}"
-                )
-                # 进入LIGHTER_HEDGING状态
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order_info['filled_size']
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "Extended完全成交，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'PARTIALLY_FILLED':
-                # 部分成交
-                # 检查是否已经在处理中（避免与WebSocket回调重复）
-                if hasattr(self, '_hedging_state') and self._hedging_state.ext_filled_quantity > 0:
-                    logger.info(f"订单部分成交已在处理中，跳过API轮询检测")
-                    return
-
-                filled_qty = order_info['filled_size']
-                print(
-                    f"✅ Extended Maker订单部分成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
-                )
-                logger.info(
-                    f"✅ Extended Maker订单部分成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
-                )
-                # 进入LIGHTER_HEDGING状态对冲已成交部分
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = filled_qty
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{filled_qty}，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'CANCELED':
-                # 订单已取消
-                logger.warning(f"❌ Extended Maker订单已取消: {order_id}")
-                self.state_manager.set_state(BotState.IDLE, "订单已取消")
-                self._maker_wait_state.reset()
-                await self.state_manager.save_state()
-                return
-
-            # ========== 订单未成交，继续检查 ==========
+            # ========== 主循环只处理：价差保护 + 价格偏离 ==========
 
             # 检查价差保护
             if spread_info and spread_info.is_valid():
@@ -2500,19 +2467,16 @@ class SpreadArbBot:
             return
 
         try:
-            # 检查订单状态
-            order_id = self._maker_wait_state.current_order.order_id
-            order_info = await self.trade_executor.get_extended_order_info(order_id)
+            # ========== 订单成交/取消由 WebSocket 处理，主循环不再检测 ==========
+            # WebSocket 回调会处理：
+            # - FILLED: 完全成交 -> LIGHTER_HEDGING
+            # - PARTIALLY_FILLED: 部分成交 -> LIGHTER_HEDGING
+            # - CANCELED: 订单取消 -> HOLDING
 
-            if order_info is None:
-                logger.warning(f"无法查询订单信息: {order_id}")
-                return
-
-            # 更新订单状态
-            self._maker_wait_state.current_order.status = order_info['status']
-            self._maker_wait_state.current_order.filled_quantity = order_info['filled_size']
+            # ========== 主循环只处理：价格偏离 ==========
 
             # 检查价格偏离
+            order_id = self._maker_wait_state.current_order.order_id
             price_deviated = await self.price_monitor.check_and_notify_price_deviation(
                 order_side=self._maker_wait_state.current_order.side,
                 order_price=self._maker_wait_state.current_order.price,
@@ -2529,50 +2493,6 @@ class SpreadArbBot:
                 # 取消旧订单并重新挂单
                 await self._reposition_maker_order(is_opening=False)
                 self._maker_wait_state.last_reposition_time = current_time
-                return
-
-            # 检查订单状态
-            if order_info['status'] == 'FILLED':
-                # 完全成交
-                logger.info(
-                    f"✅ Extended Maker平仓订单完全成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={order_info['filled_size']}"
-                )
-                # 进入LIGHTER_HEDGING状态
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order_info['filled_size']
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "Extended平仓完全成交，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'PARTIALLY_FILLED':
-                # 部分成交
-                filled_qty = order_info['filled_size']
-                logger.info(
-                    f"✅ Extended Maker平仓订单部分成交 | "
-                    f"order_id={order_id} | "
-                    f"filled_qty={filled_qty}/{self._maker_wait_state.current_order.quantity}"
-                )
-                # 进入LIGHTER_HEDGING状态对冲已成交部分
-                if not hasattr(self, '_hedging_state'):
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = filled_qty
-                self._hedging_state.ext_filled_price = self._maker_wait_state.current_order.price
-                self._hedging_state.start_time = datetime.now()
-                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓部分成交{filled_qty}，开始Lighter对冲")
-                await self.state_manager.save_state()
-                return
-
-            elif order_info['status'] == 'CANCELED':
-                # 订单已取消
-                logger.warning(f"❌ Extended Maker平仓订单已取消: {order_id}")
-                self.state_manager.set_state(BotState.HOLDING, "平仓订单已取消")
-                self._maker_wait_state.reset()
-                await self.state_manager.save_state()
                 return
 
         except Exception as e:
