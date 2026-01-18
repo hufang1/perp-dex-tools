@@ -340,7 +340,7 @@ class BotConfig:
     - False: Extended使用Taker吃单模式（并发执行：Extended和Lighter同时下单）
     """
 
-    fixed_open_threshold: Decimal = field(default_factory=lambda: Decimal("0.0009"))
+    fixed_open_threshold: Decimal = field(default_factory=lambda: Decimal("0.0004"))
     """
     固定开仓阈值（Maker模式使用）
     - 默认0.09% = 0.0009

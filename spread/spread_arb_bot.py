@@ -369,8 +369,18 @@ class SpreadArbBot:
         if spread_info is None or not spread_info.is_valid():
             return
 
-        # 使用等差数列开仓策略判断 (016-spread-optimize)
-        should_open, reason = self.open_strategy.should_open(spread_info)
+        # ========== 新增 (017-ext-maker-mode): Maker模式使用固定阈值 ==========
+        if self.config.use_maker_mode:
+            # Maker模式：使用固定开仓阈值 fixed_open_threshold
+            current_spread = spread_info.spread_pct
+            should_open = current_spread >= self.config.fixed_open_threshold
+            threshold = self.config.fixed_open_threshold
+            reason = f"价差{current_spread:.3%} >= 开仓阈值{threshold:.3%}" if should_open else f"价差{current_spread:.3%} < 开仓阈值{threshold:.3%}"
+            threshold_info = f"开仓阈值{threshold:.3%}"
+        else:
+            # Taker模式：使用等差数列开仓策略
+            should_open, reason = self.open_strategy.should_open(spread_info)
+            threshold_info = f"阈值{self.config.min_spread_threshold:.3%}"
 
         # 输出空闲状态监控日志（每5秒一次）
         if not hasattr(self, '_last_idle_log_time'):
@@ -378,16 +388,6 @@ class SpreadArbBot:
         current_time = time.time()
         if current_time - self._last_idle_log_time >= 5.0:
             current_spread = spread_info.spread_pct
-            cached_spread = self.config.cached_open_spread
-            spread_step = self.config.spread_step
-
-            if cached_spread == 0:
-                next_threshold = self.config.min_spread_threshold
-                threshold_info = f"阈值{next_threshold:.3%}"
-            else:
-                next_threshold = cached_spread + spread_step
-                threshold_info = f"上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_threshold:.3%}"
-
             status_text = "开仓" if should_open else "不开仓"
             print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} {status_text}")
             self._last_idle_log_time = current_time
@@ -410,7 +410,13 @@ class SpreadArbBot:
                 return
 
             # 切换到开仓状态
-            self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} > 阈值{self.config.min_spread_threshold:.3%}")
+            if self.config.use_maker_mode:
+                # Maker模式：使用固定阈值
+                threshold = self.config.fixed_open_threshold
+                self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} >= 开仓阈值{threshold:.3%}")
+            else:
+                # Taker模式：使用min_spread_threshold
+                self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} > 阈值{self.config.min_spread_threshold:.3%}")
             await self.state_manager.save_state()
 
     async def _process_opening_state(self) -> None:
