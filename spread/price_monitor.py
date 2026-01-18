@@ -331,7 +331,21 @@ class PriceMonitor:
             best_bid = self.current_snapshot.ext_bid
             if best_bid > 0:
                 deviation = abs(order_price - best_bid)
+
+                # 使用print确保日志可见（因为logger级别设置为ERROR）
+                print(
+                    f"🔍 买单价格检查 | 订单: {order_id[:8]} | "
+                    f"挂单: {order_price:.2f} | BBO: {best_bid:.2f} | "
+                    f"偏离: {deviation:.2f} | 阈值: {deviation_threshold:.2f}"
+                )
+
                 if deviation > deviation_threshold:
+                    print(
+                        f"⚠️ 买单价格偏离！需要重挂 | "
+                        f"订单: {order_id[:8]} | "
+                        f"挂单: {order_price:.2f} | BBO: {best_bid:.2f} | "
+                        f"偏离: {deviation:.2f} > 阈值: {deviation_threshold:.2f}"
+                    )
                     logger.info(
                         f"⚠️ 买单价格偏离 | "
                         f"订单ID: {order_id} | "
@@ -348,7 +362,21 @@ class PriceMonitor:
             best_ask = self.current_snapshot.ext_ask
             if best_ask > 0:
                 deviation = abs(order_price - best_ask)
+
+                # 使用print确保日志可见
+                print(
+                    f"🔍 卖单价格检查 | 订单: {order_id[:8]} | "
+                    f"挂单: {order_price:.2f} | BBO: {best_ask:.2f} | "
+                    f"偏离: {deviation:.2f} | 阈值: {deviation_threshold:.2f}"
+                )
+
                 if deviation > deviation_threshold:
+                    print(
+                        f"⚠️ 卖单价格偏离！需要重挂 | "
+                        f"订单: {order_id[:8]} | "
+                        f"挂单: {order_price:.2f} | BBO: {best_ask:.2f} | "
+                        f"偏离: {deviation:.2f} > 阈值: {deviation_threshold:.2f}"
+                    )
                     logger.info(
                         f"⚠️ 卖单价格偏离 | "
                         f"订单ID: {order_id} | "

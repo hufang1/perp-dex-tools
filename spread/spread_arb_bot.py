@@ -1667,6 +1667,8 @@ class SpreadArbBot:
             price_deviation_threshold=1  # 1 tick
         )
         self.price_monitor = PriceMonitor(config=price_config)
+        # 设置tick size（用于价格偏离检测）
+        self.price_monitor.set_tick_size(Decimal('0.01'))  # ETH的tick size通常是0.01
 
         # 等差数列开仓策略 (016-spread-optimize)
         self.open_strategy = ArithmeticOpenStrategy(self.config)
@@ -2142,14 +2144,21 @@ class SpreadArbBot:
             if price_deviated:
                 # 检查冷却时间
                 current_time = time.time()
-                if current_time - self._maker_wait_state.last_reposition_time < self.config.reposition_cooldown:
+                cooldown_remaining = self.config.reposition_cooldown - (current_time - self._maker_wait_state.last_reposition_time)
+                if cooldown_remaining > 0:
+                    print(f"⏳ 重挂冷却中，剩余 {cooldown_remaining:.1f} 秒")
                     logger.debug(f"重挂冷却中，跳过本次检测")
                     return
+
+                print(f"🚀 开始重挂订单...")
 
                 # 取消旧订单并重新挂单
                 await self._reposition_maker_order(is_opening=True)
                 self._maker_wait_state.last_reposition_time = current_time
                 return
+            else:
+                # 价格未偏离，无需重挂
+                pass
 
             # 检查订单状态
             if order_info['status'] == 'FILLED':
