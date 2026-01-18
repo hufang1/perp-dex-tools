@@ -2110,6 +2110,25 @@ class SpreadArbBot:
                     await self.state_manager.save_state()
                     return
 
+            # 检查价格偏离
+            price_deviated = await self.price_monitor.check_and_notify_price_deviation(
+                order_side=self._maker_wait_state.current_order.side,
+                order_price=self._maker_wait_state.current_order.price,
+                order_id=order_id
+            )
+
+            if price_deviated:
+                # 检查冷却时间
+                current_time = time.time()
+                if current_time - self._maker_wait_state.last_reposition_time < self.config.reposition_cooldown:
+                    logger.debug(f"重挂冷却中，跳过本次检测")
+                    return
+
+                # 取消旧订单并重新挂单
+                await self._reposition_maker_order(is_opening=True)
+                self._maker_wait_state.last_reposition_time = current_time
+                return
+
             # 检查订单状态
             if order_info['status'] == 'FILLED':
                 # 完全成交
@@ -2203,6 +2222,25 @@ class SpreadArbBot:
             # 更新订单状态
             self._maker_wait_state.current_order.status = order_info['status']
             self._maker_wait_state.current_order.filled_quantity = order_info['filled_size']
+
+            # 检查价格偏离
+            price_deviated = await self.price_monitor.check_and_notify_price_deviation(
+                order_side=self._maker_wait_state.current_order.side,
+                order_price=self._maker_wait_state.current_order.price,
+                order_id=order_id
+            )
+
+            if price_deviated:
+                # 检查冷却时间
+                current_time = time.time()
+                if current_time - self._maker_wait_state.last_reposition_time < self.config.reposition_cooldown:
+                    logger.debug(f"重挂冷却中，跳过本次检测")
+                    return
+
+                # 取消旧订单并重新挂单
+                await self._reposition_maker_order(is_opening=False)
+                self._maker_wait_state.last_reposition_time = current_time
+                return
 
             # 检查订单状态
             if order_info['status'] == 'FILLED':
@@ -2406,6 +2444,72 @@ class SpreadArbBot:
             logger.error(f"强制平仓异常: {e}")
             self.state_manager.set_state(BotState.PAUSED, f"强制平仓异常: {e}")
             await self.state_manager.save_state()
+
+    async def _reposition_maker_order(self, is_opening: bool) -> None:
+        """
+        重新挂单（取消旧订单 + 挂出新订单）
+
+        Args:
+            is_opening: True=开仓重挂, False=平仓重挂
+        """
+        from models import MakerOrder
+
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            logger.warning("无活跃订单可重挂")
+            return
+
+        old_order = self._maker_wait_state.current_order
+
+        try:
+            # 1. 取消旧订单
+            cancel_result = await self.trade_executor.cancel_extended_maker_order(old_order.order_id)
+            if not cancel_result:
+                logger.error(f"取消订单失败: {old_order.order_id}")
+                return
+
+            # 2. 获取订单最新状态以处理部分成交
+            order_info = await self.trade_executor.get_extended_order_info(old_order.order_id)
+            if order_info:
+                filled_qty = order_info.get('filled_size', Decimal('0'))
+                remaining_qty = old_order.quantity - filled_qty
+            else:
+                # 如果无法获取订单信息，使用原订单的filled_quantity
+                remaining_qty = old_order.remaining_quantity
+
+            if remaining_qty <= 0:
+                logger.info(f"订单已完全成交，无需重挂")
+                return
+
+            # 3. 重新挂单
+            if is_opening:
+                result = await self.trade_executor.place_maker_open_order(remaining_qty)
+            else:
+                result = await self.trade_executor.place_maker_close_order(remaining_qty)
+
+            if result.success:
+                # 4. 更新状态
+                new_order = MakerOrder(
+                    order_id=result.extended_order_id,
+                    price=result.extended_price,
+                    quantity=remaining_qty,
+                    side=old_order.side,
+                    is_opening=is_opening
+                )
+                self._maker_wait_state.current_order = new_order
+                self._maker_wait_state.reposition_count += 1
+
+                logger.info(
+                    f"🔄 订单重挂成功 | "
+                    f"旧订单: {old_order.order_id} @ {old_order.price:.2f} | "
+                    f"新订单: {new_order.order_id} @ {new_order.price:.2f} | "
+                    f"数量: {remaining_qty} | "
+                    f"重挂次数: {self._maker_wait_state.reposition_count}"
+                )
+            else:
+                logger.error(f"重新挂单失败: {result.error_message}")
+
+        except Exception as e:
+            logger.error(f"重挂订单异常: {e}")
 
 
 # ========================================================================

@@ -304,6 +304,65 @@ class PriceMonitor:
 
         return False
 
+    async def check_and_notify_price_deviation(
+        self,
+        order_side: str,
+        order_price: Decimal,
+        order_id: str
+    ) -> bool:
+        """
+        检查价格偏离并通知（用于Maker订单动态重挂）
+
+        Args:
+            order_side: 订单方向 ('buy' or 'sell')
+            order_price: 当前挂单价格
+            order_id: 订单ID（用于日志）
+
+        Returns:
+            True if price has deviated beyond threshold, False otherwise
+        """
+        if not self.current_snapshot.is_valid():
+            return False
+
+        deviation_threshold = self._tick_size * self.config.price_deviation_threshold
+
+        if order_side.lower() == 'buy':
+            # Buy order: should be at or near best bid
+            best_bid = self.current_snapshot.ext_bid
+            if best_bid > 0:
+                deviation = abs(order_price - best_bid)
+                if deviation > deviation_threshold:
+                    logger.info(
+                        f"⚠️ 买单价格偏离 | "
+                        f"订单ID: {order_id} | "
+                        f"挂单价格: {order_price} | "
+                        f"最佳买价: {best_bid} | "
+                        f"偏离: {deviation} | "
+                        f"阈值: {deviation_threshold}"
+                    )
+                    if self.on_price_deviation:
+                        self.on_price_deviation(order_side, order_price, best_bid)
+                    return True
+        else:  # sell order
+            # Sell order: should be at or near best ask
+            best_ask = self.current_snapshot.ext_ask
+            if best_ask > 0:
+                deviation = abs(order_price - best_ask)
+                if deviation > deviation_threshold:
+                    logger.info(
+                        f"⚠️ 卖单价格偏离 | "
+                        f"订单ID: {order_id} | "
+                        f"挂单价格: {order_price} | "
+                        f"最佳卖价: {best_ask} | "
+                        f"偏离: {deviation} | "
+                        f"阈值: {deviation_threshold}"
+                    )
+                    if self.on_price_deviation:
+                        self.on_price_deviation(order_side, order_price, best_ask)
+                    return True
+
+        return False
+
     def should_open_position(self) -> Tuple[bool, str]:
         """
         判断是否应该开仓（基于固定阈值策略）

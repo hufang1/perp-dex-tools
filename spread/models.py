@@ -372,6 +372,14 @@ class BotConfig:
     - 用于价格位置优化（检测挂单是否仍处于最优位置）
     """
 
+    reposition_cooldown: float = 2.0
+    """
+    重挂冷却时间（秒）
+    - 默认2.0秒
+    - 避免频繁重挂订单
+    - 价格偏离后需要等待此时间才能再次重挂
+    """
+
     spread_monitor_interval: float = 1
     """
     价差监控间隔（秒）
@@ -799,6 +807,7 @@ class MakerWaitState:
         cumulative_filled: 部分成交累计数量
         this_opening_filled: 本次开仓成交记录（用于识别"本次开仓"部分）
         needs_reposition: 是否需要重新挂单
+        last_reposition_time: 上次重挂时间戳（用于冷却时间检查）
     """
     current_order: Optional[MakerOrder] = None
     start_time: datetime = field(default_factory=datetime.now)
@@ -808,6 +817,7 @@ class MakerWaitState:
     cumulative_filled: Decimal = field(default_factory=lambda: Decimal('0'))
     this_opening_filled: list = field(default_factory=list)  # 记录每次成交的订单ID和数量
     needs_reposition: bool = False
+    last_reposition_time: float = 0.0  # 上次重挂时间戳
 
     def reset(self) -> None:
         """重置状态"""
@@ -818,6 +828,7 @@ class MakerWaitState:
         self.cumulative_filled = Decimal('0')
         self.this_opening_filled = []
         self.needs_reposition = False
+        self.last_reposition_time = 0.0
 
     def add_fill_record(self, order_id: str, filled_qty: Decimal) -> None:
         """添加成交记录"""
