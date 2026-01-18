@@ -1978,6 +1978,19 @@ class SpreadArbBot:
             order: 成交的订单
         """
         try:
+            # 检查当前状态，避免重复处理
+            current_state = self.state_manager.get_state()
+
+            # 如果已经在处理中（LIGHTER_HEDGING, OPENING_WAIT, CLOSING_WAIT），跳过
+            if current_state in [BotState.LIGHTER_HEDGING, BotState.OPENING_WAIT, BotState.CLOSING_WAIT]:
+                logger.info(f"订单成交已在处理中（状态={current_state.value}），跳过WebSocket回调")
+                return
+
+            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
+            if current_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
+                logger.info(f"当前状态={current_state.value}，跳过WebSocket成交回调")
+                return
+
             # 停止监控
             self.maker_order_monitor.stop_monitoring()
 
@@ -1988,32 +2001,21 @@ class SpreadArbBot:
                     self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                     self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
-            # 检查当前状态
-            current_state = self.state_manager.get_state()
+            # 进入 LIGHTER_HEDGING 状态对冲
+            if not hasattr(self, '_hedging_state'):
+                from models import HedgingState
+                self._hedging_state = HedgingState()
+            self._hedging_state.ext_filled_quantity = order.filled_quantity
+            self._hedging_state.ext_filled_price = order.avg_fill_price
+            self._hedging_state.start_time = datetime.now()
 
-            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
-            if current_state == BotState.OPENING_MAKER_WAIT:
-                # 进入 LIGHTER_HEDGING 状态对冲
-                if not hasattr(self, '_hedging_state'):
-                    from models import HedgingState
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
-                self._hedging_state.ext_filled_price = order.avg_fill_price
-                self._hedging_state.start_time = datetime.now()
+            is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
+            if is_opening:
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended完全成交（WebSocket），开始Lighter对冲")
-                await self.state_manager.save_state()
-
-            elif current_state == BotState.CLOSING_MAKER_WAIT:
-                # 进入 LIGHTER_HEDGING 状态对冲
-                if not hasattr(self, '_hedging_state'):
-                    from models import HedgingState
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
-                self._hedging_state.ext_filled_price = order.avg_fill_price
-                self._hedging_state.start_time = datetime.now()
+            else:
                 self._hedging_state.is_closing = True
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓完全成交（WebSocket），开始Lighter对冲")
-                await self.state_manager.save_state()
+            await self.state_manager.save_state()
 
         except Exception as e:
             logger.error(f"处理订单成交异常: {e}", exc_info=True)
@@ -2026,6 +2028,19 @@ class SpreadArbBot:
             order: 部分成交的订单
         """
         try:
+            # 检查当前状态，避免重复处理
+            current_state = self.state_manager.get_state()
+
+            # 如果已经在处理中，跳过
+            if current_state in [BotState.LIGHTER_HEDGING, BotState.OPENING_WAIT, BotState.CLOSING_WAIT]:
+                logger.info(f"订单部分成交已在处理中（状态={current_state.value}），跳过WebSocket回调")
+                return
+
+            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
+            if current_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
+                logger.info(f"当前状态={current_state.value}，跳过WebSocket部分成交回调")
+                return
+
             # 更新 MakerWaitState 中的订单状态
             if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
                 if self._maker_wait_state.current_order.order_id == order.order_id:
@@ -2033,32 +2048,21 @@ class SpreadArbBot:
                     self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                     self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
-            # 检查当前状态
-            current_state = self.state_manager.get_state()
+            # 进入 LIGHTER_HEDGING 状态对冲已成交部分
+            if not hasattr(self, '_hedging_state'):
+                from models import HedgingState
+                self._hedging_state = HedgingState()
+            self._hedging_state.ext_filled_quantity = order.filled_quantity
+            self._hedging_state.ext_filled_price = order.avg_fill_price
+            self._hedging_state.start_time = datetime.now()
 
-            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
-            if current_state == BotState.OPENING_MAKER_WAIT:
-                # 进入 LIGHTER_HEDGING 状态对冲已成交部分
-                if not hasattr(self, '_hedging_state'):
-                    from models import HedgingState
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
-                self._hedging_state.ext_filled_price = order.avg_fill_price
-                self._hedging_state.start_time = datetime.now()
+            is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
+            if is_opening:
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
-                await self.state_manager.save_state()
-
-            elif current_state == BotState.CLOSING_MAKER_WAIT:
-                # 进入 LIGHTER_HEDGING 状态对冲已成交部分
-                if not hasattr(self, '_hedging_state'):
-                    from models import HedgingState
-                    self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
-                self._hedging_state.ext_filled_price = order.avg_fill_price
-                self._hedging_state.start_time = datetime.now()
+            else:
                 self._hedging_state.is_closing = True
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
-                await self.state_manager.save_state()
+            await self.state_manager.save_state()
 
         except Exception as e:
             logger.error(f"处理部分成交异常: {e}", exc_info=True)
@@ -2337,6 +2341,11 @@ class SpreadArbBot:
             # 检查订单状态 - 如果已成交或部分成交，直接进入对冲流程
             if order_info['status'] == 'FILLED':
                 # 完全成交
+                # 检查是否已经在处理中（避免与WebSocket回调重复）
+                if hasattr(self, '_hedging_state') and self._hedging_state.ext_filled_quantity > 0:
+                    logger.info(f"订单成交已在处理中，跳过API轮询检测")
+                    return
+
                 print(
                     f"✅ Extended Maker订单完全成交 | "
                     f"order_id={order_id} | "
@@ -2359,6 +2368,11 @@ class SpreadArbBot:
 
             elif order_info['status'] == 'PARTIALLY_FILLED':
                 # 部分成交
+                # 检查是否已经在处理中（避免与WebSocket回调重复）
+                if hasattr(self, '_hedging_state') and self._hedging_state.ext_filled_quantity > 0:
+                    logger.info(f"订单部分成交已在处理中，跳过API轮询检测")
+                    return
+
                 filled_qty = order_info['filled_size']
                 print(
                     f"✅ Extended Maker订单部分成交 | "
@@ -2651,6 +2665,9 @@ class SpreadArbBot:
                                 BotState.OPENING_WAIT,
                                 f"风控触发跳过Lighter开仓，验证仓位（可能不平衡）"
                             )
+                            # 重置对冲状态，避免重复处理
+                            if hasattr(self, '_hedging_state'):
+                                self._hedging_state.ext_filled_quantity = Decimal('0')
                             await self.state_manager.save_state()
                             return
 
@@ -2708,6 +2725,8 @@ class SpreadArbBot:
                     else:
                         self.state_manager.set_state(BotState.CLOSING_WAIT, "对冲完成，验证仓位")
 
+                # 重置对冲状态，避免重复处理
+                self._hedging_state.ext_filled_quantity = Decimal('0')
                 await self.state_manager.save_state()
                 return
 
