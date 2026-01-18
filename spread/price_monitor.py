@@ -322,9 +322,10 @@ class PriceMonitor:
             True if price has deviated beyond threshold, False otherwise
         """
         # 调试：检查快照是否有效
+        order_id_str = str(order_id)
         print(
             f"🔍 价格偏离检查入口 | "
-            f"订单: {order_id[:8]} | "
+            f"订单: {order_id_str[:8]} | "
             f"方向: {order_side} | "
             f"挂单价: {order_price:.2f} | "
             f"快照有效: {self.current_snapshot.is_valid()} | "
@@ -347,7 +348,7 @@ class PriceMonitor:
 
                 # 使用print确保日志可见（因为logger级别设置为ERROR）
                 print(
-                    f"🔍 买单价格检查 | 订单: {order_id[:8]} | "
+                    f"🔍 买单价格检查 | 订单: {order_id_str[:8]} | "
                     f"挂单: {order_price:.2f} | BBO: {best_bid:.2f} | "
                     f"偏离: {deviation:.2f} | 阈值: {deviation_threshold:.2f}"
                 )
@@ -355,7 +356,7 @@ class PriceMonitor:
                 if deviation > deviation_threshold:
                     print(
                         f"⚠️ 买单价格偏离！需要重挂 | "
-                        f"订单: {order_id[:8]} | "
+                        f"订单: {order_id_str[:8]} | "
                         f"挂单: {order_price:.2f} | BBO: {best_bid:.2f} | "
                         f"偏离: {deviation:.2f} > 阈值: {deviation_threshold:.2f}"
                     )
@@ -378,7 +379,7 @@ class PriceMonitor:
 
                 # 使用print确保日志可见
                 print(
-                    f"🔍 卖单价格检查 | 订单: {order_id[:8]} | "
+                    f"🔍 卖单价格检查 | 订单: {order_id_str[:8]} | "
                     f"挂单: {order_price:.2f} | BBO: {best_ask:.2f} | "
                     f"偏离: {deviation:.2f} | 阈值: {deviation_threshold:.2f}"
                 )
@@ -386,7 +387,7 @@ class PriceMonitor:
                 if deviation > deviation_threshold:
                     print(
                         f"⚠️ 卖单价格偏离！需要重挂 | "
-                        f"订单: {order_id[:8]} | "
+                        f"订单: {order_id_str[:8]} | "
                         f"挂单: {order_price:.2f} | BBO: {best_ask:.2f} | "
                         f"偏离: {deviation:.2f} > 阈值: {deviation_threshold:.2f}"
                     )
