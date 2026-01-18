@@ -2347,6 +2347,9 @@ class SpreadArbBot:
             await self.state_manager.save_state()
             return
 
+        # 获取当前订单ID
+        order_id = self._maker_wait_state.current_order.order_id
+
         try:
             # ========== 监控日志：实时价差和订单簿BBO ==========
             spread_info = self.spread_monitor.get_current_spread()
