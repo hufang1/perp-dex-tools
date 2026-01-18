@@ -226,19 +226,22 @@ class PositionBalanceMonitor:
             account_info = await self.extended_client.perpetual_trading_client.account.get_account()
 
             if not account_info:
-                logger.warning(f"Extended账户信息为空，account_info类型: {type(account_info)}")
+                print(f"[DEBUG] Extended账户信息为空，account_info类型: {type(account_info)}")
                 return None
 
             # 打印调试信息
-            logger.debug(f"Extended account_info类型: {type(account_info)}")
-            logger.debug(f"Extended account_info属性: {dir(account_info)}")
+            print(f"[DEBUG] Extended account_info类型: {type(account_info)}")
+            print(f"[DEBUG] Extended account_info属性: {dir(account_info)}")
 
             # 尝试获取data属性
             data = None
             if hasattr(account_info, 'data'):
                 data = account_info.data
-                logger.debug(f"Extended data类型: {type(data)}")
-                logger.debug(f"Extended data属性: {dir(data) if data else 'None'}")
+                print(f"[DEBUG] Extended data类型: {type(data)}")
+                print(f"[DEBUG] Extended data值: {data}")
+                if data:
+                    print(f"[DEBUG] Extended data属性: {dir(data)}")
+                    print(f"[DEBUG] Extended data.__dict__: {data.__dict__ if hasattr(data, '__dict__') else 'N/A'}")
 
             # 提取可用余额（保证金）
             # 尝试多种可能的字段名称
@@ -262,7 +265,7 @@ class PositionBalanceMonitor:
                             try:
                                 available_balance = Decimal(str(value))
                                 balance_found = True
-                                logger.info(f"Extended余额字段: {field} = {available_balance}")
+                                print(f"[INFO] Extended余额字段: {field} = {available_balance}")
                                 break
                             except (ValueError, TypeError):
                                 continue
@@ -283,7 +286,7 @@ class PositionBalanceMonitor:
                                             if potential_balance > 0:  # 只有大于0的才可能是余额
                                                 available_balance = potential_balance
                                                 balance_found = True
-                                                logger.info(f"Extended通过遍历找到余额字段: {attr_name} = {available_balance}")
+                                                print(f"[INFO] Extended通过遍历找到余额字段: {attr_name} = {available_balance}")
                                                 break
                                     except (ValueError, TypeError):
                                         continue
@@ -297,14 +300,14 @@ class PositionBalanceMonitor:
                             try:
                                 available_balance = Decimal(str(value))
                                 balance_found = True
-                                logger.info(f"Extended从account_info获取余额字段: {field} = {available_balance}")
+                                print(f"[INFO] Extended从account_info获取余额字段: {field} = {available_balance}")
                                 break
                             except (ValueError, TypeError):
                                 continue
 
             if not balance_found:
-                logger.warning(f"无法找到Extended余额字段，data类型: {type(data)}")
-                logger.warning(f"data的属性列表: {[attr for attr in dir(data) if not attr.startswith('_')] if data else 'None'}")
+                print(f"[WARNING] 无法找到Extended余额字段，data类型: {type(data)}")
+                print(f"[WARNING] data的属性列表: {[attr for attr in dir(data) if not attr.startswith('_')] if data else 'None'}")
 
             # 计算最大可开仓数量
             # 最大仓位 = 可用余额 * 杠杆
