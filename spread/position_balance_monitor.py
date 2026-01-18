@@ -260,31 +260,34 @@ class PositionBalanceMonitor:
             except Exception as e:
                 print(f"[DEBUG] Extended REST API请求失败: {e}")
 
-            # 尝试方法2：使用SDK的collateral相关方法（如果存在）
+            # 尝试方法2：使用SDK的get_balance方法
             if not balance_found:
                 try:
                     account = self.extended_client.perpetual_trading_client.account
-                    # 尝试调用可能的方法
-                    for method_name in ['get_collateral', 'get_balance', 'get_collateral_balance',
-                                       'get_account_balance', 'fetch_balance']:
-                        if hasattr(account, method_name):
-                            method = getattr(account, method_name)
-                            if callable(method):
-                                result = await method()
-                                print(f"[DEBUG] Extended调用方法 {method_name} 结果: {result}")
-                                if result is not None:
-                                    try:
-                                        if hasattr(result, 'data'):
-                                            available_balance = Decimal(str(result.data))
-                                        else:
-                                            available_balance = Decimal(str(result))
-                                        balance_found = True
-                                        print(f"[INFO] Extended从方法{method_name}获取余额: {available_balance}")
-                                        break
-                                    except (ValueError, TypeError):
-                                        continue
+                    # 调用get_balance方法
+                    if hasattr(account, 'get_balance') and callable(getattr(account, 'get_balance')):
+                        result = await account.get_balance()
+                        print(f"[DEBUG] Extended调用get_balance结果: {result}")
+
+                        if result and hasattr(result, 'data') and result.data:
+                            balance_model = result.data
+                            # BalanceModel对象有以下字段：
+                            # - balance: 总余额
+                            # - available_for_trade: 可用于交易的余额
+                            # - available_for_withdrawal: 可提取的余额
+                            # 使用 available_for_trade 因为这是真正可以开新仓的资金
+                            if hasattr(balance_model, 'available_for_trade'):
+                                available_balance = balance_model.available_for_trade
+                                balance_found = True
+                                print(f"[INFO] Extended从get_balance获取available_for_trade: {available_balance}")
+                            elif hasattr(balance_model, 'balance'):
+                                available_balance = balance_model.balance
+                                balance_found = True
+                                print(f"[INFO] Extended从get_balance获取balance: {available_balance}")
                 except Exception as e:
                     print(f"[DEBUG] Extended SDK方法调用失败: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             # 计算最大可开仓数量
             # 最大仓位 = 可用余额 * 杠杆
