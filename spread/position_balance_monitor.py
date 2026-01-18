@@ -142,13 +142,23 @@ class PositionBalanceMonitor:
 
             # 计算已使用的保证金（所有持仓的allocated_margin之和）
             margin_used = Decimal('0')
+            allocated_details = []
             if hasattr(account_info, 'positions'):
                 for pos in account_info.positions:
-                    if hasattr(pos, 'allocated_margin'):
+                    # 只处理有实际持仓的（position != '0'）
+                    pos_value = getattr(pos, 'position', '0')
+                    if str(pos_value) != '0' and hasattr(pos, 'allocated_margin'):
                         try:
-                            margin_used += Decimal(str(pos.allocated_margin))
+                            alloc = Decimal(str(pos.allocated_margin))
+                            if alloc > 0:
+                                margin_used += alloc
+                                symbol = getattr(pos, 'symbol', '?')
+                                allocated_details.append(f"{symbol}:{alloc}")
                         except (ValueError, TypeError):
                             continue
+
+            # 打印调试信息
+            print(f"[DEBUG] Lig余额 | total={total_balance} | margin_used={margin_used} | details={allocated_details}")
 
             # 可用保证金 = 总资产价值 - 已分配保证金
             available_balance = total_balance - margin_used
