@@ -764,6 +764,39 @@ class MakerOrder:
     updated_at: datetime = field(default_factory=datetime.now)
     is_opening: bool = True  # True for opening, False for closing
 
+    def update_from_websocket(self, order_data: dict) -> None:
+        """
+        从WebSocket更新订单状态
+
+        Args:
+            order_data: WebSocket订单数据字典，包含：
+                - id: 订单ID
+                - status: 订单状态
+                - filledQty: 成交数量
+                - price: 成交价格
+        """
+        self.updated_at = datetime.now()
+
+        # 更新状态
+        new_status = order_data.get('status', self.status)
+        if new_status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'CANCELLED']:
+            if new_status == 'CANCELLED':
+                self.status = 'CANCELED'
+            else:
+                self.status = new_status
+
+        # 更新成交数量和均价
+        filled_qty = order_data.get('filledQty', '0')
+        if filled_qty:
+            new_filled = Decimal(str(filled_qty))
+            if new_filled > self.filled_quantity:
+                # 计算新的平均价格
+                old_total = self.avg_fill_price * self.filled_quantity
+                fill_price = Decimal(str(order_data.get('price', '0')))
+                new_total = old_total + (fill_price * (new_filled - self.filled_quantity))
+                self.avg_fill_price = new_total / new_filled if new_filled > 0 else Decimal('0')
+                self.filled_quantity = new_filled
+
     @property
     def remaining_quantity(self) -> Decimal:
         """获取剩余未成交数量"""

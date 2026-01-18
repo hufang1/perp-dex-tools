@@ -11,97 +11,15 @@ Extended Maker订单监控器模块
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, TYPE_CHECKING
 from datetime import datetime
-from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from models import MakerOrder
 
 from models import BotState
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class MakerOrder:
-    """
-    Extended Maker挂单订单数据类
-
-    Attributes:
-        order_id: 订单ID
-        price: 挂单价格
-        quantity: 挂单数量
-        side: 挂单方向 (buy/sell)
-        status: 订单状态 (NEW, OPEN, PARTIALLY_FILLED, FILLED, CANCELED)
-        filled_quantity: 成交数量
-        avg_fill_price: 成交均价
-        created_at: 创建时间
-        updated_at: 最后更新时间
-        is_opening: 是否为开仓订单（True=开仓, False=平仓）
-    """
-    order_id: str
-    price: Decimal
-    quantity: Decimal
-    side: str  # 'buy' or 'sell'
-    status: str = 'NEW'
-    filled_quantity: Decimal = field(default_factory=lambda: Decimal('0'))
-    avg_fill_price: Decimal = field(default_factory=lambda: Decimal('0'))
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    is_opening: bool = True  # True for opening, False for closing
-
-    def update_from_websocket(self, order_data: Dict[str, Any]) -> None:
-        """
-        从WebSocket更新订单状态
-
-        Args:
-            order_data: WebSocket订单数据字典
-        """
-        self.updated_at = datetime.now()
-
-        # Update status
-        new_status = order_data.get('status', self.status)
-        if new_status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED', 'CANCELED', 'CANCELLED']:
-            if new_status == 'CANCELLED':
-                self.status = 'CANCELED'
-            else:
-                self.status = new_status
-
-        # Update filled quantity and price
-        filled_qty = order_data.get('filledQty', '0')
-        if filled_qty:
-            new_filled = Decimal(str(filled_qty))
-            if new_filled > self.filled_quantity:
-                # Calculate new average price
-                old_total = self.avg_fill_price * self.filled_quantity
-                new_total = old_total + (Decimal(str(order_data.get('price', '0'))) * (new_filled - self.filled_quantity))
-                self.avg_fill_price = new_total / new_filled if new_filled > 0 else Decimal('0')
-                self.filled_quantity = new_filled
-
-    @property
-    def remaining_quantity(self) -> Decimal:
-        """获取剩余未成交数量"""
-        return self.quantity - self.filled_quantity
-
-    @property
-    def is_fully_filled(self) -> bool:
-        """是否完全成交"""
-        return self.status == 'FILLED' or self.filled_quantity >= self.quantity
-
-    @property
-    def is_partially_filled(self) -> bool:
-        """是否部分成交"""
-        return self.status == 'PARTIALLY_FILLED' or (
-            self.filled_quantity > 0 and self.filled_quantity < self.quantity
-        )
-
-    @property
-    def is_canceled(self) -> bool:
-        """是否已取消"""
-        return self.status == 'CANCELED'
-
-    @property
-    def is_active(self) -> bool:
-        """是否活跃（未成交且未取消）"""
-        return self.status in ['NEW', 'OPEN', 'PENDING'] and not self.is_canceled
 
 
 class MakerOrderMonitor:
@@ -125,16 +43,16 @@ class MakerOrderMonitor:
 
     def __init__(self):
         """初始化Maker订单监控器"""
-        self._order: Optional[MakerOrder] = None
+        self._order: Optional['MakerOrder'] = None
         self._monitoring = False
         self._lock = asyncio.Lock()
 
         # Callbacks
-        self.on_order_filled: Optional[Callable[[MakerOrder], None]] = None
-        self.on_order_partially_filled: Optional[Callable[[MakerOrder], None]] = None
-        self.on_order_canceled: Optional[Callable[[MakerOrder], None]] = None
+        self.on_order_filled: Optional[Callable[['MakerOrder'], None]] = None
+        self.on_order_partially_filled: Optional[Callable[['MakerOrder'], None]] = None
+        self.on_order_canceled: Optional[Callable[['MakerOrder'], None]] = None
 
-    def start_monitoring(self, order: MakerOrder) -> None:
+    def start_monitoring(self, order: 'MakerOrder') -> None:
         """
         开始监控订单
 
@@ -163,7 +81,7 @@ class MakerOrderMonitor:
         """是否正在监控"""
         return self._monitoring and self._order is not None
 
-    def get_order(self) -> Optional[MakerOrder]:
+    def get_order(self) -> Optional['MakerOrder']:
         """获取当前监控的订单"""
         return self._order
 

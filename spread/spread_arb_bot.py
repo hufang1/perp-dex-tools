@@ -45,7 +45,8 @@ from price_monitor import PriceMonitor
 from arithmetic_open_strategy import ArithmeticOpenStrategy
 from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
-from maker_order_monitor import MakerOrderMonitor, MakerOrder
+from maker_order_monitor import MakerOrderMonitor
+from models import MakerOrder
 
 # 设置日志（输出 INFO 及以上级别）
 logging.basicConfig(
@@ -465,7 +466,7 @@ class SpreadArbBot:
                 return
 
             # 初始化Maker等待状态
-            from models import MakerWaitState, MakerOrder
+            from models import MakerWaitState
             if not hasattr(self, '_maker_wait_state'):
                 self._maker_wait_state = MakerWaitState()
 
@@ -739,7 +740,7 @@ class SpreadArbBot:
                 return
 
             # 初始化Maker等待状态
-            from models import MakerWaitState, MakerOrder
+            from models import MakerWaitState
             if not hasattr(self, '_maker_wait_state'):
                 self._maker_wait_state = MakerWaitState()
 
@@ -2770,8 +2771,6 @@ class SpreadArbBot:
         Args:
             is_opening: True=开仓重挂, False=平仓重挂
         """
-        from models import MakerOrder
-
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             logger.warning("无活跃订单可重挂")
             return
