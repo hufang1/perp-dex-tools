@@ -1915,7 +1915,7 @@ class SpreadArbBot:
         """
         print(
             f"✅ [WebSocket] Maker订单完全成交 | "
-            f"订单: {order.order_id[:8]} | "
+            f"订单: {str(order.order_id)[:8]} | "
             f"数量: {order.filled_quantity} | "
             f"价格: {order.avg_fill_price:.2f}"
         )
@@ -1939,7 +1939,7 @@ class SpreadArbBot:
         """
         print(
             f"✅ [WebSocket] Maker订单部分成交 | "
-            f"订单: {order.order_id[:8]} | "
+            f"订单: {str(order.order_id)[:8]} | "
             f"成交: {order.filled_quantity}/{order.quantity}"
         )
         logger.info(
@@ -1961,7 +1961,7 @@ class SpreadArbBot:
         """
         print(
             f"❌ [WebSocket] Maker订单已取消 | "
-            f"订单: {order.order_id[:8]} | "
+            f"订单: {str(order.order_id)[:8]} | "
             f"成交: {order.filled_quantity}/{order.quantity}"
         )
         logger.info(
