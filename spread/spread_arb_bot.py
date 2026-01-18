@@ -2090,12 +2090,16 @@ class SpreadArbBot:
             if spread_info and spread_info.is_valid():
                 if spread_info.spread_pct < self.config.fixed_open_threshold:
                     # 价差不满足条件，取消订单
+                    spread_value = spread_info.spread_pct
+                    threshold_value = self.config.fixed_open_threshold
                     logger.warning(
                         f"⚠️ 价差保护触发 | "
-                        f"实时价差{spread_info.spread_pct:.3%} < 开仓阈值{self.config.fixed_open_threshold:.3%}"
+                        f"实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}"
                     )
                     await self.trade_executor.cancel_extended_maker_order(order_id)
-                    self.state_manager.set_state(BotState.IDLE, "价差保护触发，取消挂单")
+                    # 在状态转换日志中包含实时价差信息
+                    reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
+                    self.state_manager.set_state(BotState.IDLE, reason)
                     self._maker_wait_state.reset()
                     await self.state_manager.save_state()
                     return
