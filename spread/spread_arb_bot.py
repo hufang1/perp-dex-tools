@@ -45,6 +45,7 @@ from price_monitor import PriceMonitor
 from arithmetic_open_strategy import ArithmeticOpenStrategy
 from smart_close_strategy import SmartCloseStrategy
 from position_balance_checker import PositionBalanceChecker
+from maker_order_monitor import MakerOrderMonitor, MakerOrder
 
 # 设置日志（输出 INFO 及以上级别）
 logging.basicConfig(
@@ -84,6 +85,7 @@ class SpreadArbBot:
         self.state_manager: Optional[StateManager] = None
         self.lighter_client = None
         self.extended_client = None
+        self.maker_order_monitor: Optional[MakerOrderMonitor] = None
 
         # 运行状态
         self._running = False
@@ -154,6 +156,10 @@ class SpreadArbBot:
 
             # 2. 初始化组件
             await self._init_components()
+
+            # 2.5 设置 Extended 订单更新处理（WebSocket 订单监控）
+            self.extended_client.setup_order_update_handler(self._handle_extended_order_update)
+            logger.info("Extended 订单更新处理已设置")
 
             # 3. 加载状态
             await self._load_state()
@@ -472,6 +478,9 @@ class SpreadArbBot:
             )
             self._maker_wait_state.start_time = datetime.now()
 
+            # 启动 WebSocket 订单监控
+            self.maker_order_monitor.start_monitoring(self._maker_wait_state.current_order)
+
             logger.info(
                 f"✅ Extended Maker开仓订单已挂出 | "
                 f"order_id={result.extended_order_id} | "
@@ -742,6 +751,9 @@ class SpreadArbBot:
                 is_opening=False  # 平仓订单
             )
             self._maker_wait_state.start_time = datetime.now()
+
+            # 启动 WebSocket 订单监控
+            self.maker_order_monitor.start_monitoring(self._maker_wait_state.current_order)
 
             logger.info(
                 f"✅ Extended Maker平仓订单已挂出 | "
@@ -1642,6 +1654,10 @@ class SpreadArbBot:
         logger.info("等待订单簿数据...")
         # await asyncio.sleep(3)
 
+        # 设置 Extended 订单更新处理（WebSocket 订单监控）
+        # 注意：这里需要在 maker_order_monitor 初始化之后设置，暂时先设置占位
+        # 实际设置会在 _init_components 之后进行
+
         logger.debug("交易所客户端初始化完成")
 
     async def _init_components(self) -> None:
@@ -1712,6 +1728,13 @@ class SpreadArbBot:
         self.state_manager = StateManager(state_file)
         # 设置config引用，用于状态转换时重置策略状态
         self.state_manager.set_config(self.config)
+
+        # Extended Maker订单监控器
+        self.maker_order_monitor = MakerOrderMonitor()
+        # 设置订单成交回调
+        self.maker_order_monitor.on_order_filled = self._on_maker_order_filled
+        self.maker_order_monitor.on_order_partially_filled = self._on_maker_order_partially_filled
+        self.maker_order_monitor.on_order_canceled = self._on_maker_order_canceled
 
         logger.debug("组件初始化完成")
 
@@ -1846,6 +1869,197 @@ class SpreadArbBot:
 
             # 每100ms同步一次
             await asyncio.sleep(0.1)
+
+    # ========================================================================
+    # 私有方法：订单处理（WebSocket 订单监控）
+    # ========================================================================
+
+    async def _handle_extended_order_update(self, order_data: Dict) -> None:
+        """
+        处理 Extended WebSocket 订单更新
+
+        Args:
+            order_data: 订单数据字典，包含：
+                - order_id: 订单ID
+                - status: 订单状态
+                - side: 订单方向
+                - size: 订单数量
+                - price: 订单价格
+                - filled_size: 成交数量
+        """
+        try:
+            # 转换为 MakerOrderMonitor 需要的格式
+            monitor_order_data = {
+                'id': order_data.get('order_id'),
+                'status': order_data.get('status'),
+                'side': order_data.get('side'),
+                'qty': order_data.get('size'),
+                'price': order_data.get('price'),
+                'filledQty': order_data.get('filled_size', '0')
+            }
+
+            # 传递给监控器处理
+            await self.maker_order_monitor.handle_order_update(monitor_order_data)
+
+        except Exception as e:
+            logger.error(f"处理订单更新异常: {e}")
+
+    def _on_maker_order_filled(self, order: MakerOrder) -> None:
+        """
+        Maker订单完全成交回调（WebSocket 实时触发）
+
+        Args:
+            order: 成交的订单
+        """
+        print(
+            f"✅ [WebSocket] Maker订单完全成交 | "
+            f"订单: {order.order_id[:8]} | "
+            f"数量: {order.filled_quantity} | "
+            f"价格: {order.avg_fill_price:.2f}"
+        )
+        logger.info(
+            f"✅ [WebSocket] Maker订单完全成交 | "
+            f"订单: {order.order_id} | "
+            f"数量: {order.filled_quantity} | "
+            f"价格: {order.avg_fill_price} | "
+            f"开仓: {order.is_opening}"
+        )
+
+        # 使用 create_task 确保回调不会阻塞 WebSocket 处理
+        asyncio.create_task(self._handle_maker_order_filled(order))
+
+    def _on_maker_order_partially_filled(self, order: MakerOrder) -> None:
+        """
+        Maker订单部分成交回调（WebSocket 实时触发）
+
+        Args:
+            order: 部分成交的订单
+        """
+        print(
+            f"✅ [WebSocket] Maker订单部分成交 | "
+            f"订单: {order.order_id[:8]} | "
+            f"成交: {order.filled_quantity}/{order.quantity}"
+        )
+        logger.info(
+            f"✅ [WebSocket] Maker订单部分成交 | "
+            f"订单: {order.order_id} | "
+            f"成交: {order.filled_quantity}/{order.quantity} | "
+            f"均价: {order.avg_fill_price}"
+        )
+
+        # 使用 create_task 确保回调不会阻塞 WebSocket 处理
+        asyncio.create_task(self._handle_maker_order_partially_filled(order))
+
+    def _on_maker_order_canceled(self, order: MakerOrder) -> None:
+        """
+        Maker订单取消回调（WebSocket 实时触发）
+
+        Args:
+            order: 被取消的订单
+        """
+        print(
+            f"❌ [WebSocket] Maker订单已取消 | "
+            f"订单: {order.order_id[:8]} | "
+            f"成交: {order.filled_quantity}/{order.quantity}"
+        )
+        logger.info(
+            f"❌ [WebSocket] Maker订单已取消 | "
+            f"订单: {order.order_id} | "
+            f"成交: {order.filled_quantity}/{order.quantity}"
+        )
+
+    async def _handle_maker_order_filled(self, order: MakerOrder) -> None:
+        """
+        处理 Maker订单完全成交（异步任务）
+
+        Args:
+            order: 成交的订单
+        """
+        try:
+            # 停止监控
+            self.maker_order_monitor.stop_monitoring()
+
+            # 更新 MakerWaitState 中的订单状态
+            if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
+                if self._maker_wait_state.current_order.order_id == order.order_id:
+                    self._maker_wait_state.current_order.status = 'FILLED'
+                    self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
+                    self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
+
+            # 检查当前状态
+            current_state = self.state_manager.get_state()
+
+            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
+            if current_state == BotState.OPENING_MAKER_WAIT:
+                # 进入 LIGHTER_HEDGING 状态对冲
+                if not hasattr(self, '_hedging_state'):
+                    from models import HedgingState
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_price = order.avg_fill_price
+                self._hedging_state.start_time = datetime.now()
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended完全成交（WebSocket），开始Lighter对冲")
+                await self.state_manager.save_state()
+
+            elif current_state == BotState.CLOSING_MAKER_WAIT:
+                # 进入 LIGHTER_HEDGING 状态对冲
+                if not hasattr(self, '_hedging_state'):
+                    from models import HedgingState
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_price = order.avg_fill_price
+                self._hedging_state.start_time = datetime.now()
+                self._hedging_state.is_closing = True
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓完全成交（WebSocket），开始Lighter对冲")
+                await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"处理订单成交异常: {e}", exc_info=True)
+
+    async def _handle_maker_order_partially_filled(self, order: MakerOrder) -> None:
+        """
+        处理 Maker订单部分成交（异步任务）
+
+        Args:
+            order: 部分成交的订单
+        """
+        try:
+            # 更新 MakerWaitState 中的订单状态
+            if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
+                if self._maker_wait_state.current_order.order_id == order.order_id:
+                    self._maker_wait_state.current_order.status = 'PARTIALLY_FILLED'
+                    self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
+                    self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
+
+            # 检查当前状态
+            current_state = self.state_manager.get_state()
+
+            # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
+            if current_state == BotState.OPENING_MAKER_WAIT:
+                # 进入 LIGHTER_HEDGING 状态对冲已成交部分
+                if not hasattr(self, '_hedging_state'):
+                    from models import HedgingState
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_price = order.avg_fill_price
+                self._hedging_state.start_time = datetime.now()
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
+                await self.state_manager.save_state()
+
+            elif current_state == BotState.CLOSING_MAKER_WAIT:
+                # 进入 LIGHTER_HEDGING 状态对冲已成交部分
+                if not hasattr(self, '_hedging_state'):
+                    from models import HedgingState
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_price = order.avg_fill_price
+                self._hedging_state.start_time = datetime.now()
+                self._hedging_state.is_closing = True
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
+                await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"处理部分成交异常: {e}", exc_info=True)
 
     # ========================================================================
     # 私有方法：辅助
@@ -2185,9 +2399,23 @@ class SpreadArbBot:
                         f"实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}"
                     )
                     await self.trade_executor.cancel_extended_maker_order(order_id)
-                    # 在状态转换日志中包含实时价差信息
-                    reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
-                    self.state_manager.set_state(BotState.IDLE, reason)
+
+                    # 先检查实际仓位（订单可能已成交但API返回有延迟）
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    tolerance = Decimal("0.001")
+                    has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+                    if has_position:
+                        # 有仓位，进入 HOLDING 状态
+                        reason = f"价差保护触发但检测到仓位，进入持仓（Ext={ext_position}, Lig={lig_position}）"
+                        self.state_manager.set_state(BotState.HOLDING, reason)
+                        logger.info(f"💥 价差保护触发但有仓位 -> 进入HOLDING | Ext={ext_position} Lig={lig_position}")
+                    else:
+                        # 无仓位，进入 IDLE 状态
+                        reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
+                        self.state_manager.set_state(BotState.IDLE, reason)
+
                     self._maker_wait_state.reset()
                     await self.state_manager.save_state()
                     return
@@ -2610,6 +2838,9 @@ class SpreadArbBot:
                 )
                 self._maker_wait_state.current_order = new_order
                 self._maker_wait_state.reposition_count += 1
+
+                # 重新启动 WebSocket 订单监控（监控新订单）
+                self.maker_order_monitor.start_monitoring(new_order)
 
                 print(
                     f"✅ 订单重挂成功 | "
