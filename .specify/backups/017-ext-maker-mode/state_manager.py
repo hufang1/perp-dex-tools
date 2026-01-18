@@ -43,12 +43,9 @@ class StateManager:
     STATE_NAMES_CN = {
         BotState.IDLE: "空闲",
         BotState.OPENING: "开仓中",
-        BotState.OPENING_MAKER_WAIT: "开仓挂单等待成交",  # 新增 (017-ext-maker-mode)
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",
         BotState.CLOSING: "平仓中",
-        BotState.CLOSING_MAKER_WAIT: "平仓挂单等待成交",  # 新增 (017-ext-maker-mode)
-        BotState.LIGHTER_HEDGING: "lighter对冲中",  # 新增 (017-ext-maker-mode)
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
@@ -325,12 +322,9 @@ class StateManager:
     STATE_NAMES_CN = {
         BotState.IDLE: "空闲",
         BotState.OPENING: "开仓中",
-        BotState.OPENING_MAKER_WAIT: "开仓挂单等待成交",  # 新增 (017-ext-maker-mode)
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",
         BotState.CLOSING: "平仓中",
-        BotState.CLOSING_MAKER_WAIT: "平仓挂单等待成交",  # 新增 (017-ext-maker-mode)
-        BotState.LIGHTER_HEDGING: "lighter对冲中",  # 新增 (017-ext-maker-mode)
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
@@ -345,34 +339,6 @@ class StateManager:
         """
         self._config = config
 
-    def _log_state_transition(self, old_state: BotState, new_state: BotState, reason: str = "") -> None:
-        """
-        统一状态转换日志函数
-
-        输出格式：💥 {旧状态中文} -> {新状态中文} | {原因}
-        同时使用print()强制输出到控制台和logger.info()记录到日志文件
-
-        Args:
-            old_state: 旧状态
-            new_state: 新状态
-            reason: 状态转换的原因（可选）
-        """
-        # 获取中文名称
-        old_name = self.STATE_NAMES_CN.get(old_state, old_state.value)
-        new_name = self.STATE_NAMES_CN.get(new_state, new_state.value)
-
-        # 使用print()强制输出到控制台（不受logging级别影响）
-        if reason:
-            print(f"💥 {old_name} -> {new_name} | {reason}")
-        else:
-            print(f"💥 {old_name} -> {new_name}")
-
-        # 同时使用logger.info()记录到日志文件
-        if reason:
-            logger.info(f"💥 {old_name} -> {new_name} | {reason}")
-        else:
-            logger.info(f"💥 {old_name} -> {new_name}")
-
     def set_state(self, state: BotState, reason: str = "") -> None:
         """
         设置机器人状态
@@ -384,8 +350,17 @@ class StateManager:
         old_state = self._current_state
         self._current_state = state
 
-        # 使用统一状态转换日志函数
-        self._log_state_transition(old_state, state, reason)
+        # 输出状态转换日志（使用print强制输出，不受logging级别影响）
+        old_name = self.STATE_NAMES_CN.get(old_state, old_state.value)
+        new_name = self.STATE_NAMES_CN.get(state, state.value)
+
+        if reason:
+            print(f"💥 {old_name} -> {new_name} | {reason}")
+        else:
+            print(f"💥 {old_name} -> {new_name}")
+
+        # 仍然记录到logger（如果日志级别允许）
+        logger.info(f"状态转换: {old_state.value} -> {state.value}")
 
         # 进入IDLE状态时重置开仓价差
         if state == BotState.IDLE and self._config and self._config.cached_open_spread != 0:
