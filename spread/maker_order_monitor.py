@@ -206,7 +206,7 @@ def create_maker_order_from_result(
     quantity: Decimal,
     side: str,
     is_opening: bool = True
-) -> MakerOrder:
+) -> 'MakerOrder':
     """
     从订单结果创建MakerOrder对象
 
@@ -220,6 +220,7 @@ def create_maker_order_from_result(
     Returns:
         MakerOrder对象
     """
+    from models import MakerOrder
     return MakerOrder(
         order_id=order_id,
         price=price,
