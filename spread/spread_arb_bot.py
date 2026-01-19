@@ -416,8 +416,13 @@ class SpreadArbBot:
             self._log_spread_to_csv(spread_info)
             self._last_spread_log_time = current_time
 
+        # ========== 新增: 调试日志 ==========
+        if should_open:
+            print(f"🔍 [开仓触发] should_open=True, 准备执行开仓流程...")
+
         if should_open:
             # 风控验证
+            print(f"🔍 [开仓触发] 开始风控验证...")
             validation = await self.risk_manager.validate_open_position(
                 self.order_book_manager,
                 self.config.target_quantity,
@@ -425,8 +430,11 @@ class SpreadArbBot:
             )
 
             if not validation.is_valid:
+                print(f"🔍 [开仓触发] 风控验证失败: {validation.reason}")
                 logger.warning(f"开仓风控失败: {validation.reason}")
                 return
+
+            print(f"🔍 [开仓触发] 风控验证通过，开始余额检测...")
 
             # ========== 新增 (003-spreading-improvements): 余额检测 ==========
             balance_result = await self.funds_checker.check_before_opening(
@@ -436,8 +444,11 @@ class SpreadArbBot:
             )
 
             if not balance_result.is_sufficient:
+                print(f"🔍 [开仓触发] 余额检测失败: {balance_result.format_log()}")
                 logger.warning(f"余额不足，跳过本次开仓: {balance_result.format_log()}")
                 return
+
+            print(f"🔍 [开仓触发] 余额检测通过，准备切换到OPENING状态...")
 
             # 切换到开仓状态
             # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
