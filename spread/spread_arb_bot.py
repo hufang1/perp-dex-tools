@@ -3056,9 +3056,17 @@ def parse_arguments() -> BotConfig:
     parser.add_argument(
         "--spread-step",
         type=Decimal,
-        default=Decimal("0.00005"),
+        default=None,  # 使用 models.py 中的默认值
         dest="spread_step",
-        help="价差步长值 (默认: 0.00005 = 0.005%%) (016-spread-optimize)"
+        help="价差步长值 (默认: 0.00002 = 0.002%%) (003-spreading-improvements)"
+    )
+
+    parser.add_argument(
+        "--initial-open-spread",
+        type=Decimal,
+        default=None,  # 使用 models.py 中的默认值
+        dest="initial_open_spread",
+        help="初始开仓价差阈值 (默认: 0.0006 = 0.06%%) (003-spreading-improvements)"
     )
 
     parser.add_argument(
@@ -3099,20 +3107,28 @@ def parse_arguments() -> BotConfig:
 
     args = parser.parse_args()
 
-    return BotConfig(
-        symbol=args.symbol,
-        target_quantity=args.target_quantity,
-        min_spread_threshold=args.min_spread_threshold,
-        slippage_buffer=args.slippage_buffer,
-        min_profit=args.min_profit,
-        max_spread=args.max_spread,
-        spread_step=args.spread_step,
-        balance_check_buffer=args.balance_check_buffer,
-        single_side_timeout=args.single_side_timeout,
-        open_wait_timeout=args.open_wait_timeout,
-        dry_run=args.dry_run,
-        verbose=args.verbose,
-    )
+    # ========== 修改 (003-spreading-improvements): 只传递非None的参数，保留dataclass默认值 ==========
+    config_kwargs = {
+        'symbol': args.symbol,
+        'target_quantity': args.target_quantity,
+        'min_spread_threshold': args.min_spread_threshold,
+        'slippage_buffer': args.slippage_buffer,
+        'min_profit': args.min_profit,
+        'max_spread': args.max_spread,
+        'balance_check_buffer': args.balance_check_buffer,
+        'single_side_timeout': args.single_side_timeout,
+        'open_wait_timeout': args.open_wait_timeout,
+        'dry_run': args.dry_run,
+        'verbose': args.verbose,
+    }
+
+    # 只传递非None的参数，保留dataclass默认值
+    if args.spread_step is not None:
+        config_kwargs['spread_step'] = args.spread_step
+    if args.initial_open_spread is not None:
+        config_kwargs['initial_open_spread'] = args.initial_open_spread
+
+    return BotConfig(**config_kwargs)
 
 
 async def main():
