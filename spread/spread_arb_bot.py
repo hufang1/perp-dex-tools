@@ -143,6 +143,13 @@ class SpreadArbBot:
                    f"数量={config.target_quantity}, "
                    f"开仓阈值={config.min_spread_threshold:.3%}, "
                    f"最小利润={config.min_profit:.3%}")
+        # ========== 新增: 打印阶梯开仓配置用于调试 ==========
+        print(f"🔧 [配置初始化] 阶梯开仓参数:")
+        print(f"   - initial_open_spread = {config.initial_open_spread} ({config.initial_open_spread:.3%})")
+        print(f"   - spread_step = {config.spread_step} ({config.spread_step:.3%})")
+        print(f"   - opening_count = {config.opening_count}")
+        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
+        logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.opening_count}, current_threshold={config.current_open_threshold:.3%}")
 
     async def start(self) -> None:
         """启动机器人"""
@@ -399,7 +406,9 @@ class SpreadArbBot:
         if current_time - self._last_idle_log_time >= 5.0:
             current_spread = spread_info.spread_pct
             status_text = "开仓" if should_open else "不开仓"
-            print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} {status_text}")
+            # ========== 新增: 添加计算公式的调试信息 ==========
+            calc_formula = f"{self.config.initial_open_spread:.3%}+({self.config.opening_count}*{self.config.spread_step:.3%})={self.config.current_open_threshold:.3%}"
+            print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} 计算:{calc_formula} {status_text}")
             self._last_idle_log_time = current_time
 
         # 记录实时价差到CSV（每10秒一次）
@@ -1803,6 +1812,15 @@ class SpreadArbBot:
         state = await self.state_manager.load_state()
         logger.debug(f"当前状态: {state.value}")
 
+        # ========== 新增: 打印状态加载后的阶梯开仓配置用于调试 ==========
+        print(f"🔧 [状态加载后] 阶梯开仓参数:")
+        print(f"   - initial_open_spread = {self.config.initial_open_spread} ({self.config.initial_open_spread:.3%})")
+        print(f"   - spread_step = {self.config.spread_step} ({self.config.spread_step:.3%})")
+        print(f"   - opening_count = {self.config.opening_count}")
+        print(f"   - current_open_threshold = {self.config.current_open_threshold} ({self.config.current_open_threshold:.3%})")
+        print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.opening_count} * {self.config.spread_step}) = {self.config.current_open_threshold}")
+        logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.opening_count}, current_threshold={self.config.current_open_threshold:.3%}")
+
         # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
         if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
@@ -3135,6 +3153,14 @@ async def main():
     """主函数"""
     # 解析配置
     config = parse_arguments()
+
+    # ========== 新增: 打印命令行参数解析后的配置用于调试 ==========
+    print(f"🔧 [命令行参数解析] 阶梯开仓参数:")
+    print(f"   - initial_open_spread = {config.initial_open_spread} ({config.initial_open_spread:.3%})")
+    print(f"   - spread_step = {config.spread_step} ({config.spread_step:.3%})")
+    print(f"   - opening_count = {config.opening_count}")
+    print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
+    print(f"   - 计算公式: current = initial + (count * step) = {config.initial_open_spread} + ({config.opening_count} * {config.spread_step}) = {config.current_open_threshold}")
 
     # 验证配置
     if not config.validate():
