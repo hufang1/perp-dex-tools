@@ -52,6 +52,9 @@ class StateManager:
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
+        # 新增 (003-spreading-improvements)
+        BotState.CLOSING_LIMIT: "限价平仓中",
+        BotState.CLOSING_MARKET: "市价平仓中",
     }
 
     def __init__(self, state_file: Path):
@@ -104,6 +107,11 @@ class StateManager:
             # 解析状态
             state_str = data.get("state", "IDLE")
             self._current_state = BotState[state_str]
+
+            # 新增 (003-spreading-improvements): 处理旧状态兼容
+            if self._current_state == BotState.CLOSING_MAKER_WAIT:
+                logger.info("检测到旧状态 CLOSING_MAKER_WAIT，转换为 CLOSING_LIMIT")
+                self._current_state = BotState.CLOSING_LIMIT
 
             # 解析持仓（保持向后兼容）
             position_data = data.get("position")
@@ -170,13 +178,22 @@ class StateManager:
             )
 
             # 解析策略状态配置 (016-spread-optimize Phase 9: T053 状态恢复)
+            # 扩展 (003-spreading-improvements): 添加阶梯开仓和双模式平仓配置
             config_state_data = data.get("config_state")
             if config_state_data:
-                self._config_state = {
-                    "cached_open_spread": Decimal(str(config_state_data.get("cached_open_spread", 0))),
-                    "spread_step": Decimal(str(config_state_data.get("spread_step", "0.00005"))),
-                }
-                logger.info(f"策略状态已恢复: cached_spread={self._config_state['cached_open_spread']:.3%}")
+                if hasattr(self, '_config') and self._config:
+                    self._config.cached_open_spread = Decimal(str(config_state_data.get("cached_open_spread", 0)))
+                    self._config.spread_step = Decimal(str(config_state_data.get("spread_step", "0.00005")))
+                    # 新增 (003-spreading-improvements): 恢复阶梯开仓和双模式平仓配置
+                    self._config.initial_open_spread = Decimal(str(config_state_data.get("initial_open_spread", self._config.initial_open_spread)))
+                    self._config.spread_step = Decimal(str(config_state_data.get("spread_step", self._config.spread_step)))
+                    self._config.opening_count = config_state_data.get("opening_count", 0)
+                    self._config.limit_close_spread_a = Decimal(str(config_state_data.get("limit_close_spread_a", self._config.limit_close_spread_a)))
+                    self._config.market_close_spread_b = Decimal(str(config_state_data.get("market_close_spread_b", self._config.market_close_spread_b)))
+                logger.info(
+                    f"策略状态已恢复: cached_spread={self._config.cached_open_spread:.3%}, "
+                    f"opening_count={self._config.opening_count}"
+                )
             else:
                 self._config_state = None
 
@@ -265,10 +282,17 @@ class StateManager:
                 }
 
             # 新增 (016-spread-optimize Phase 9): 保存策略状态配置
+            # 扩展 (003-spreading-improvements): 添加阶梯开仓和双模式平仓配置
             if hasattr(self, '_config') and self._config:
                 data["config_state"] = {
                     "cached_open_spread": str(self._config.cached_open_spread),
                     "spread_step": str(self._config.spread_step),
+                    # 新增 (003-spreading-improvements)
+                    "initial_open_spread": str(self._config.initial_open_spread),
+                    "spread_step": str(self._config.spread_step),
+                    "opening_count": self._config.opening_count,
+                    "limit_close_spread_a": str(self._config.limit_close_spread_a),
+                    "market_close_spread_b": str(self._config.market_close_spread_b),
                 }
 
             # 确保目录存在
@@ -334,6 +358,9 @@ class StateManager:
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
+        # 新增 (003-spreading-improvements)
+        BotState.CLOSING_LIMIT: "限价平仓中",
+        BotState.CLOSING_MARKET: "市价平仓中",
     }
 
     def set_config(self, config: BotConfig) -> None:

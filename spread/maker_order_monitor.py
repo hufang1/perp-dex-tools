@@ -39,6 +39,9 @@ class MakerOrderMonitor:
         on_order_filled: 订单成交回调
         on_order_partially_filled: 订单部分成交回调
         on_order_canceled: 订单取消回调
+        on_cancellation_initiated: 取消订单发起回调 (003-spreading-improvements)
+        on_cancellation_verified: 取消订单验证成功回调 (003-spreading-improvements)
+        on_cancellation_failed: 取消订单失败回调 (003-spreading-improvements)
     """
 
     def __init__(self):
@@ -51,6 +54,15 @@ class MakerOrderMonitor:
         self.on_order_filled: Optional[Callable[['MakerOrder'], None]] = None
         self.on_order_partially_filled: Optional[Callable[['MakerOrder'], None]] = None
         self.on_order_canceled: Optional[Callable[['MakerOrder'], None]] = None
+
+        # ========== 新增回调 (003-spreading-improvements): 取消订单监控 ==========
+        self.on_cancellation_initiated: Optional[Callable[[str, str], None]] = None
+        self.on_cancellation_verified: Optional[Callable[[str, int, float], None]] = None
+        self.on_cancellation_failed: Optional[Callable[[str, str, str], None]] = None
+
+        # 取消状态跟踪
+        self._cancellation_in_progress = False
+        self._cancellation_start_time: Optional[datetime] = None
 
     def start_monitoring(self, order: 'MakerOrder') -> None:
         """
@@ -80,6 +92,102 @@ class MakerOrderMonitor:
     def is_monitoring(self) -> bool:
         """是否正在监控"""
         return self._monitoring and self._order is not None
+
+    # ========== 新增方法 (003-spreading-improvements): 取消订单监控支持 ==========
+
+    def notify_cancellation_initiated(self, order_id: str, exchange: str) -> None:
+        """
+        通知取消订单已发起
+
+        当开始取消订单时调用，用于通知监控系统取消操作已开始。
+
+        Args:
+            order_id: 要取消的订单ID
+            exchange: 交易所名称
+        """
+        self._cancellation_in_progress = True
+        self._cancellation_start_time = datetime.now()
+
+        logger.info(
+            f"🔕 取消订单已发起 | ID={order_id[:12]}... | exchange={exchange}"
+        )
+
+        if self.on_cancellation_initiated:
+            self.on_cancellation_initiated(order_id, exchange)
+
+    def notify_cancellation_verified(
+        self,
+        order_id: str,
+        attempts: int,
+        total_time: float
+    ) -> None:
+        """
+        通知取消订单验证成功
+
+        当订单取消验证成功时调用。
+
+        Args:
+            order_id: 已取消的订单ID
+            attempts: 尝试次数
+            total_time: 总耗时（秒）
+        """
+        self._cancellation_in_progress = False
+
+        logger.info(
+            f"✅ 取消订单验证成功 | ID={order_id[:12]}... | "
+            f"尝试={attempts}次 | 耗时={total_time:.1f}秒"
+        )
+
+        if self.on_cancellation_verified:
+            self.on_cancellation_verified(order_id, attempts, total_time)
+
+    def notify_cancellation_failed(
+        self,
+        order_id: str,
+        final_status: str,
+        error_message: str
+    ) -> None:
+        """
+        通知取消订单失败
+
+        当订单取消失败时调用。
+
+        Args:
+            order_id: 订单ID
+            final_status: 最终状态
+            error_message: 错误信息
+        """
+        self._cancellation_in_progress = False
+
+        logger.error(
+            f"❌ 取消订单失败 | ID={order_id[:12]}... | "
+            f"状态={final_status} | 错误={error_message}"
+        )
+
+        if self.on_cancellation_failed:
+            self.on_cancellation_failed(order_id, final_status, error_message)
+
+    def is_cancellation_in_progress(self) -> bool:
+        """
+        是否正在进行取消操作
+
+        Returns:
+            True if 取消操作正在进行
+        """
+        return self._cancellation_in_progress
+
+    def get_cancellation_duration(self) -> Optional[float]:
+        """
+        获取取消操作持续时间（秒）
+
+        Returns:
+            取消操作持续时间，如果没有取消操作则返回None
+        """
+        if self._cancellation_start_time is None:
+            return None
+        return (datetime.now() - self._cancellation_start_time).total_seconds()
+
+    # ========== 原有方法 ==========
 
     def get_order(self) -> Optional['MakerOrder']:
         """获取当前监控的订单"""

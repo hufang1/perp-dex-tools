@@ -162,3 +162,23 @@ class ExtremeSpreadError(SpreadArbError):
         super().__init__(
             f"极端价差检测：{spread:.3%} 超过最大允许值 {max_allowed:.3%}"
         )
+
+
+class OrderCancellationError(SpreadArbError):
+    """订单取消失败异常
+
+    当订单取消操作失败时抛出（003-spreading-improvements）
+
+    用于修改挂单价格时，取消旧订单失败的场景
+    """
+    def __init__(self, order_id: str, attempts: int, final_status: str = "", error_message: str = ""):
+        self.order_id = order_id
+        self.attempts = attempts
+        self.final_status = final_status
+        self.error_message = error_message
+        message = f"订单取消失败 | ID={order_id[:12]}... | 尝试={attempts}次"
+        if final_status:
+            message += f" | 最终状态={final_status}"
+        if error_message:
+            message += f" | 错误={error_message}"
+        super().__init__(message)

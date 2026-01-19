@@ -15,11 +15,12 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import logging
 
-from models import SpreadInfo, Position, Trade, PositionState
+from models import SpreadInfo, Position, Trade, PositionState, CancelOrderResult
 from exceptions import (
     ExecutionTimeoutError,
     SingleSideExecutionError,
     RiskValidationFailedError,
+    OrderCancellationError,
 )
 from price_snapshot import PriceSnapshot
 
@@ -1061,6 +1062,232 @@ class TradeExecutor:
             # 因为IOC订单要么成交要么取消，place_limit_order成功说明订单已发送
             logger.warning(f"⚠️ 无法验证Lighter对冲，假设成功（因为订单发送成功）")
             return True
+
+    # ========== 新增方法 (003-spreading-improvements): 取消订单验证 ==========
+
+    async def cancel_maker_order_with_verification(
+        self,
+        order_id: str,
+        exchange: str,
+        max_retries: int = 5,
+        retry_interval: float = 2.0,
+        verify_timeout: float = 5.0
+    ) -> CancelOrderResult:
+        """
+        取消Maker订单并验证取消成功（防止重复挂单）
+
+        在修改挂单价格时，必须先取消旧订单并验证取消成功后才能创建新订单。
+        使用REST API轮询验证取消状态，确保订单真正被取消。
+
+        Args:
+            order_id: 订单ID
+            exchange: 交易所 ("extended" 或 "lighter")
+            max_retries: 最大重试次数（默认5次）
+            retry_interval: 重试间隔（秒，默认2秒）
+            verify_timeout: 验证超时时间（秒，默认5秒）
+
+        Returns:
+            CancelOrderResult 取消操作结果
+
+        Raises:
+            OrderCancellationError: 取消失败时抛出
+        """
+        start_time = time.time()
+        attempts = 0
+        final_status = None
+        error_message = None
+
+        logger.info(
+            f"开始取消订单 | ID={order_id[:12]}... | "
+            f"exchange={exchange} | max_retries={max_retries}"
+        )
+
+        while attempts < max_retries:
+            attempts += 1
+            attempt_start = time.time()
+
+            try:
+                # Step 1: 调用交易所API取消订单
+                cancel_success = False
+                if exchange == "extended":
+                    result = await self.extended_client.cancel_order(order_id)
+                    cancel_success = result.success if hasattr(result, 'success') else result
+                elif exchange == "lighter":
+                    result = await self.lighter_client.cancel_order(order_id)
+                    cancel_success = result.success if hasattr(result, 'success') else result
+                else:
+                    error_message = f"不支持的交易所: {exchange}"
+                    logger.error(error_message)
+                    break
+
+                # 如果取消API调用失败
+                if not cancel_success:
+                    logger.warning(
+                        f"取消API调用失败 | 尝试={attempts}/{max_retries} | "
+                        f"ID={order_id[:12]}..."
+                    )
+                    await asyncio.sleep(retry_interval)
+                    continue
+
+                # Step 2: 验证订单已真正取消（通过REST API轮询）
+                is_canceled = await self._verify_order_cancellation(
+                    order_id=order_id,
+                    exchange=exchange,
+                    timeout=verify_timeout
+                )
+
+                attempt_time = time.time() - attempt_start
+
+                if is_canceled:
+                    total_time = time.time() - start_time
+                    logger.info(
+                        f"订单取消成功 | ID={order_id[:12]}... | "
+                        f"尝试={attempts}次 | 耗时={total_time:.1f}秒"
+                    )
+                    return CancelOrderResult(
+                        order_id=order_id,
+                        canceled=True,
+                        attempts=attempts,
+                        total_time=total_time,
+                        final_status="CANCELED",
+                        error_message=None
+                    )
+                else:
+                    logger.warning(
+                        f"取消验证失败 | 尝试={attempts}/{max_retries} | "
+                        f"ID={order_id[:12]}... | 耗时={attempt_time:.1f}秒"
+                    )
+                    # 继续重试
+                    await asyncio.sleep(retry_interval)
+
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"取消验证超时 | 尝试={attempts}/{max_retries} | "
+                    f"timeout={verify_timeout}秒"
+                )
+                await asyncio.sleep(retry_interval)
+            except Exception as e:
+                logger.error(
+                    f"取消订单异常 | 尝试={attempts}/{max_retries} | "
+                    f"ID={order_id[:12]}... | 错误={e}"
+                )
+                await asyncio.sleep(retry_interval)
+
+        # 所有重试都失败
+        total_time = time.time() - start_time
+
+        # 尝试获取最终状态
+        try:
+            final_status = await self._get_order_status_for_verification(order_id, exchange)
+        except Exception:
+            final_status = "UNKNOWN"
+
+        raise OrderCancellationError(
+            order_id=order_id,
+            attempts=attempts,
+            final_status=final_status,
+            error_message=error_message or "超过最大重试次数"
+        )
+
+    async def _verify_order_cancellation(
+        self,
+        order_id: str,
+        exchange: str,
+        timeout: float = 5.0
+    ) -> bool:
+        """
+        验证订单已取消（私有方法）
+
+        通过REST API轮询查询订单状态，确认订单已被取消或成交。
+
+        Args:
+            order_id: 订单ID
+            exchange: 交易所 ("extended" 或 "lighter")
+            timeout: 验证超时时间（秒）
+
+        Returns:
+            True if 订单已取消/成交（不再活跃），False if 订单仍然开放
+        """
+        start_time = time.time()
+        check_interval = 0.5  # 每500ms检查一次
+
+        while time.time() - start_time < timeout:
+            try:
+                status = await self._get_order_status_for_verification(order_id, exchange)
+
+                # 检查订单状态
+                if status in ["CANCELED", "FILLED", "EXPIRED", "REJECTED"]:
+                    logger.debug(
+                        f"订单确认{status} | ID={order_id[:12]}... | "
+                        f"耗时={time.time() - start_time:.1f}秒"
+                    )
+                    return True
+                elif status == "OPEN":
+                    # 订单仍然开放，继续等待
+                    logger.debug(
+                        f"订单仍开放 | ID={order_id[:12]}... | "
+                        f"elapsed={time.time() - start_time:.1f}秒"
+                    )
+                    await asyncio.sleep(check_interval)
+                elif status == "PARTIALLY_FILLED":
+                    # 部分成交，视为仍然活跃
+                    logger.debug(
+                        f"订单部分成交 | ID={order_id[:12]}... | "
+                        f"elapsed={time.time() - start_time:.1f}秒"
+                    )
+                    await asyncio.sleep(check_interval)
+                else:
+                    # 未知状态
+                    logger.warning(
+                        f"订单状态未知 | ID={order_id[:12]}... | status={status}"
+                    )
+                    await asyncio.sleep(check_interval)
+
+            except Exception as e:
+                logger.error(f"验证取消状态异常: {e}")
+                await asyncio.sleep(check_interval)
+
+        # 超时：无法确认订单已取消
+        logger.warning(
+            f"验证取消超时 | ID={order_id[:12]}... | timeout={timeout}秒"
+        )
+        return False
+
+    async def _get_order_status_for_verification(
+        self,
+        order_id: str,
+        exchange: str
+    ) -> str:
+        """
+        获取订单状态用于取消验证（私有方法）
+
+        Args:
+            order_id: 订单ID
+            exchange: 交易所 ("extended" 或 "lighter")
+
+        Returns:
+            订单状态字符串: "OPEN", "CANCELED", "FILLED", "PARTIALLY_FILLED", etc.
+
+        Raises:
+            Exception: 查询失败时抛出
+        """
+        try:
+            if exchange == "extended":
+                order_info = await self.extended_client.get_order_info(order_id)
+            elif exchange == "lighter":
+                order_info = await self.lighter_client.get_order_info(order_id)
+            else:
+                raise ValueError(f"不支持的交易所: {exchange}")
+
+            if order_info is None:
+                raise Exception(f"订单查询返回None: {order_id}")
+
+            # 返回订单状态
+            return order_info.status
+
+        except Exception as e:
+            logger.error(f"获取订单状态失败 | ID={order_id[:12]}... | exchange={exchange} | 错误={e}")
+            raise
 
     async def cancel_extended_maker_order(
         self,

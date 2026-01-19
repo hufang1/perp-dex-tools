@@ -30,6 +30,10 @@ class BotState(Enum):
     PAUSED = "PAUSED"       # 风控暂停模式（API异常时）
     ERROR = "ERROR"         # 错误状态
 
+    # ========== 新增状态 (003-spreading-improvements) ==========
+    CLOSING_LIMIT = "CLOSING_LIMIT"      # 限价平仓中（等待成交），取代 CLOSING_MAKER_WAIT
+    CLOSING_MARKET = "CLOSING_MARKET"    # 市价平仓中（立即执行），新增
+
 
 class PositionState(Enum):
     """持仓状态枚举"""
@@ -404,6 +408,52 @@ class BotConfig:
     - 相比Taker模式0.025%的手续费，Maker模式几乎无手续费
     """
 
+    # ========== 新增字段 (003-spreading-improvements) ==========
+    # 阶梯价差开仓配置
+    initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.005"))
+    """
+    初始开仓价差阈值
+    - 默认0.5% = 0.005
+    - 第一次开仓使用此阈值
+    """
+
+    spread_step: Decimal = field(default_factory=lambda: Decimal("0.001"))
+    """
+    开仓步长
+    - 默认0.1% = 0.001
+    - 第N次开仓阈值 = initial_open_spread + (N-1) * spread_step
+    """
+
+    opening_count: int = 0
+    """
+    当前开仓次数
+    - 初始值为0
+    - 每次开仓成功后+1
+    - 所有仓位平仓后重置为0
+    - 用于计算当前开仓阈值
+    """
+
+    @property
+    def current_open_threshold(self) -> Decimal:
+        """计算当前开仓阈值"""
+        return self.initial_open_spread + (self.opening_count * self.spread_step)
+
+    # 双模式平仓配置
+    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.002"))
+    """
+    限价平仓阈值A
+    - 默认0.2% = 0.002
+    - 用于判断是否使用限价平仓
+    """
+
+    market_close_spread_b: Decimal = field(default_factory=lambda: Decimal("0.004"))
+    """
+    市价平仓阈值B
+    - 默认0.4% = 0.004
+    - 用于判断是否使用市价平仓
+    - 必须大于 limit_close_spread_a
+    """
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性
@@ -462,6 +512,20 @@ class BotConfig:
             return False
         # 固定开仓阈值应该大于固定平仓阈值
         if self.fixed_open_threshold <= self.fixed_close_threshold:
+            return False
+
+        # 新增字段验证 (003-spreading-improvements)
+        if self.initial_open_spread <= 0:
+            return False
+        if self.spread_step <= 0:
+            return False
+        if self.opening_count < 0:
+            return False
+        if self.limit_close_spread_a <= 0:
+            return False
+        if self.market_close_spread_b <= 0:
+            return False
+        if self.market_close_spread_b <= self.limit_close_spread_a:
             return False
 
         return True
@@ -1029,3 +1093,218 @@ class PositionBalanceSnapshot:
         lig_rem = self.lighter.remaining_capacity
         ext_rem = self.extended.remaining_capacity
         return f"Lig剩余={lig_rem:.4f} | Ext剩余={ext_rem:.4f}"
+
+
+# ========== 新增数据类 (003-spreading-improvements) ==========
+
+@dataclass
+class CancelOrderResult:
+    """
+    取消订单操作结果
+
+    Attributes:
+        order_id: 被取消的订单ID
+        canceled: 是否成功取消
+        attempts: 尝试次数
+        total_time: 总耗时（秒）
+        final_status: 最终订单状态
+        error_message: 错误信息
+    """
+    order_id: str
+    canceled: bool
+    attempts: int
+    total_time: float
+
+    final_status: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @property
+    def is_successful(self) -> bool:
+        """是否成功"""
+        return self.canceled
+
+    def format_log(self) -> str:
+        """格式化为日志字符串"""
+        if self.canceled:
+            return (
+                f"订单取消成功 | ID={self.order_id[:12]}... | "
+                f"尝试={self.attempts}次 | 耗时={self.total_time:.1f}秒"
+            )
+        else:
+            return (
+                f"订单取消失败 | ID={self.order_id[:12]}... | "
+                f"尝试={self.attempts}次 | "
+                f"最终状态={self.final_status} | "
+                f"错误={self.error_message or '未知'}"
+            )
+
+
+@dataclass
+class TieredOpeningState:
+    """
+    阶梯开仓策略状态
+
+    Attributes:
+        current_count: 当前开仓次数
+        current_threshold: 当前开仓阈值
+        next_threshold: 下次开仓阈值
+        initial_spread: 初始开仓价差
+        step_size: 步长
+        opening_history: 开仓历史记录
+    """
+    current_count: int = 0
+    current_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
+    next_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    initial_spread: Decimal = field(default_factory=lambda: Decimal("0.005"))
+    step_size: Decimal = field(default_factory=lambda: Decimal("0.001"))
+
+    opening_history: list = field(default_factory=list)
+
+    def calculate_threshold(self, count: int) -> Decimal:
+        """计算指定次数的阈值"""
+        return self.initial_spread + (count - 1) * self.step_size
+
+    def advance(self) -> None:
+        """推进到下一级"""
+        self.current_count += 1
+        self.current_threshold = self.calculate_threshold(self.current_count)
+        self.next_threshold = self.calculate_threshold(self.current_count + 1)
+
+    def reset(self) -> None:
+        """重置（所有仓位平仓后）"""
+        self.current_count = 0
+        self.current_threshold = self.initial_spread
+        self.next_threshold = self.calculate_threshold(1)
+        self.opening_history.clear()
+
+    def record_opening(self, actual_spread: Decimal) -> None:
+        """记录一次开仓"""
+        import time
+        self.opening_history.append({
+            'count': self.current_count,
+            'threshold': self.current_threshold,
+            'actual_spread': actual_spread,
+            'timestamp': time.time()
+        })
+
+    def format_log(self) -> str:
+        """格式化为日志字符串"""
+        return (
+            f"阶梯开仓 | 次数={self.current_count} | "
+            f"当前阈值={self.current_threshold:.3%} | "
+            f"下次阈值={self.next_threshold:.3%} | "
+            f"初始={self.initial_spread:.3%} | "
+            f"步长={self.step_size:.3%}"
+        )
+
+
+@dataclass
+class CloseModeDecision:
+    """
+    双模式平仓决策结果
+
+    Attributes:
+        should_close: 是否应该平仓
+        use_market: True=市价平仓, False=限价平仓
+        total_position_spread: 总开仓仓位的价差
+        current_spread: 当前市场价差
+        market_threshold: 市价平仓阈值
+        limit_threshold: 限价平仓阈值
+        expected_profit_limit: 限价平仓预期利润
+        expected_profit_market: 市价平仓预期利润
+        decision_time: 决策时间
+    """
+    should_close: bool
+    use_market: bool
+
+    total_position_spread: Decimal = field(default_factory=lambda: Decimal("0"))
+    current_spread: Decimal = field(default_factory=lambda: Decimal("0"))
+    market_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
+    limit_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    expected_profit_limit: Decimal = field(default_factory=lambda: Decimal("0"))
+    expected_profit_market: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    decision_time: float = field(default_factory=lambda: __import__('time').time())
+
+    @property
+    def close_mode_name(self) -> str:
+        """平仓模式名称"""
+        return "市价" if self.use_market else "限价"
+
+    @property
+    def reason(self) -> str:
+        """决策原因"""
+        if not self.should_close:
+            return "不满足平仓条件"
+
+        if self.use_market:
+            return (
+                f"市价平仓 | 利润大 | "
+                f"价差{self.current_spread:.3%} < 市价阈值{self.market_threshold:.3%}"
+            )
+        else:
+            return (
+                f"限价平仓 | 利润小 | "
+                f"价差{self.current_spread:.3%} < 限价阈值{self.limit_threshold:.3%}"
+            )
+
+    def format_log(self) -> str:
+        """格式化为日志字符串"""
+        if not self.should_close:
+            return (
+                f"持仓监控 | 总开仓={self.total_position_spread:.3%} | "
+                f"当前={self.current_spread:.3%} | "
+                f"限价阈值={self.limit_threshold:.3%} | "
+                f"市价阈值={self.market_threshold:.3%}"
+            )
+        else:
+            return (
+                f"平仓触发 | {self.close_mode_name} | {self.reason} | "
+                f"总开仓={self.total_position_spread:.3%}"
+            )
+
+
+@dataclass
+class BalanceAvailabilityResult:
+    """
+    开仓前余额可用性检测结果 (003-spreading-improvements: User Story 4)
+
+    验证两个交易所的可用余额是否足够支持目标开仓数量。
+
+    Attributes:
+        is_sufficient: 余额是否充足（两个交易所都必须充足）
+        ext_available: Extended可用USDT余额
+        ext_required: Extended所需USDT金额
+        lig_available: Lighter可用代币余额
+        lig_required: Lighter所需代币数量
+        check_time: 检查时间戳
+        failure_reason: 失败原因（哪个交易所不足）
+        shortage_amount: 缺少金额（USDT或代币数量）
+    """
+    is_sufficient: bool
+    ext_available: Decimal
+    ext_required: Decimal
+    lig_available: Decimal
+    lig_required: Decimal
+    check_time: float
+
+    failure_reason: Optional[str] = None
+    shortage_amount: Decimal = field(default_factory=lambda: Decimal("0"))
+
+    def format_log(self) -> str:
+        """格式化为日志字符串"""
+        if self.is_sufficient:
+            return (
+                f"余额检测通过 | "
+                f"Ext: {self.ext_available:.2f}/{self.ext_required:.2f} USDT | "
+                f"Lig: {self.lig_available:.4f}/{self.lig_required:.4f} 代币"
+            )
+        else:
+            return (
+                f"余额检测失败 | {self.failure_reason} | "
+                f"缺少={self.shortage_amount:.4f} | "
+                f"Ext: {self.ext_available:.2f}/{self.ext_required:.2f} USDT | "
+                f"Lig: {self.lig_available:.4f}/{self.lig_required:.4f} 代币"
+            )

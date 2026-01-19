@@ -419,6 +419,17 @@ class SpreadArbBot:
                 logger.warning(f"开仓风控失败: {validation.reason}")
                 return
 
+            # ========== 新增 (003-spreading-improvements): 余额检测 ==========
+            balance_result = await self.balance_checker.check_before_opening(
+                target_quantity=self.config.target_quantity,
+                ext_price=spread_info.ext_ask,  # Extended买入价格
+                lig_price=spread_info.lig_bid   # Lighter卖出价格
+            )
+
+            if not balance_result.is_sufficient:
+                logger.warning(f"余额不足，跳过本次开仓: {balance_result.format_log()}")
+                return
+
             # 切换到开仓状态
             if self.config.use_maker_mode:
                 # Maker模式：使用固定阈值
@@ -669,10 +680,11 @@ class SpreadArbBot:
             else:
                 close_formula = ""
 
-            # 判断结果
-            should_close = self.close_strategy.should_close(spread_info).is_triggered
-            if should_close:
-                result = "平仓"
+            # ========== 新增 (003-spreading-improvements): 判断结果（双模式平仓） ==========
+            decision = await self.close_strategy.should_close(spread_info)
+            if decision.should_close:
+                close_mode = "市价" if decision.use_market else "限价"
+                result = f"平仓({close_mode})"
             elif should_open:
                 result = "开仓"
             else:
@@ -690,15 +702,30 @@ class SpreadArbBot:
             self._log_spread_to_csv(spread_info)
             self._last_spread_log_time = current_time
 
-        # 使用智能平仓策略判断 (016-spread-optimize)
-        trigger = self.close_strategy.should_close(spread_info)
+        # ========== 新增 (003-spreading-improvements): 使用双模式平仓策略 ==========
+        decision = await self.close_strategy.should_close(spread_info)
 
-        if trigger.is_triggered:
-            # 切换到平仓状态
-            close_reason = (f"开仓{trigger.entry_spread:.3%} >= 当前{trigger.current_spread:.3%} + "
-                          f"利润{trigger.profit_target:.3%} + 手续费{trigger.fee_rate:.3%} | "
-                          f"预期利润{trigger.expected_profit:.3%}")
-            self.state_manager.set_state(BotState.CLOSING, f"利润目标达成: {close_reason}")
+        if decision.should_close:
+            # 根据利润水平选择平仓模式
+            total_quantity = self.close_strategy.get_total_quantity()
+
+            if decision.use_market:
+                # 市价平仓：立即执行
+                await self._execute_market_close(total_quantity)
+                logger.info(
+                    f"市价平仓触发 | 开仓{decision.total_position_spread:.3%} | "
+                    f"当前{decision.current_spread:.3%} < 市价阈值{decision.market_threshold:.3%} | "
+                    f"预期利润{decision.expected_profit_market:.3%}"
+                )
+            else:
+                # 限价平仓：挂单等待成交
+                await self._execute_limit_close(total_quantity)
+                logger.info(
+                    f"限价平仓触发 | 开仓{decision.total_position_spread:.3%} | "
+                    f"当前{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%} | "
+                    f"预期利润{decision.expected_profit_limit:.3%}"
+                )
+
             await self.state_manager.save_state()
 
     async def _process_closing_state(self) -> None:
@@ -902,6 +929,10 @@ class SpreadArbBot:
                     self.open_strategy.update_cached_spread(self._pending_open_position.open_spread)
                     logger.info(f"更新后开仓价差: {self.config.cached_open_spread:.3%}")
 
+                    # ========== 新增 (003-spreading-improvements): 阶梯开仓回调 ==========
+                    # 调用开仓成功回调，增加开仓次数
+                    await self.open_strategy.on_position_opened(self._pending_open_position.open_spread)
+
                     # CSV埋点：开仓成功
                     self._log_open_to_csv(
                         status='开仓成功',
@@ -1071,6 +1102,10 @@ class SpreadArbBot:
 
                 # 清除所有持仓记录
                 self.close_strategy.close_all()
+
+                # ========== 新增 (003-spreading-improvements): 阶梯开仓重置回调 ==========
+                # 调用所有仓位平仓回调，重置开仓次数
+                await self.open_strategy.on_all_positions_closed()
 
                 # 清除旧的 Position（向后兼容）
                 old_position = self.state_manager.get_position()
@@ -1692,7 +1727,20 @@ class SpreadArbBot:
         self.open_strategy = ArithmeticOpenStrategy(self.config)
 
         # 智能平仓系统 (016-spread-optimize)
-        self.close_strategy = SmartCloseStrategy(self.config)
+        # 新增 (003-spreading-improvements): 传入交易所客户端用于获取持仓信息
+        self.close_strategy = SmartCloseStrategy(
+            self.config,
+            extended_client=self.extended_client,
+            lighter_client=self.lighter_client
+        )
+
+        # ========== 新增 (003-spreading-improvements): 余额检测器 ==========
+        from balance_checker import BalanceChecker
+        self.balance_checker = BalanceChecker(
+            lighter_client=self.lighter_client,
+            extended_client=self.extended_client,
+            config=self.config
+        )
 
         # 价差计算器
         self.spread_calculator = SpreadCalculator(
@@ -2759,10 +2807,18 @@ class SpreadArbBot:
                 f"剩余数量: {old_order.quantity - filled_qty}"
             )
 
-            # 2. 取消旧订单
-            cancel_result = await self.trade_executor.cancel_extended_maker_order(old_order.order_id)
-            if not cancel_result:
-                logger.error(f"取消订单失败: {old_order.order_id}")
+            # 2. 取消旧订单并验证取消成功 (003-spreading-improvements: 使用带验证的取消方法)
+            try:
+                cancel_result = await self.trade_executor.cancel_maker_order_with_verification(
+                    order_id=old_order.order_id,
+                    exchange="extended",
+                    max_retries=5,
+                    retry_interval=2.0,
+                    verify_timeout=5.0
+                )
+            except Exception as cancel_error:
+                logger.error(f"取消订单验证失败: {old_order.order_id} | 错误: {cancel_error}")
+                # 取消失败，停止重挂流程
                 return
 
             # 3. 计算剩余数量（使用原订单数量和已成交数量）
@@ -2823,6 +2879,123 @@ class SpreadArbBot:
         except Exception as e:
             print(f"❌ 重挂订单异常: {e}")
             logger.error(f"重挂订单异常: {e}")
+
+
+    # ========== 新增方法 (003-spreading-improvements): 双模式平仓 ==========
+
+    async def _execute_market_close(self, total_quantity: Decimal) -> None:
+        """
+        执行市价平仓（立即执行）(003-spreading-improvements)
+
+        市价平仓特点：
+        - 并发发送Extended和Lighter市价平仓单
+        - 快速成交，立即兑现利润
+        - 适用场景：利润大，需要快速锁定收益
+
+        Args:
+            total_quantity: 平仓数量
+        """
+        logger.info(f"执行市价平仓: 数量={total_quantity}")
+
+        try:
+            # 创建临时Position对象（execute_close_position需要）
+            temp_position = Position(
+                state=PositionState.LONG,
+                extended_entry_price=Decimal("0"),
+                lighter_entry_price=Decimal("0"),
+                entry_spread=Decimal("0"),  # 市价平仓不需要计算价差
+                entry_time=datetime.now(),
+                extended_quantity=total_quantity,
+                lighter_quantity=-total_quantity,
+                extended_order_id="market_close",
+                lighter_order_id="market_close"
+            )
+
+            # 使用trade_executor的taker模式平仓（016-spread-optimize已经支持）
+            result = await self.trade_executor.execute_close_position(
+                temp_position,
+                total_quantity
+            )
+
+            if result.success:
+                logger.info(
+                    f"✅ 市价平仓成功 | "
+                    f"Ext={result.extended_order_id}, Lig={result.lighter_order_id} | "
+                    f"耗时={result.execution_time:.3f}s"
+                )
+
+                # 进入IDLE状态
+                self.state_manager.set_state(BotState.IDLE, "市价平仓完成")
+                await self.state_manager.save_state()
+            else:
+                logger.error(f"市价平仓失败: {result.error_message}")
+                # 市价平仓失败，回到HOLDING状态
+                self.state_manager.set_state(BotState.HOLDING, "市价平仓失败")
+                await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"市价平仓异常: {e}")
+            self.state_manager.set_state(BotState.ERROR, f"市价平仓异常: {e}")
+            await self.state_manager.save_state()
+
+    async def _execute_limit_close(self, total_quantity: Decimal) -> None:
+        """
+        执行限价平仓（等待成交）(003-spreading-improvements)
+
+        限价平仓特点：
+        - Extended使用Maker挂单模式（低手续费）
+        - 等待订单成交
+        - 适用场景：利润小，使用限价单降低成本
+
+        Args:
+            total_quantity: 平仓数量
+        """
+        logger.info(f"执行限价平仓: 数量={total_quantity}")
+
+        try:
+            # 使用Maker模式平仓（017-ext-maker-mode已经支持）
+            result = await self.trade_executor.place_maker_close_order(total_quantity)
+
+            if not result.success or result.extended_order_id is None:
+                logger.error(f"Extended Maker平仓订单失败: {result.error_message}")
+                self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
+                await self.state_manager.save_state()
+                return
+
+            # 初始化Maker等待状态
+            from models import MakerWaitState
+            if not hasattr(self, '_maker_wait_state'):
+                self._maker_wait_state = MakerWaitState()
+
+            # 创建MakerOrder对象
+            close_order = MakerOrder(
+                order_id=result.extended_order_id,
+                price=result.extended_price,
+                quantity=total_quantity,
+                side='sell',  # 平仓时卖出
+                is_opening=False  # 标记为平仓订单
+            )
+
+            self._maker_wait_state.current_order = close_order
+
+            logger.info(
+                f"✅ Extended Maker平仓订单已挂出 | "
+                f"order_id={close_order.order_id} | "
+                f"price={close_order.price} | "
+                f"quantity={close_order.quantity}"
+            )
+
+            # 进入CLOSING_LIMIT状态（003-spreading-improvements: 新状态）
+            self.state_manager.set_state(
+                BotState.CLOSING_LIMIT,
+                f"Maker平仓订单已挂出: {result.extended_order_id}"
+            )
+            await self.state_manager.save_state()
+
+        except Exception as e:
+            logger.error(f"限价平仓异常: {e}")
+            self.state_manager.set_state(BotState.HOLDING, f"限价平仓异常: {e}")
+            await self.state_manager.save_state()
 
 
 # ========================================================================
