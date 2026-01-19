@@ -16,7 +16,8 @@ spread/              # Core spread arbitrage bot module
 ├── trade_executor.py       # Trade execution with cancel verification
 ├── arithmetic_open_strategy.py  # Tiered opening thresholds
 ├── smart_close_strategy.py # Dual-mode close (market/limit)
-├── balance_checker.py      # Balance availability checker (NEW)
+├── balance_checker.py      # Balance availability checker (NEW - different from position_balance_checker.py)
+├── position_balance_checker.py  # Position balance checker (checks positions AFTER opening)
 ├── maker_order_monitor.py  # Maker order monitoring
 ├── state_manager.py        # State persistence with tiered opening
 ├── models.py               # Data models with new classes
@@ -115,6 +116,22 @@ class BalanceAvailabilityResult:
     failure_reason: Optional[str] = None
     shortage_amount: Decimal = Decimal("0")
 ```
+
+## Important: Two Different Balance Checkers
+
+There are TWO different balance-related checkers in the codebase:
+
+1. **PositionBalanceChecker** (`position_balance_checker.py`)
+   - Checks if positions are balanced AFTER opening
+   - Verifies that both exchange positions match
+   - Used during HOLDING state to detect position imbalance
+   - Attribute: `self.balance_checker` in SpreadArbBot
+
+2. **BalanceAvailabilityChecker** (`balance_checker.py`) - NEW in 003
+   - Checks if available balance is sufficient BEFORE opening
+   - Validates that both exchanges have enough funds
+   - Used during IDLE state before opening
+   - Attribute: `self.funds_checker` in SpreadArbBot
 
 ## Key Workflow Changes
 

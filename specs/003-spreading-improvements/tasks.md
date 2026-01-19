@@ -144,12 +144,12 @@
 
 ### 实现 for User Story 4
 
-- [X] T047 [P] [US4] 创建 spread/balance_checker.py 模块，实现 BalanceChecker 类
+- [X] T047 [P] [US4] 创建 spread/balance_checker.py 模块，实现 BalanceAvailabilityChecker 类 (renamed to avoid conflict with PositionBalanceChecker)
 - [X] T048 [P] [US4] 在 spread/balance_checker.py 中实现 check_before_opening() 方法
 - [X] T049 [P] [US4] 在 spread/balance_checker.py 中实现 _get_extended_balance() 私有方法
 - [X] T050 [P] [US4] 在 spread/balance_checker.py 中实现 _get_lighter_balance() 私有方法
 - [X] T051 [P] [US4] 在 spread/balance_checker.py 中实现 _calculate_required_amount() 私有方法
-- [X] T052 [US4] 在 spread/spread_arb_bot.py 中初始化 BalanceChecker 实例
+- [X] T052 [US4] 在 spread/spread_arb_bot.py 中初始化 BalanceAvailabilityChecker 实例 (as self.funds_checker to avoid conflict)
 - [X] T053 [US4] 在 spread/spread_arb_bot.py 中的 _check_open_signal() 方法里集成余额检测
 - [X] T054 [US4] 添加余额检测结果的详细日志记录
 - [X] T055 [US4] 添加余额检测失败时的优雅降级处理

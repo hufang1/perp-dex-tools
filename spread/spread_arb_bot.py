@@ -420,7 +420,7 @@ class SpreadArbBot:
                 return
 
             # ========== 新增 (003-spreading-improvements): 余额检测 ==========
-            balance_result = await self.balance_checker.check_before_opening(
+            balance_result = await self.funds_checker.check_before_opening(
                 target_quantity=self.config.target_quantity,
                 ext_price=spread_info.ext_ask,  # Extended买入价格
                 lig_price=spread_info.lig_bid   # Lighter卖出价格
@@ -1735,8 +1735,9 @@ class SpreadArbBot:
         )
 
         # ========== 新增 (003-spreading-improvements): 余额检测器 ==========
-        from balance_checker import BalanceChecker
-        self.balance_checker = BalanceChecker(
+        # 注意：这是开仓前的余额检测，与 PositionBalanceChecker 不同
+        from balance_checker import BalanceAvailabilityChecker
+        self.funds_checker = BalanceAvailabilityChecker(
             lighter_client=self.lighter_client,
             extended_client=self.extended_client,
             config=self.config

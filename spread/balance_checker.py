@@ -5,6 +5,10 @@
 1. 查询两个交易所的可用余额
 2. 计算开仓所需金额
 3. 比较并返回检测结果
+
+注意：此模块与 position_balance_checker.py 不同
+- position_balance_checker.py: 开仓后检查两边仓位是否平衡
+- balance_checker.py: 开仓前检查可用余额是否充足
 """
 
 import logging
@@ -17,12 +21,16 @@ from models import BotConfig, BalanceAvailabilityResult
 logger = logging.getLogger(__name__)
 
 
-class BalanceChecker:
+class BalanceAvailabilityChecker:
     """
     可用余额检测器
 
     在开仓前检查两个交易所的可用余额是否足够支持目标仓位，
     防止单边持仓风险。
+
+    注意：这是开仓前的余额检测，与 PositionBalanceChecker 不同
+    - PositionBalanceChecker: 开仓后检查两边仓位是否平衡
+    - BalanceAvailabilityChecker: 开仓前检查可用余额是否充足
 
     职责：
     1. 查询Extended的可用USDT余额
