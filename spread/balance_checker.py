@@ -179,20 +179,30 @@ class BalanceAvailabilityChecker:
                 logger.warning("Extended客户端未初始化")
                 return Decimal("0")
 
-            # 调用交易所API获取余额
-            balance_info = await self.extended_client.get_account_balance()
+            # ========== 使用正确的API方法 ==========
+            # 参考 position_balance_monitor.py 的实现
+            account = self.extended_client.perpetual_trading_client.account
+            if hasattr(account, 'get_balance') and callable(getattr(account, 'get_balance')):
+                result = await account.get_balance()
 
-            # 解析余额数据（根据实际API响应格式调整）
-            if isinstance(balance_info, dict):
-                available = balance_info.get('available', balance_info.get('available_balance', '0'))
-                return Decimal(str(available))
+                if result and hasattr(result, 'data') and result.data:
+                    balance_model = result.data
+                    # 优先使用 available_for_trade（可用于交易的余额）
+                    if hasattr(balance_model, 'available_for_trade'):
+                        available = Decimal(str(balance_model.available_for_trade))
+                        logger.debug(f"Extended可用余额: {available}")
+                        return available
+                    elif hasattr(balance_model, 'balance'):
+                        available = Decimal(str(balance_model.balance))
+                        logger.debug(f"Extended余额: {available}")
+                        return available
 
-            logger.warning(f"Extended余额数据格式异常: {type(balance_info)}")
+            logger.warning("无法获取Extended余额信息")
             return Decimal("0")
 
         except Exception as e:
             logger.error(f"获取Extended余额失败: {e}")
-            raise
+            return Decimal("0")
 
     async def _get_lighter_balance(self, symbol: str = "ETH") -> Decimal:
         """
@@ -212,26 +222,51 @@ class BalanceAvailabilityChecker:
                 logger.warning("Lighter客户端未初始化")
                 return Decimal("0")
 
-            # 调用交易所API获取余额
-            balance_info = await self.lighter_client.get_account_balance()
+            # ========== 使用正确的API方法 ==========
+            # 参考 position_balance_monitor.py 的实现
+            from lighter import AccountApi
+            account_api = AccountApi(self.lighter_client.api_client)
+            account_data = await account_api.account(
+                by="index",
+                value=str(self.lighter_client.account_index)
+            )
 
-            # 解析余额数据（根据实际API响应格式调整）
-            if isinstance(balance_info, dict):
-                # 尝试获取指定代币的余额
-                if 'balances' in balance_info:
-                    for bal in balance_info['balances']:
-                        if bal.get('asset') == symbol:
-                            return Decimal(str(bal.get('available', '0')))
-                # 或者直接返回总余额
-                available = balance_info.get('available', balance_info.get('available_balance', '0'))
-                return Decimal(str(available))
+            if not account_data or not account_data.accounts:
+                logger.warning("无法获取Lighter账户信息")
+                return Decimal("0")
 
-            logger.warning(f"Lighter余额数据格式异常: {type(balance_info)}")
-            return Decimal("0")
+            account_info = account_data.accounts[0]
+
+            # 获取总资产价值作为总保证金
+            total_balance = Decimal('0')
+            if hasattr(account_info, 'total_asset_value'):
+                total_balance = Decimal(str(account_info.total_asset_value))
+
+            # 计算已使用的保证金（所有持仓的allocated_margin之和）
+            margin_used = Decimal('0')
+            if hasattr(account_info, 'positions'):
+                for pos in account_info.positions:
+                    # 只处理有实际持仓的（position != '0'）
+                    pos_value = getattr(pos, 'position', '0')
+                    if str(pos_value) != '0' and hasattr(pos, 'allocated_margin'):
+                        try:
+                            alloc = Decimal(str(pos.allocated_margin))
+                            if alloc > 0:
+                                margin_used += alloc
+                        except (ValueError, TypeError):
+                            continue
+
+            # 可用保证金 = 总资产价值 - 已分配保证金
+            available_balance = total_balance - margin_used
+            if available_balance < 0:
+                available_balance = Decimal('0')
+
+            logger.debug(f"Lighter可用余额: total={total_balance}, margin_used={margin_used}, available={available_balance}")
+            return available_balance
 
         except Exception as e:
             logger.error(f"获取Lighter余额失败: {e}")
-            raise
+            return Decimal("0")
 
     def _calculate_required_amount(
         self,
