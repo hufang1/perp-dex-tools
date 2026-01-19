@@ -405,6 +405,14 @@ class BotConfig:
     """
 
     # ========== 新增字段 (003-spreading-improvements) ==========
+    # 杠杆配置
+    leverage: Decimal = field(default_factory=lambda: Decimal("20"))
+    """
+    杠杆倍数
+    - 默认20x
+    - 可用保证金 x 杠杆 = 最大可开仓位
+    """
+
     # 阶梯价差开仓配置
     initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.0006"))
     """
@@ -1278,6 +1286,7 @@ class BalanceAvailabilityResult:
         check_time: 检查时间戳
         failure_reason: 失败原因（哪个交易所不足）
         shortage_amount: 缺少金额（USDT或代币数量）
+        max_position: 最大可开仓位（考虑杠杆）
     """
     is_sufficient: bool
     ext_available: Decimal
@@ -1288,19 +1297,19 @@ class BalanceAvailabilityResult:
 
     failure_reason: Optional[str] = None
     shortage_amount: Decimal = field(default_factory=lambda: Decimal("0"))
+    max_position: Decimal = field(default_factory=lambda: Decimal("0"))
 
     def format_log(self) -> str:
-        """格式化为日志字符串"""
+        """格式化为简洁日志字符串"""
         if self.is_sufficient:
             return (
-                f"余额检测通过 | "
-                f"Ext: {self.ext_available:.2f}/{self.ext_required:.2f} USDT | "
-                f"Lig: {self.lig_available:.4f}/{self.lig_required:.4f} 代币"
+                f"余额充足 Ext:{self.ext_available:.1f}/{self.ext_required:.1f} "
+                f"Lig:{self.lig_available:.2f}/{self.lig_required:.2f} "
+                f"最大可开{self.max_position:.3f}"
             )
         else:
             return (
-                f"余额检测失败 | {self.failure_reason} | "
-                f"缺少={self.shortage_amount:.4f} | "
-                f"Ext: {self.ext_available:.2f}/{self.ext_required:.2f} USDT | "
-                f"Lig: {self.lig_available:.4f}/{self.lig_required:.4f} 代币"
+                f"{self.failure_reason} "
+                f"Ext:{self.ext_available:.1f}/{self.ext_required:.1f} "
+                f"Lig:{self.lig_available:.2f}/{self.lig_required:.2f}"
             )

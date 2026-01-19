@@ -107,8 +107,11 @@ class BalanceAvailabilityChecker:
             # 检查Extended余额
             if ext_available < ext_required:
                 shortage = ext_required - ext_available
+                leverage = getattr(self.config, 'leverage', Decimal("1"))
+                # 计算最大可开仓位
+                max_position = ext_available * leverage / ext_price
                 logger.warning(
-                    f"Extended余额不足: 可用{ext_available:.2f} < 需要{ext_required:.2f} USDT"
+                    f"Extended余额不足: 可用{ext_available:.2f} < 需要{ext_required:.2f} USDT | 最大可开{max_position:.3f}"
                 )
                 return BalanceAvailabilityResult(
                     is_sufficient=False,
@@ -117,15 +120,19 @@ class BalanceAvailabilityChecker:
                     lig_available=lig_available,
                     lig_required=lig_required,
                     check_time=check_time,
-                    failure_reason="Extended USDT余额不足",
-                    shortage_amount=shortage
+                    failure_reason=f"Extended余额不足(最大{max_position:.3f})",
+                    shortage_amount=shortage,
+                    max_position=max_position
                 )
 
             # 检查Lighter余额
             if lig_available < lig_required:
                 shortage = lig_required - lig_available
+                leverage = getattr(self.config, 'leverage', Decimal("1"))
+                # 计算最大可开仓位
+                max_position = lig_available * leverage / lig_price
                 logger.warning(
-                    f"Lighter余额不足: 可用{lig_available:.4f} < 需要{lig_required:.4f} 代币"
+                    f"Lighter余额不足: 可用{lig_available:.4f} < 需要{lig_required:.4f} 代币 | 最大可开{max_position:.3f}"
                 )
                 return BalanceAvailabilityResult(
                     is_sufficient=False,
@@ -134,14 +141,18 @@ class BalanceAvailabilityChecker:
                     lig_available=lig_available,
                     lig_required=lig_required,
                     check_time=check_time,
-                    failure_reason="Lighter代币余额不足",
-                    shortage_amount=shortage
+                    failure_reason=f"Lighter余额不足(最大{max_position:.3f})",
+                    shortage_amount=shortage,
+                    max_position=max_position
                 )
 
             # 两个交易所余额都充足
+            leverage = getattr(self.config, 'leverage', Decimal("1"))
+            max_position_ext = ext_available * leverage / ext_price
+            max_position_lig = lig_available * leverage / lig_price
+            max_position = min(max_position_ext, max_position_lig)
             logger.info(
-                f"余额检测通过 | Ext: {ext_available:.2f}/{ext_required:.2f} USDT | "
-                f"Lig: {lig_available:.4f}/{lig_required:.4f} 代币"
+                f"余额充足 | Ext:{ext_available:.1f}/{ext_required:.1f} Lig:{lig_available:.2f}/{lig_required:.2f} 最大可开{max_position:.3f}"
             )
             return BalanceAvailabilityResult(
                 is_sufficient=True,
@@ -149,7 +160,8 @@ class BalanceAvailabilityChecker:
                 ext_required=ext_required,
                 lig_available=lig_available,
                 lig_required=lig_required,
-                check_time=check_time
+                check_time=check_time,
+                max_position=max_position
             )
 
         except Exception as e:
@@ -161,7 +173,8 @@ class BalanceAvailabilityChecker:
                 lig_available=Decimal("0"),
                 lig_required=Decimal("0"),
                 check_time=check_time,
-                failure_reason=f"余额检测异常: {str(e)}"
+                failure_reason=f"余额检测异常: {str(e)}",
+                max_position=Decimal("0")
             )
 
     async def _get_extended_balance(self) -> Decimal:
