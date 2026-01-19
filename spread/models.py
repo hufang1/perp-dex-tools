@@ -297,12 +297,8 @@ class BotConfig:
     - 价差缩小时不降低
     """
 
-    spread_step: Decimal = field(default_factory=lambda: Decimal("0.00005"))
-    """
-    价差步长值（用于等差数列策略）
-    - 默认0.05% = 0.0005
-    - 下次开仓阈值 = cached_open_spread + spread_step
-    """
+    # 注意：spread_step 已移至 003-spreading-improvements 新增字段区域
+    # 此处保留注释说明旧逻辑已被阶梯开仓替代
 
     # 仓位平衡检测相关
     balance_check_buffer: float = 3.0
@@ -410,14 +406,14 @@ class BotConfig:
 
     # ========== 新增字段 (003-spreading-improvements) ==========
     # 阶梯价差开仓配置
-    initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.005"))
+    initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.0006"))
     """
     初始开仓价差阈值
     - 默认0.5% = 0.005
     - 第一次开仓使用此阈值
     """
 
-    spread_step: Decimal = field(default_factory=lambda: Decimal("0.001"))
+    spread_step: Decimal = field(default_factory=lambda: Decimal("0.00002"))
     """
     开仓步长
     - 默认0.1% = 0.001

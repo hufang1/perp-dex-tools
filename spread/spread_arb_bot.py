@@ -388,9 +388,11 @@ class SpreadArbBot:
             reason = f"价差{current_spread:.3%} >= 开仓阈值{threshold:.3%}" if should_open else f"价差{current_spread:.3%} < 开仓阈值{threshold:.3%}"
             threshold_info = f"开仓阈值{threshold:.3%}"
         else:
-            # Taker模式：使用等差数列开仓策略
+            # Taker模式：使用阶梯开仓策略 (003-spreading-improvements)
             should_open, reason = self.open_strategy.should_open(spread_info)
-            threshold_info = f"阈值{self.config.min_spread_threshold:.3%}"
+            # 使用新的 current_open_threshold 显示当前阶梯阈值
+            current_threshold = self.config.current_open_threshold
+            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
 
         # 输出空闲状态监控日志（每5秒一次）
         if not hasattr(self, '_last_idle_log_time'):
