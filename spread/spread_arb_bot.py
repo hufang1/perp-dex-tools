@@ -381,12 +381,10 @@ class SpreadArbBot:
 
         # ========== 新增 (017-ext-maker-mode): Maker模式使用固定阈值 ==========
         if self.config.use_maker_mode:
-            # Maker模式：使用固定开仓阈值 fixed_open_threshold
-            current_spread = spread_info.spread_pct
-            should_open = current_spread >= self.config.fixed_open_threshold
-            threshold = self.config.fixed_open_threshold
-            reason = f"价差{current_spread:.3%} >= 开仓阈值{threshold:.3%}" if should_open else f"价差{current_spread:.3%} < 开仓阈值{threshold:.3%}"
-            threshold_info = f"开仓阈值{threshold:.3%}"
+            # Maker模式：使用阶梯开仓阈值 (003-spreading-improvements: 改为使用阶梯阈值)
+            should_open, reason = self.open_strategy.should_open(spread_info)
+            current_threshold = self.config.current_open_threshold
+            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
         else:
             # Taker模式：使用阶梯开仓策略 (003-spreading-improvements)
             should_open, reason = self.open_strategy.should_open(spread_info)
@@ -433,13 +431,12 @@ class SpreadArbBot:
                 return
 
             # 切换到开仓状态
-            if self.config.use_maker_mode:
-                # Maker模式：使用固定阈值
-                threshold = self.config.fixed_open_threshold
-                self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} >= 开仓阈值{threshold:.3%}")
-            else:
-                # Taker模式：使用min_spread_threshold
-                self.state_manager.set_state(BotState.OPENING, f"价差{spread_info.spread_pct:.3%} > 阈值{self.config.min_spread_threshold:.3%}")
+            # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
+            current_threshold = self.config.current_open_threshold
+            self.state_manager.set_state(
+                BotState.OPENING,
+                f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.opening_count})"
+            )
             await self.state_manager.save_state()
 
     async def _process_opening_state(self) -> None:
@@ -1714,9 +1711,10 @@ class SpreadArbBot:
         )
 
         # 价格监控器 (017-ext-maker-mode)
+        # ========== 修改 (003-spreading-improvements): 使用阶梯开仓阈值 ==========
         from price_monitor import SpreadConfig as PriceSpreadConfig
         price_config = PriceSpreadConfig(
-            open_threshold=self.config.fixed_open_threshold,
+            open_threshold=self.config.current_open_threshold,  # 使用阶梯开仓阈值
             close_threshold=self.config.fixed_close_threshold,
             monitor_interval=self.config.price_monitor_interval,
             price_deviation_threshold=1  # 1 tick
@@ -2443,15 +2441,15 @@ class SpreadArbBot:
 
             # ========== 主循环只处理：价差保护 + 价格偏离 ==========
 
-            # 检查价差保护
+            # 检查价差保护 (003-spreading-improvements: 使用阶梯开仓阈值)
             if spread_info and spread_info.is_valid():
-                if spread_info.spread_pct < self.config.fixed_open_threshold:
+                current_threshold = self.config.current_open_threshold
+                if spread_info.spread_pct < current_threshold:
                     # 价差不满足条件，取消订单
                     spread_value = spread_info.spread_pct
-                    threshold_value = self.config.fixed_open_threshold
                     logger.warning(
                         f"⚠️ 价差保护触发 | "
-                        f"实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}"
+                        f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.opening_count})"
                     )
                     await self.trade_executor.cancel_extended_maker_order(order_id)
 
