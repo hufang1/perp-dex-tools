@@ -179,17 +179,27 @@ class StateManager:
 
             # 解析策略状态配置 (016-spread-optimize Phase 9: T053 状态恢复)
             # 扩展 (003-spreading-improvements): 添加阶梯开仓和双模式平仓配置
+            #
+            # 注意：只恢复运行时状态（如 opening_count），不覆盖配置参数（如 initial_open_spread, spread_step）
+            # 配置参数应该由命令行参数决定，状态文件只保存运行时状态
             config_state_data = data.get("config_state")
             if config_state_data:
                 if hasattr(self, '_config') and self._config:
+                    # 只恢复运行时状态
                     self._config.cached_open_spread = Decimal(str(config_state_data.get("cached_open_spread", 0)))
-                    self._config.spread_step = Decimal(str(config_state_data.get("spread_step", "0.00005")))
-                    # 新增 (003-spreading-improvements): 恢复阶梯开仓和双模式平仓配置
-                    self._config.initial_open_spread = Decimal(str(config_state_data.get("initial_open_spread", self._config.initial_open_spread)))
-                    self._config.spread_step = Decimal(str(config_state_data.get("spread_step", self._config.spread_step)))
                     self._config.opening_count = config_state_data.get("opening_count", 0)
-                    self._config.limit_close_spread_a = Decimal(str(config_state_data.get("limit_close_spread_a", self._config.limit_close_spread_a)))
-                    self._config.market_close_spread_b = Decimal(str(config_state_data.get("market_close_spread_b", self._config.market_close_spread_b)))
+
+                    # 不再恢复配置参数，保持命令行参数的优先级
+                    # self._config.initial_open_spread = ...
+                    # self._config.spread_step = ...
+                    # self._config.limit_close_spread_a = ...
+                    # self._config.market_close_spread_b = ...
+
+                    logger.info(
+                        f"策略运行时状态已恢复: cached_spread={self._config.cached_open_spread:.3%}, "
+                        f"opening_count={self._config.opening_count} "
+                        f"(配置参数使用命令行值: initial={self._config.initial_open_spread:.3%}, step={self._config.spread_step:.3%})"
+                    )
                 logger.info(
                     f"策略状态已恢复: cached_spread={self._config.cached_open_spread:.3%}, "
                     f"opening_count={self._config.opening_count}"
