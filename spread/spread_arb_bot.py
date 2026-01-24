@@ -3288,7 +3288,6 @@ class SpreadArbBot:
 
         # 风控通过，等待一段时间确保前一次开仓的订单查询已完成
         # 防止 Extended API 限流（两次开仓太近会导致订单查询冲突）
-        import time
         current_time = time.time()
 
         # 检查距离上次开仓的时间
