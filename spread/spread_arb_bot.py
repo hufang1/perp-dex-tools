@@ -612,9 +612,10 @@ class SpreadArbBot:
 
     async def _process_holding_state(self) -> None:
         """处理 HOLDING 状态：监控价差，寻找平仓机会和继续开仓机会"""
-        position = self.state_manager.get_position()
+        # 使用 Portfolio 检查持仓（替代旧的 Position 对象）
+        total_quantity = self.close_strategy.get_total_quantity()
 
-        if position is None:
+        if total_quantity <= 0:
             logger.warning("持仓信息丢失，返回 IDLE 状态")
             self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
             await self.state_manager.save_state()
@@ -1208,9 +1209,9 @@ class SpreadArbBot:
                 self._api_error_count = 0
                 self._paused_start_time = None
 
-                # 检查是否有持仓，决定返回哪个状态
-                position = self.state_manager.get_position()
-                if position and position.is_open():
+                # 检查是否有持仓，决定返回哪个状态（使用 Portfolio 替代旧的 Position）
+                total_quantity = self.close_strategy.get_total_quantity()
+                if total_quantity > 0:
                     # 有持仓，返回持仓状态
                     self.state_manager.set_state(BotState.HOLDING, "API恢复，继续监控持仓")
                 else:
