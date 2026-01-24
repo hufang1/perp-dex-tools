@@ -667,14 +667,13 @@ class SpreadArbBot:
         # 检查是否可以继续开仓（等差数列策略）
         should_open, reason = self.open_strategy.should_open(spread_info)
 
-        if await self._apply_spread_rules(
+        await self._apply_spread_rules(
             BotState.HOLDING,
             spread_info,
             rule_ids=["open"],
             should_open=should_open,
             reason=reason,
-        ):
-            return
+        )
 
         # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差，下一次开仓价差，平仓需要价差，结果）
         # 限制频率：每5秒输出一次

@@ -373,19 +373,52 @@ class BalanceAvailabilityChecker:
             if hasattr(account_info, 'total_asset_value'):
                 total_balance = Decimal(str(account_info.total_asset_value))
 
-            # 计算已使用的保证金（所有持仓的allocated_margin之和）
+            # 计算已使用的保证金（优先allocated_margin，否则用仓位*价格/杠杆估算）
             margin_used = Decimal('0')
+            fallback_used = Decimal('0')
             if hasattr(account_info, 'positions'):
                 for pos in account_info.positions:
-                    # 只处理有实际持仓的（position != '0'）
                     pos_value = getattr(pos, 'position', '0')
-                    if str(pos_value) != '0' and hasattr(pos, 'allocated_margin'):
+                    if str(pos_value) == '0':
+                        continue
+
+                    alloc = None
+                    if hasattr(pos, 'allocated_margin'):
                         try:
                             alloc = Decimal(str(pos.allocated_margin))
-                            if alloc > 0:
-                                margin_used += alloc
                         except (ValueError, TypeError):
-                            continue
+                            alloc = None
+                    if alloc is not None and alloc > 0:
+                        margin_used += alloc
+                        continue
+
+                    # allocated_margin不可用时，估算保证金
+                    price = None
+                    for attr in ("mark_price", "avg_price", "entry_price", "price", "index_price"):
+                        if hasattr(pos, attr):
+                            raw = getattr(pos, attr)
+                            if raw is not None:
+                                try:
+                                    price = Decimal(str(raw))
+                                    break
+                                except (ValueError, TypeError):
+                                    continue
+                    if price is None or price <= 0:
+                        continue
+
+                    try:
+                        qty = abs(Decimal(str(pos_value)))
+                    except (ValueError, TypeError):
+                        continue
+
+                    lev = getattr(self.config, 'leverage', Decimal("1"))
+                    if lev <= 0:
+                        lev = Decimal("1")
+                    fallback_used += (qty * price) / lev
+
+            if margin_used == 0 and fallback_used > 0:
+                margin_used = fallback_used
+                logger.debug(f"Lighter保证金使用估算: {margin_used}")
 
             # 可用保证金 = 总资产价值 - 已分配保证金
             available_balance = total_balance - margin_used
