@@ -47,8 +47,8 @@ class PositionBalanceMonitor:
         self._cache_ttl: float = 5.0  # 缓存有效期5秒
 
         # 配置参数（默认值，可根据实际情况调整）
-        self._lighter_leverage = Decimal("10")  # Lighter默认10倍杠杆
-        self._extended_leverage = Decimal("10")  # Extended默认10倍杠杆
+        self._lighter_leverage = Decimal("20")  # Lighter默认10倍杠杆
+        self._extended_leverage = Decimal("20")  # Extended默认10倍杠杆
 
     async def get_position_balance(self, force_refresh: bool = False) -> PositionBalanceSnapshot:
         """

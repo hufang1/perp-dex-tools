@@ -177,6 +177,124 @@ class BalanceAvailabilityChecker:
                 max_position=Decimal("0")
             )
 
+    async def check_open_capacity(
+        self,
+        order_notional_usd: Decimal,
+        ext_price: Decimal,
+        lig_price: Optional[Decimal] = None
+    ) -> BalanceAvailabilityResult:
+        """
+        使用固定名义金额检查开仓可用仓位
+
+        规则：
+        - 可用余额 * 杠杆 >= order_notional_usd 则满足
+
+        Args:
+            order_notional_usd: 固定开仓名义金额（USDT）
+            ext_price: Extended价格（用于计算最大可开数量）
+            lig_price: Lighter价格（可选，默认使用ext_price）
+        """
+        import time
+
+        check_time = time.time()
+
+        if lig_price is None:
+            lig_price = ext_price
+
+        try:
+            import asyncio
+
+            ext_balance, lig_balance = await asyncio.gather(
+                self._get_extended_balance(),
+                self._get_lighter_balance(),
+                return_exceptions=True
+            )
+
+            ext_available = ext_balance if isinstance(ext_balance, Decimal) else Decimal("0")
+            lig_available = lig_balance if isinstance(lig_balance, Decimal) else Decimal("0")
+
+            leverage = getattr(self.config, 'leverage', Decimal("1"))
+            if leverage <= 0:
+                leverage = Decimal("1")
+
+            ext_capacity = ext_available * leverage
+            lig_capacity = lig_available * leverage
+            required_margin = order_notional_usd / leverage
+
+            logger.info(
+                f"仓位检测 | 名义={order_notional_usd:.2f} | "
+                f"杠杆={leverage}x | Ext可用={ext_available:.2f} "
+                f"Lig可用={lig_available:.2f} | "
+                f"Ext名义={ext_capacity:.2f} Lig名义={lig_capacity:.2f}"
+            )
+
+            if ext_capacity < order_notional_usd:
+                shortage = order_notional_usd - ext_capacity
+                max_position = ext_capacity / ext_price if ext_price > 0 else Decimal("0")
+                logger.warning(
+                    f"Extended仓位不足: 可用{ext_available:.2f} * {leverage}x < {order_notional_usd:.2f} USDT"
+                )
+                return BalanceAvailabilityResult(
+                    is_sufficient=False,
+                    ext_available=ext_available,
+                    ext_required=required_margin,
+                    lig_available=lig_available,
+                    lig_required=required_margin,
+                    check_time=check_time,
+                    failure_reason=f"Extended仓位不足(最大名义{ext_capacity:.2f})",
+                    shortage_amount=shortage,
+                    max_position=max_position
+                )
+
+            if lig_capacity < order_notional_usd:
+                shortage = order_notional_usd - lig_capacity
+                max_position = lig_capacity / lig_price if lig_price > 0 else Decimal("0")
+                logger.warning(
+                    f"Lighter仓位不足: 可用{lig_available:.2f} * {leverage}x < {order_notional_usd:.2f} USDT"
+                )
+                return BalanceAvailabilityResult(
+                    is_sufficient=False,
+                    ext_available=ext_available,
+                    ext_required=required_margin,
+                    lig_available=lig_available,
+                    lig_required=required_margin,
+                    check_time=check_time,
+                    failure_reason=f"Lighter仓位不足(最大名义{lig_capacity:.2f})",
+                    shortage_amount=shortage,
+                    max_position=max_position
+                )
+
+            max_position_ext = ext_capacity / ext_price if ext_price > 0 else Decimal("0")
+            max_position_lig = lig_capacity / lig_price if lig_price > 0 else Decimal("0")
+            max_position = min(max_position_ext, max_position_lig)
+
+            logger.info(
+                f"仓位充足 | Ext:{ext_available:.1f} Lig:{lig_available:.2f} "
+                f"名义阈值{order_notional_usd:.2f} 最大可开{max_position:.3f}"
+            )
+            return BalanceAvailabilityResult(
+                is_sufficient=True,
+                ext_available=ext_available,
+                ext_required=required_margin,
+                lig_available=lig_available,
+                lig_required=required_margin,
+                check_time=check_time,
+                max_position=max_position
+            )
+
+        except Exception as e:
+            logger.error(f"仓位检测异常: {e}")
+            return BalanceAvailabilityResult(
+                is_sufficient=False,
+                ext_available=Decimal("0"),
+                ext_required=Decimal("0"),
+                lig_available=Decimal("0"),
+                lig_required=Decimal("0"),
+                check_time=check_time,
+                failure_reason=f"仓位检测异常: {str(e)}",
+                max_position=Decimal("0")
+            )
+
     async def _get_extended_balance(self) -> Decimal:
         """
         获取Extended可用USDT余额

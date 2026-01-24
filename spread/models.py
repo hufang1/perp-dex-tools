@@ -410,6 +410,21 @@ class BotConfig:
     - 可用保证金 x 杠杆 = 最大可开仓位
     """
 
+    # 开仓可用仓位检测配置
+    use_fixed_open_notional: bool = True
+    """
+    是否使用固定开仓名义金额做仓位检测
+    - True: 使用 open_order_notional_usd
+    - False: 使用 target_quantity * 当前价格
+    """
+
+    open_order_notional_usd: Decimal = field(default_factory=lambda: Decimal("35"))
+    """
+    固定开仓名义金额（USDT）
+    - 默认35
+    - 当 use_fixed_open_notional=True 时使用
+    """
+
     # 阶梯价差开仓配置
     initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.0006"))
     """
@@ -509,6 +524,8 @@ class BotConfig:
         if self.open_wait_timeout <= 0:
             return False
         if self.total_fee_rate < 0:
+            return False
+        if self.use_fixed_open_notional and self.open_order_notional_usd <= 0:
             return False
         # 只有当设置了利润目标时，才检查利润空间
         if self.min_profit > 0 and self.min_profit <= self.total_fee_rate:
