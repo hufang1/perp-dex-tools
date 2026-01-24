@@ -909,6 +909,7 @@ class MakerWaitState:
         this_opening_filled: 本次开仓成交记录（用于识别"本次开仓"部分）
         needs_reposition: 是否需要重新挂单
         last_reposition_time: 上次重挂时间戳（用于冷却时间检查）
+        is_repositioning: 是否正在重挂中（防止并发调用）
     """
     current_order: Optional[MakerOrder] = None
     start_time: datetime = field(default_factory=datetime.now)
@@ -919,6 +920,7 @@ class MakerWaitState:
     this_opening_filled: list = field(default_factory=list)  # 记录每次成交的订单ID和数量
     needs_reposition: bool = False
     last_reposition_time: float = 0.0  # 上次重挂时间戳
+    is_repositioning: bool = False  # 防止并发重挂
 
     def reset(self) -> None:
         """重置状态"""
@@ -930,6 +932,7 @@ class MakerWaitState:
         self.this_opening_filled = []
         self.needs_reposition = False
         self.last_reposition_time = 0.0
+        self.is_repositioning = False  # 重置重挂标志
 
     def add_fill_record(self, order_id: str, filled_qty: Decimal) -> None:
         """添加成交记录"""

@@ -2513,6 +2513,11 @@ class SpreadArbBot:
             )
 
             if price_deviated:
+                # ========== 新增：检查是否正在重挂中（防止并发） ==========
+                if self._maker_wait_state.is_repositioning:
+                    logger.debug("正在重挂中，跳过本次价格偏离检测")
+                    return
+
                 # 检查冷却时间
                 current_time = time.time()
                 cooldown_remaining = self.config.reposition_cooldown - (current_time - self._maker_wait_state.last_reposition_time)
@@ -2586,6 +2591,11 @@ class SpreadArbBot:
             )
 
             if price_deviated:
+                # ========== 新增：检查是否正在重挂中（防止并发） ==========
+                if self._maker_wait_state.is_repositioning:
+                    logger.debug("正在重挂中，跳过本次价格偏离检测")
+                    return
+
                 # 检查冷却时间
                 current_time = time.time()
                 if current_time - self._maker_wait_state.last_reposition_time < self.config.reposition_cooldown:
@@ -2917,6 +2927,14 @@ class SpreadArbBot:
             logger.warning("无活跃订单可重挂")
             return
 
+        # ========== 防止并发重挂 ==========
+        if self._maker_wait_state.is_repositioning:
+            logger.warning("正在重挂中，跳过本次调用")
+            return
+
+        # 设置重挂标志
+        self._maker_wait_state.is_repositioning = True
+
         old_order = self._maker_wait_state.current_order
 
         try:
@@ -3041,6 +3059,10 @@ class SpreadArbBot:
         except Exception as e:
             print(f"❌ 重挂订单异常: {e}")
             logger.error(f"重挂订单异常: {e}")
+
+        finally:
+            # ========== 清除重挂标志（无论成功或失败） ==========
+            self._maker_wait_state.is_repositioning = False
 
 
     # ========== 新增方法 (003-spreading-improvements): 双模式平仓 ==========
