@@ -412,7 +412,7 @@ class BotConfig:
 
 
     # 阶梯价差开仓配置
-    initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.0006"))
+    initial_open_spread: Decimal = field(default_factory=lambda: Decimal("0.0015"))
     """
     初始开仓价差阈值
     - 默认0.5% = 0.005
