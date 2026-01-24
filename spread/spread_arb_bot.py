@@ -511,8 +511,7 @@ class SpreadArbBot:
 
         if spread_info is None or not spread_info.is_valid():
             logger.warning("无法获取价差信息，取消开仓")
-            self.state_manager.set_state(BotState.IDLE, "无法获取价差信息")
-            await self.state_manager.save_state()
+            await self._enter_idle_or_holding_after_open_failure("无法获取价差信息")
             return
 
         # ========== 新增 (017-ext-maker-mode): Maker模式分支 ==========
@@ -531,8 +530,7 @@ class SpreadArbBot:
 
             if not result.success or result.extended_order_id is None:
                 logger.error(f"Extended Maker开仓订单失败: {result.error_message}")
-                self.state_manager.set_state(BotState.IDLE, "Maker订单失败")
-                await self.state_manager.save_state()
+                await self._enter_idle_or_holding_after_open_failure("Maker订单失败")
                 return
 
             # 初始化Maker等待状态
@@ -568,8 +566,8 @@ class SpreadArbBot:
 
         except Exception as e:
             logger.error(f"Maker模式开仓异常: {e}")
-            self.state_manager.set_state(BotState.IDLE, f"开仓异常: {e}")
-            await self.state_manager.save_state()
+            await self._enter_idle_or_holding_after_open_failure(f"开仓异常: {e}")
+            return
 
     async def _process_opening_taker_mode(self, spread_info) -> None:
         """处理Taker模式开仓（原有逻辑）"""
@@ -3128,9 +3126,26 @@ class SpreadArbBot:
 
     def _get_open_order_notional(self, spread_info) -> Decimal:
         """获取开仓名义金额（USDT）"""
-        if getattr(self.config, "use_fixed_open_notional", False) and self.config.open_order_notional_usd > 0:
-            return self.config.open_order_notional_usd
         return self.config.target_quantity * spread_info.ext_ask
+
+    async def _enter_idle_or_holding_after_open_failure(self, reason: str) -> None:
+        """开仓失败后，根据实际仓位决定进入IDLE或HOLDING"""
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+            if has_position:
+                state_reason = f"{reason} | 检测到仓位 Ext={ext_position}, Lig={lig_position}"
+                self.state_manager.set_state(BotState.HOLDING, state_reason)
+            else:
+                self.state_manager.set_state(BotState.IDLE, reason)
+        except Exception as e:
+            logger.warning(f"开仓失败后检查仓位异常: {e}")
+            self.state_manager.set_state(BotState.IDLE, reason)
+
+        await self.state_manager.save_state()
 
     async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", **_) -> bool:
         """IDLE状态：处理价差触发的开仓转换"""
@@ -3989,20 +4004,6 @@ def parse_arguments() -> BotConfig:
         help="交易数量 (默认: 0.01)"
     )
 
-    parser.add_argument(
-        "--open-notional-usd",
-        type=Decimal,
-        default=Decimal("35"),
-        dest="open_order_notional_usd",
-        help="固定开仓名义金额USDT (默认: 35)"
-    )
-
-    parser.add_argument(
-        "--no-fixed-open-notional",
-        action="store_false",
-        dest="use_fixed_open_notional",
-        help="禁用固定名义金额开仓检测（改用数量*价格）"
-    )
 
     parser.add_argument(
         "--spread-threshold",
@@ -4091,8 +4092,6 @@ def parse_arguments() -> BotConfig:
     config_kwargs = {
         'symbol': args.symbol,
         'target_quantity': args.target_quantity,
-        'open_order_notional_usd': args.open_order_notional_usd,
-        'use_fixed_open_notional': args.use_fixed_open_notional,
         'min_spread_threshold': args.min_spread_threshold,
         'slippage_buffer': args.slippage_buffer,
         'min_profit': args.min_profit,
