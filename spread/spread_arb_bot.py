@@ -433,13 +433,13 @@ class SpreadArbBot:
         if self.config.use_maker_mode:
             # Maker模式：使用阶梯开仓阈值 (003-spreading-improvements: 改为使用阶梯阈值)
             should_open, reason = self.open_strategy.should_open(spread_info)
-            current_threshold = config.current_open_threshold
+            current_threshold = self.config.current_open_threshold
             threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.successful_opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
         else:
             # Taker模式：使用阶梯开仓策略 (003-spreading-improvements)
             should_open, reason = self.open_strategy.should_open(spread_info)
             # 使用新的 current_open_threshold 显示当前阶梯阈值
-            current_threshold = config.current_open_threshold
+            current_threshold = self.config.current_open_threshold
             threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.successful_opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
 
         # 输出空闲状态监控日志（每5秒一次）
@@ -450,7 +450,7 @@ class SpreadArbBot:
             current_spread = spread_info.spread_pct
             status_text = "开仓" if should_open else "不开仓"
             # ========== 新增: 添加计算公式的调试信息 ==========
-            calc_formula = f"{self.config.initial_open_spread:.3%}+({self.config.successful_opening_count}*{self.config.spread_step:.3%})={config.current_open_threshold:.3%}"
+            calc_formula = f"{self.config.initial_open_spread:.3%}+({self.config.successful_opening_count}*{self.config.spread_step:.3%})={self.config.current_open_threshold:.3%}"
             print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} 计算:{calc_formula} {status_text}")
             self._last_idle_log_time = current_time
 
@@ -495,7 +495,7 @@ class SpreadArbBot:
 
             # 切换到开仓状态
             # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
-            current_threshold = config.current_open_threshold
+            current_threshold = self.config.current_open_threshold
             self.state_manager.set_state(
                 BotState.OPENING,
                 f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
@@ -2529,7 +2529,7 @@ class SpreadArbBot:
 
             # 检查价差保护 (003-spreading-improvements: 使用阶梯开仓阈值)
             if spread_info and spread_info.is_valid():
-                current_threshold = config.current_open_threshold
+                current_threshold = self.config.current_open_threshold
                 if spread_info.spread_pct < current_threshold:
                     # 价差不满足条件，取消订单
                     spread_value = spread_info.spread_pct
