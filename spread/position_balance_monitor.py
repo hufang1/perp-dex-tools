@@ -144,6 +144,7 @@ class PositionBalanceMonitor:
             margin_used = Decimal('0')
             fallback_used = Decimal('0')
             allocated_details = []
+            bbo_price = None
             if hasattr(account_info, 'positions'):
                 for pos in account_info.positions:
                     pos_value = getattr(pos, 'position', '0')
@@ -172,6 +173,18 @@ class PositionBalanceMonitor:
                                     break
                                 except (ValueError, TypeError):
                                     continue
+                    if price is None or price <= 0:
+                        try:
+                            market_id = getattr(pos, "market_id", None)
+                            if market_id is None or market_id == self.lighter_client.config.contract_id:
+                                if bbo_price is None:
+                                    lig_bid, lig_ask = await self.lighter_client.fetch_bbo_prices(
+                                        self.lighter_client.config.contract_id
+                                    )
+                                    bbo_price = (lig_bid + lig_ask) / Decimal("2")
+                                price = bbo_price
+                        except Exception:
+                            price = None
                     if price is None or price <= 0:
                         continue
 

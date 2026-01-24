@@ -148,6 +148,8 @@ class SpreadArbBot:
         self._maker_event_task: Optional[asyncio.Task] = None
         self._maker_event_latest: Dict[str, tuple] = {}
         self._maker_event_enqueued: set = set()
+        self._last_open_capacity_log_time: float = 0.0
+        self._last_open_capacity_reason: str = ""
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -692,11 +694,12 @@ class SpreadArbBot:
                 next_open_threshold = cached_spread + spread_step
                 open_formula = f">=(上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
 
-            # 计算平仓价差（从 close_strategy 的 portfolio 获取加权平均开仓价差，与实际平仓判断保持一致）
+            # 计算平仓价差（与 close_strategy 一致：限价阈值/市价阈值）
             entry_spread = self.close_strategy.get_weighted_avg_spread()
             if entry_spread > 0:
-                close_threshold = entry_spread - self.config.min_profit - self.config.total_fee_rate
-                close_formula = f"<=(开仓{entry_spread:.3%}-利润{self.config.min_profit:.3%}-手续费{self.config.total_fee_rate:.3%}={close_threshold:.3%})"
+                limit_threshold = entry_spread - self.config.limit_close_spread_a
+                market_threshold = entry_spread - self.config.market_close_spread_b
+                close_formula = f"限≤{limit_threshold:.3%} 市≤{market_threshold:.3%}"
             else:
                 close_formula = ""
 
@@ -706,15 +709,18 @@ class SpreadArbBot:
                 close_mode = "市价" if decision.use_market else "限价"
                 result = f"平仓({close_mode})"
             elif should_open:
-                result = "开仓"
+                if time.time() - self._last_open_capacity_log_time < 10.0 and self._last_open_capacity_reason:
+                    result = "不开仓(余额不足)"
+                else:
+                    result = "开仓"
             else:
-                result = "不开仓不平仓"
+                result = "不开仓"
 
             # 组合日志，用括号组织逻辑
             if close_formula:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（下一次开仓需价差{open_formula}，平仓需价差{close_formula}），结果：{result}")
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，平仓阈值{close_formula}），结果：{result}")
             else:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（下一次开仓需价差{open_formula}），结果：{result}")
+                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}），结果：{result}")
             self._last_holding_log_time = current_time
 
         # 记录实时价差到CSV（每10秒一次）
@@ -3267,13 +3273,17 @@ class SpreadArbBot:
         )
 
         if not balance_result.is_sufficient:
-            self._log_spread_rule(
-                "warning",
-                BotState.HOLDING,
-                "open_capacity_fail",
-                f"仓位检测失败: {balance_result.format_log()}",
-                also_print=True,
-            )
+            now = time.time()
+            self._last_open_capacity_reason = balance_result.format_log()
+            if now - self._last_open_capacity_log_time >= 5.0:
+                self._log_spread_rule(
+                    "warning",
+                    BotState.HOLDING,
+                    "open_capacity_fail",
+                    f"仓位检测失败: {balance_result.format_log()}",
+                    also_print=True,
+                )
+                self._last_open_capacity_log_time = now
             return True
 
         # 风控通过，等待一段时间确保前一次开仓的订单查询已完成
