@@ -1978,8 +1978,10 @@ class SpreadArbBot:
         """
         try:
             # 转换为 MakerOrderMonitor 需要的格式
+            # 确保 order_id 是字符串类型（Extended SDK 可能返回整数）
+            order_id = order_data.get('order_id')
             monitor_order_data = {
-                'id': order_data.get('order_id'),
+                'id': str(order_id) if order_id is not None else None,  # 转换为字符串
                 'status': order_data.get('status'),
                 'side': order_data.get('side'),
                 'qty': order_data.get('size'),
@@ -2967,6 +2969,34 @@ class SpreadArbBot:
             if remaining_qty <= 0:
                 print(f"✅ 订单已完全成交，无需重挂")
                 logger.info(f"订单已完全成交，无需重挂")
+
+                # ========== 修复：订单已完全成交，需要切换到 LIGHTER_HEDGING 状态 ==========
+                # 停止监控当前订单
+                self.maker_order_monitor.stop_monitoring()
+
+                # 更新 MakerWaitState 中的订单状态
+                if self._maker_wait_state.current_order:
+                    self._maker_wait_state.current_order.status = 'FILLED'
+                    self._maker_wait_state.current_order.filled_quantity = old_order.quantity
+                    self._maker_wait_state.current_order.avg_fill_price = old_order.price
+
+                # 进入 LIGHTER_HEDGING 状态对冲
+                if not hasattr(self, '_hedging_state'):
+                    from models import HedgingState
+                    self._hedging_state = HedgingState()
+                self._hedging_state.ext_filled_quantity = old_order.quantity
+                self._hedging_state.ext_filled_price = old_order.price
+                self._hedging_state.start_time = datetime.now()
+
+                is_opening = (self.state_manager.get_state() == BotState.OPENING_MAKER_WAIT)
+                if is_opening:
+                    self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended完全成交（价格偏离检测），开始Lighter对冲")
+                else:
+                    self._hedging_state.is_closing = True
+                    self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓完全成交（价格偏离检测），开始Lighter对冲")
+                await self.state_manager.save_state()
+
+                logger.info(f"✅ 已切换到 LIGHTER_HEDGING 状态进行对冲")
                 return
 
             # 4. 重新挂单（使用剩余数量）

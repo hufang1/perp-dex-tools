@@ -204,8 +204,14 @@ class MakerOrderMonitor:
             return
 
         # Check if this update is for our monitored order
+        # 确保 order_id 是字符串类型进行比较（Extended SDK 可能返回整数）
         order_id = order_data.get('id')
-        if order_id != self._order.order_id:
+        if str(order_id) != str(self._order.order_id):
+            # 订单 ID 不匹配，跳过此更新
+            logger.debug(
+                f"订单 ID 不匹配 | 收到: {order_id} ({type(order_id).__name__}) | "
+                f"监控中: {self._order.order_id} ({type(self._order.order_id).__name__})"
+            )
             return
 
         async with self._lock:
