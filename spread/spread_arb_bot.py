@@ -19,7 +19,7 @@ import csv
 from decimal import Decimal
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import logging
 import argparse
 import os
@@ -36,6 +36,7 @@ from models import (
     Portfolio,
     RealTimeSpreadInfo,
 )
+from feishu_notifier import FeishuNotifier
 from order_book_manager import OrderBookManager
 from spread_calculator import SpreadCalculator
 from risk_manager import RiskManager
@@ -151,6 +152,8 @@ class SpreadArbBot:
         self._maker_event_enqueued: set = set()
         self._last_open_capacity_log_time: float = 0.0
         self._last_open_capacity_reason: str = ""
+        self._notifier: Optional[FeishuNotifier] = None
+        self._last_close_context: Optional[Dict[str, object]] = None
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -179,6 +182,19 @@ class SpreadArbBot:
 
             # 2. 初始化组件
             await self._init_components()
+
+            # 2.3 启动飞书通知器（不影响主循环）
+            webhook = os.getenv("FEISHU_WEBHOOK_URL")
+            self._notifier = FeishuNotifier(webhook)
+            await self._notifier.start()
+            self._notify(
+                "🚀 套利程序启动",
+                [
+                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"交易对: {self.config.symbol}",
+                    f"数量: {self.config.target_quantity}",
+                ],
+            )
 
             # 2.5 设置 Extended 订单更新处理（WebSocket 订单监控）
             self.extended_client.setup_order_update_handler(self._handle_extended_order_update)
@@ -283,6 +299,22 @@ class SpreadArbBot:
                     await asyncio.wait_for(self.spread_monitor.stop(), timeout=2.0)
                 except asyncio.TimeoutError:
                     logger.warning("停止价差监控器超时")
+
+            # 停止飞书通知器（带超时）
+            if self._notifier:
+                try:
+                    await asyncio.wait_for(self._notifier.stop(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("停止飞书通知器超时")
+
+            self._notify(
+                "🛑 套利程序停止",
+                [
+                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"交易对: {self.config.symbol}",
+                    f"统计: {self._format_stats_line()}",
+                ],
+            )
 
             # 打印统计信息
             self._print_stats()
@@ -815,6 +847,7 @@ class SpreadArbBot:
 
             if not result.success or result.extended_order_id is None:
                 logger.error(f"Extended Maker平仓订单失败: {result.error_message}")
+                self._notify_close_failure(f"Maker平仓订单失败: {result.error_message}")
                 self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
                 await self.state_manager.save_state()
                 return
@@ -853,6 +886,7 @@ class SpreadArbBot:
 
         except Exception as e:
             logger.error(f"限价平仓异常: {e}")
+            self._notify_close_failure(f"限价平仓异常: {e}")
             self.state_manager.set_state(BotState.HOLDING, f"平仓异常: {e}")
             await self.state_manager.save_state()
 
@@ -907,6 +941,7 @@ class SpreadArbBot:
                 print(f"💥 CLOSING -> CLOSING_TAKER -> CLOSING_WAIT | 市价平仓订单已发送")
             else:
                 logger.error(f"市价平仓失败: {result.error_message}")
+                self._notify_close_failure(f"市价平仓失败: {result.error_message}")
                 # 即使失败也进入 CLOSING_WAIT 检查仓位（可能部分成交）
                 logger.warning("市价平仓失败，进入CLOSING_WAIT检查仓位")
 
@@ -918,6 +953,7 @@ class SpreadArbBot:
 
         except Exception as e:
             logger.error(f"CLOSING_TAKER状态异常: {e}")
+            self._notify_close_failure(f"市价平仓异常: {e}")
             self.state_manager.set_state(BotState.HOLDING, f"市价平仓异常: {e}")
             await self.state_manager.save_state()
 
@@ -949,6 +985,7 @@ class SpreadArbBot:
             logger.info(f"平仓订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
         else:
             logger.error(f"平仓订单发送失败: {result.error_message}")
+            self._notify_close_failure(f"平仓订单发送失败: {result.error_message}")
 
         # 进入 CLOSING_WAIT 状态验证仓位（不管订单状态如何）
         import time
@@ -1008,6 +1045,7 @@ class SpreadArbBot:
                 if both_zero:
                     # 两边都没有开仓
                     logger.warning(f"开仓失败：两边都没有仓位")
+                    self._notify_open_failure("两边都没有仓位", ext_position, lig_position)
 
                     # CSV埋点：开仓失败（两边都没开）
                     if hasattr(self, '_pending_open_position') and self._pending_open_position:
@@ -1041,6 +1079,7 @@ class SpreadArbBot:
 
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
+                    self._notify_open_success(ext_position, lig_position)
                     self.close_strategy.add_position(self._pending_open_position)
 
                     # ========== 新增 (003-spreading-improvements): 阶梯开仓回调 ==========
@@ -1241,6 +1280,8 @@ class SpreadArbBot:
                     status='平仓成功'
                 )
 
+                self._notify_close_success(profit)
+
                 self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}")
                 await self.state_manager.save_state()
 
@@ -1251,6 +1292,7 @@ class SpreadArbBot:
                 logger.error(f"⚠️ 平仓后仓位不一致！Ext={'已平' if ext_closed else f'有仓位{ext_position}'}, "
                           f"Lig={'已平' if lig_closed else f'有仓位{lig_position}'}")
                 logger.error("立即强平所有仓位...")
+                self._notify_close_failure("平仓后仓位不一致，触发强平")
 
                 await self._force_close_positions()
 
@@ -1298,6 +1340,7 @@ class SpreadArbBot:
                 logger.warning(f"⚠️ 平仓失败：两边都仍有仓位 Ext={ext_position} Lig={lig_position}")
 
                 # 保持 HOLDING 状态，等待下一次机会
+                self._notify_close_failure("平仓失败：两边仍有持仓")
                 self.state_manager.set_state(BotState.HOLDING, "平仓失败，仍有持仓")
                 await self.state_manager.save_state()
 
@@ -2443,10 +2486,7 @@ class SpreadArbBot:
         """打印统计信息（精简单行格式）"""
         stats = self.get_stats()
 
-        # 单行格式: 统计: 交易10次 | 胜率60% | 净利润$0.50 | 运行时间1:23:45
-        stats_str = (f"统计: 交易{stats.total_trades}次 | "
-                    f"胜率{stats.win_rate:.1%} | "
-                    f"净利润${stats.net_profit:.2f}")
+        stats_str = self._format_stats_line()
 
         if stats.start_time:
             uptime = datetime.now() - stats.start_time
@@ -2461,6 +2501,15 @@ class SpreadArbBot:
                 f"Maker锁统计: count={self._maker_lock_acquire_count} "
                 f"avg_wait={avg_wait:.4f}s max_wait={self._maker_lock_wait_max:.4f}s"
             )
+
+    def _format_stats_line(self) -> str:
+        """返回统计信息单行（用于日志/推送）"""
+        stats = self.get_stats()
+        return (
+            f"交易{stats.total_trades}次 | "
+            f"胜率{stats.win_rate:.1%} | "
+            f"净利润${stats.net_profit:.2f}"
+        )
 
     @asynccontextmanager
     async def _maker_lock(self, label: str):
@@ -3239,6 +3288,75 @@ class SpreadArbBot:
         if also_print:
             print(prefix + message)
 
+    def _notify(self, title: str, lines: List[str]) -> None:
+        if self._notifier:
+            self._notifier.enqueue(title, lines)
+
+    def _set_close_context(self, decision, close_spread_info: Optional[RealTimeSpreadInfo]) -> None:
+        if not close_spread_info:
+            return
+        self._last_close_context = {
+            "mode": "市价" if decision.use_market else "挂单",
+            "close_spread": decision.current_spread,
+            "profit_spread": decision.expected_profit_market if decision.use_market else decision.expected_profit_limit,
+            "ext_bid": close_spread_info.ext_bid,
+            "lig_ask": close_spread_info.lig_ask,
+        }
+
+    def _notify_open_success(self, ext_pos: Decimal, lig_pos: Decimal) -> None:
+        if not hasattr(self, "_pending_open_position") or not self._pending_open_position:
+            return
+        pos = self._pending_open_position
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            "方向: Ext买 / Lig卖",
+            f"开仓价差率: {pos.open_spread:.3%}",
+            f"Ext开仓价: {pos.ext_price:.2f}",
+            f"Lig开仓价: {pos.lig_price:.2f}",
+            f"Ext仓位: {ext_pos}",
+            f"Lig仓位: {lig_pos}",
+        ]
+        self._notify("✅ 开仓成功", lines)
+
+    def _notify_open_failure(self, reason: str, ext_pos: Optional[Decimal] = None, lig_pos: Optional[Decimal] = None) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"原因: {reason}",
+        ]
+        if ext_pos is not None and lig_pos is not None:
+            lines.append(f"仓位: Ext={ext_pos} Lig={lig_pos}")
+        self._notify("❌ 开仓失败", lines)
+
+    def _notify_close_success(self, profit: Decimal) -> None:
+        ctx = self._last_close_context or {}
+        mode = ctx.get("mode", "未知")
+        close_spread = ctx.get("close_spread", Decimal("0"))
+        profit_spread = ctx.get("profit_spread", Decimal("0"))
+        ext_bid = ctx.get("ext_bid", Decimal("0"))
+        lig_ask = ctx.get("lig_ask", Decimal("0"))
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"方式: {mode}",
+            "方向: Ext卖 / Lig买",
+            f"平仓价差率: {close_spread:.3%}",
+            f"利润率: {profit_spread:.3%}",
+            f"Ext平仓价: {ext_bid:.2f}",
+            f"Lig平仓价: {lig_ask:.2f}",
+            f"收益: {profit:.2f}",
+        ]
+        self._notify("✅ 平仓成功", lines)
+
+    def _notify_close_failure(self, reason: str) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"原因: {reason}",
+        ]
+        self._notify("❌ 平仓失败", lines)
+
     def _get_open_order_notional(self, spread_info) -> Decimal:
         """获取开仓名义金额（USDT）"""
         return self.config.target_quantity * spread_info.ext_ask
@@ -3253,11 +3371,14 @@ class SpreadArbBot:
 
             if has_position:
                 state_reason = f"{reason} | 检测到仓位 Ext={ext_position}, Lig={lig_position}"
+                self._notify_open_failure(reason, ext_position, lig_position)
                 self.state_manager.set_state(BotState.HOLDING, state_reason)
             else:
+                self._notify_open_failure(reason, ext_position, lig_position)
                 self.state_manager.set_state(BotState.IDLE, reason)
         except Exception as e:
             logger.warning(f"开仓失败后检查仓位异常: {e}")
+            self._notify_open_failure(reason)
             self.state_manager.set_state(BotState.IDLE, reason)
 
         await self.state_manager.save_state()
@@ -3409,6 +3530,7 @@ class SpreadArbBot:
 
         # 根据利润水平选择平仓模式
         total_quantity = self.close_strategy.get_total_quantity()
+        self._set_close_context(decision, close_spread_info)
 
         if decision.use_market:
             # 市价平仓：立即执行
@@ -3465,6 +3587,7 @@ class SpreadArbBot:
             return True
 
         # 根据决策执行平仓
+        self._set_close_context(decision, close_spread_info)
         close_mode = "市价" if decision.use_market else "限价挂单"
         self._log_spread_rule(
             "info",
@@ -3569,6 +3692,7 @@ class SpreadArbBot:
             decision = await self.close_strategy.should_close(close_spread_info)
             if decision.should_close:
                 async with self._maker_lock("open_close_preempt"):
+                    self._set_close_context(decision, close_spread_info)
                     # 需要平仓，取消开仓挂单
                     close_mode = "市价" if decision.use_market else "限价"
                     self._log_spread_rule(
