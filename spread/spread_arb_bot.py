@@ -2124,7 +2124,7 @@ class SpreadArbBot:
                 # ========== 修复：开仓订单取消，先检查是否有其他持仓 ==========
                 # 检查 Portfolio 中是否有其他持仓
                 portfolio = self.close_strategy.get_portfolio()
-                total_quantity = portfolio.get_total_quantity()
+                total_quantity = portfolio.total_quantity
 
                 if total_quantity > 0:
                     # 有其他持仓，进入 HOLDING 状态
