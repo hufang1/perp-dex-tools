@@ -2502,21 +2502,20 @@ class SpreadArbBot:
                     self.extended_client.config.contract_id
                 )
 
-                # 获取仓位余额信息（用于风控显示）
-                balance_log = ""
-                try:
-                    balance_snapshot = await self.position_balance_monitor.get_position_balance()
-                    if balance_snapshot.is_valid():
-                        balance_log = f" | {balance_snapshot.format_compact_log()}"
-                except Exception as e:
-                    logger.debug(f"获取仓位余额失败: {e}")
+                # 获取当前仓位价差
+                position = self.state_manager.get_position()
+                position_spread_str = "无"
+                if position and position.entry_spread > 0:
+                    position_spread_str = f"{position.entry_spread:.3%}"
 
                 # 输出监控日志（每秒一次）
                 print(
                     f"📊 状态「开仓挂单等待成交」 | "
                     f"实时价差{spread_info.spread_pct:.3%} | "
-                    f"ext_bid={ext_bid:.2f} ext_ask={ext_ask:.2f}"
-                    f"{balance_log}"
+                    f"ext_bid={ext_bid:.2f} | "
+                    f"仓位价差{position_spread_str} | "
+                    f"限平{self.config.limit_close_spread_a:.2%} | "
+                    f"市平{self.config.market_close_spread_b:.2%}"
                 )
 
             # ========== 订单成交/取消由 WebSocket 处理，主循环不再检测 ==========
