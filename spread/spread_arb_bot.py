@@ -2913,10 +2913,44 @@ class SpreadArbBot:
                             return
 
             # 执行Lighter对冲
+            # 使用订单簿计算VWAP作为对冲价格（A方案）
+            lig_vwap = None
+            try:
+                lig_vwap = await self.order_book_manager.calculate_vwap(
+                    "lighter",
+                    ext_filled_qty,
+                    "buy" if hedge_side == "buy" else "sell"
+                )
+                if lig_vwap and lig_vwap > 0:
+                    slip = self.config.lighter_hedge_slippage_bps
+                    if hedge_side == "buy":
+                        lig_vwap = lig_vwap * (Decimal("1") + slip)
+                    else:
+                        lig_vwap = lig_vwap * (Decimal("1") - slip)
+                    logger.info(f"Lighter对冲VWAP(含滑点): {lig_vwap} | slip={slip}")
+            except Exception as e:
+                logger.warning(f"计算Lighter VWAP失败，使用BBO: {e}")
+
+            if not lig_vwap or lig_vwap <= 0:
+                try:
+                    lig_bid, lig_ask = await self.lighter_client.fetch_bbo_prices(
+                        self.lighter_client.config.contract_id
+                    )
+                    slip = self.config.lighter_hedge_slippage_bps
+                    if hedge_side == "buy":
+                        lig_vwap = lig_ask * (Decimal("1") + slip)
+                    else:
+                        lig_vwap = lig_bid * (Decimal("1") - slip)
+                    logger.info(f"Lighter对冲BBO(含滑点): {lig_vwap} | slip={slip}")
+                except Exception as e:
+                    logger.warning(f"获取Lighter BBO失败，使用默认价格: {e}")
+                    lig_vwap = None
+
             result = await self.trade_executor.execute_lighter_hedge(
                 quantity=ext_filled_qty,
                 side=hedge_side,
-                ext_filled_price=ext_filled_price
+                ext_filled_price=ext_filled_price,
+                price_override=lig_vwap
             )
 
             if result.success and result.lighter_filled:
@@ -4075,6 +4109,14 @@ def parse_arguments() -> BotConfig:
     )
 
     parser.add_argument(
+        "--lighter-hedge-slippage",
+        type=Decimal,
+        default=None,
+        dest="lighter_hedge_slippage_bps",
+        help="Lighter对冲VWAP滑点缓冲 (默认: 0.0002 = 0.02%)"
+    )
+
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="模拟运行模式"
@@ -4108,6 +4150,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['spread_step'] = args.spread_step
     if args.initial_open_spread is not None:
         config_kwargs['initial_open_spread'] = args.initial_open_spread
+    if args.lighter_hedge_slippage_bps is not None:
+        config_kwargs['lighter_hedge_slippage_bps'] = args.lighter_hedge_slippage_bps
 
     return BotConfig(**config_kwargs)
 

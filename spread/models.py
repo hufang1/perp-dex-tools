@@ -474,6 +474,13 @@ class BotConfig:
     - 必须大于 limit_close_spread_a
     """
 
+    lighter_hedge_slippage_bps: Decimal = field(default_factory=lambda: Decimal("0.0002"))
+    """
+    Lighter对冲VWAP滑点缓冲
+    - 默认0.02% = 0.0002
+    - 买入时在VWAP基础上上浮，卖出时在VWAP基础上下调
+    """
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性

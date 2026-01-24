@@ -936,7 +936,8 @@ class TradeExecutor:
         self,
         quantity: Decimal,
         side: str,  # 'buy' or 'sell'
-        ext_filled_price: Decimal
+        ext_filled_price: Decimal,
+        price_override: Optional[Decimal] = None
     ) -> ExecutionResult:
         """
         在Lighter执行对冲订单（Taker模式，即时成交）
@@ -953,16 +954,19 @@ class TradeExecutor:
         """
         start_time = time.time()
         try:
-            # 获取Lighter BBO价格
-            lig_bid, lig_ask = await self.lighter_client.fetch_bbo_prices(
-                self.lighter_client.config.contract_id
-            )
-
-            # 根据方向选择价格
-            if side.lower() == 'buy':
-                lig_price = lig_ask  # 买入使用ask价格
+            if price_override is not None:
+                lig_price = price_override
             else:
-                lig_price = lig_bid  # 卖出使用bid价格
+                # 获取Lighter BBO价格
+                lig_bid, lig_ask = await self.lighter_client.fetch_bbo_prices(
+                    self.lighter_client.config.contract_id
+                )
+
+                # 根据方向选择价格
+                if side.lower() == 'buy':
+                    lig_price = lig_ask  # 买入使用ask价格
+                else:
+                    lig_price = lig_bid  # 卖出使用bid价格
 
             # 下Lighter Taker订单
             lighter_result = await self._place_lighter_order_taker(side, quantity, lig_price)
