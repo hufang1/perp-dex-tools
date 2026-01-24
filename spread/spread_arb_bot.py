@@ -1452,6 +1452,8 @@ class SpreadArbBot:
             lig_current: Lighter当前仓位
         """
         tolerance = Decimal("0.001")
+        ext_min_qty = getattr(self.extended_client, "min_order_size", tolerance)
+        lig_min_qty = getattr(self.lighter_client, "min_order_size", tolerance)
 
         # 策略：取两边较小的仓位作为基准
         base_qty = min(ext_current, lig_current)
@@ -1482,15 +1484,19 @@ class SpreadArbBot:
                 # 并发回滚两边多出来的仓位
                 close_tasks = []
 
-                if ext_extra >= tolerance:
+                if ext_extra >= ext_min_qty:
                     side = "sell"  # 多头平仓 = 卖出
                     close_tasks.append(("extended", ext_extra, side))
                     logger.info(f"回滚 Extended {ext_extra}")
+                elif ext_extra >= tolerance:
+                    logger.warning(f"Extended回滚数量低于最小下单量({ext_min_qty})，跳过: {ext_extra}")
 
-                if lig_extra >= tolerance:
+                if lig_extra >= lig_min_qty:
                     side = "buy"  # 空头平仓 = 买入
                     close_tasks.append(("lighter", lig_extra, side))
                     logger.info(f"回滚 Lighter {lig_extra}")
+                elif lig_extra >= tolerance:
+                    logger.warning(f"Lighter回滚数量低于最小下单量({lig_min_qty})，跳过: {lig_extra}")
 
                 if not close_tasks:
                     logger.info("回滚完成")
