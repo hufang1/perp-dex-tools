@@ -48,13 +48,11 @@ class StateManager:
         BotState.HOLDING: "持仓中",
         BotState.CLOSING: "平仓中",
         BotState.CLOSING_MAKER_WAIT: "平仓挂单等待成交",  # 新增 (017-ext-maker-mode)
+        BotState.CLOSING_TAKER: "市价平仓中",
         BotState.LIGHTER_HEDGING: "lighter对冲中",  # 新增 (017-ext-maker-mode)
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
-        # 新增 (003-spreading-improvements)
-        BotState.CLOSING_LIMIT: "限价平仓中",
-        BotState.CLOSING_TAKER: "市价平仓中",
     }
 
     def __init__(self, state_file: Path):
@@ -107,11 +105,6 @@ class StateManager:
             # 解析状态
             state_str = data.get("state", "IDLE")
             self._current_state = BotState[state_str]
-
-            # 新增 (003-spreading-improvements): 处理旧状态兼容
-            if self._current_state == BotState.CLOSING_MAKER_WAIT:
-                logger.info("检测到旧状态 CLOSING_MAKER_WAIT，转换为 CLOSING_LIMIT")
-                self._current_state = BotState.CLOSING_LIMIT
 
             # 解析持仓（保持向后兼容）
             position_data = data.get("position")
@@ -368,8 +361,6 @@ class StateManager:
         BotState.CLOSING_WAIT: "平仓等待确认",
         BotState.PAUSED: "风控暂停",
         BotState.ERROR: "错误",
-        # 新增 (003-spreading-improvements)
-        BotState.CLOSING_LIMIT: "限价平仓中",
         BotState.CLOSING_TAKER: "市价平仓中",
     }
 
