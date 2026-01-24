@@ -2237,15 +2237,15 @@ class SpreadArbBot:
                         )
                         if handled:
                             return
-            else:
-                # 平仓订单取消 -> HOLDING
-                handled = await self._safe_exit_maker_wait(
-                    BotState.HOLDING,
-                    "平仓订单已取消（WebSocket）",
-                    is_opening=False,
-                )
-                if handled:
-                    return
+                else:
+                    # 平仓订单取消 -> HOLDING
+                    handled = await self._safe_exit_maker_wait(
+                        BotState.HOLDING,
+                        "平仓订单已取消（WebSocket）",
+                        is_opening=False,
+                    )
+                    if handled:
+                        return
 
             # 重置等待状态
             if hasattr(self, '_maker_wait_state'):
