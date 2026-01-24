@@ -411,7 +411,7 @@ class BotConfig:
     """
 
     # 开仓可用仓位检测配置
-    use_fixed_open_notional: bool = True
+    use_fixed_open_notional: bool = False
     """
     是否使用固定开仓名义金额做仓位检测
     - True: 使用 open_order_notional_usd
@@ -473,7 +473,7 @@ class BotConfig:
         return self.initial_open_spread + (self.successful_opening_count * self.spread_step)
 
     # 双模式平仓配置
-    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.0001"))
+    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.00005"))
     """
     限价平仓阈值A
     - 默认0.2% = 0.002
