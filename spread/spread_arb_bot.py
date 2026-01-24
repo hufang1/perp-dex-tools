@@ -433,7 +433,8 @@ class SpreadArbBot:
                 if position_diff < tolerance:
                     # 两边仓位相等，说明是正常持仓
                     if abs(ext_position) >= tolerance:
-                        # 有正常持仓，进入 HOLDING 状态
+                        # 有正常持仓，进入 HOLDING 状态（必要时重建Portfolio）
+                        await self.close_strategy.ensure_portfolio_from_exchange(ext_position, lig_position, tolerance)
                         logger.info(f"检测到正常持仓 Ext={ext_position} Lig={lig_position}，进入持仓状态")
                         self.state_manager.set_state(BotState.HOLDING, "回滚后恢复持仓状态")
                         await self.state_manager.save_state()
@@ -656,10 +657,32 @@ class SpreadArbBot:
         total_quantity = self.close_strategy.get_total_quantity()
 
         if total_quantity <= 0:
-            logger.warning("持仓信息丢失，返回 IDLE 状态")
-            self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
-            await self.state_manager.save_state()
-            return
+            # 可能是本地Portfolio丢失，但交易所仍有仓位
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                if abs(ext_position) >= tolerance and abs(lig_position) >= tolerance:
+                    synced = await self.close_strategy.ensure_portfolio_from_exchange(
+                        ext_position, lig_position, tolerance
+                    )
+                    if synced:
+                        logger.info("已从交易所仓位恢复Portfolio，继续持仓逻辑")
+                    else:
+                        logger.warning("持仓信息丢失，返回 IDLE 状态")
+                        self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
+                        await self.state_manager.save_state()
+                        return
+                else:
+                    logger.warning("持仓信息丢失，返回 IDLE 状态")
+                    self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
+                    await self.state_manager.save_state()
+                    return
+            except Exception as e:
+                logger.warning(f"检查持仓失败: {e}")
+                self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
+                await self.state_manager.save_state()
+                return
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
         spread_info = self.spread_monitor.get_current_spread()

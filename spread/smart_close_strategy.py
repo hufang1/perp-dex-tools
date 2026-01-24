@@ -167,6 +167,47 @@ class SmartCloseStrategy:
         """获取加权平均开仓价差"""
         return self.portfolio.get_total_entry_spread()
 
+    async def ensure_portfolio_from_exchange(
+        self,
+        ext_position: Decimal,
+        lig_position: Decimal,
+        tolerance: Decimal = Decimal("0.001"),
+    ) -> bool:
+        """
+        当本地Portfolio为空但交易所实际有仓位时，尝试用交易所均价重建
+        """
+        if self.portfolio.get_active_positions():
+            return True
+
+        qty = min(abs(ext_position), abs(lig_position))
+        if qty < tolerance:
+            return False
+
+        ext_avg, lig_avg = await self._fetch_exchange_avg_prices()
+        if ext_avg > 0 and lig_avg > 0:
+            open_spread = (lig_avg - ext_avg) / ext_avg
+            ext_price = ext_avg
+            lig_price = lig_avg
+        else:
+            open_spread = Decimal("0")
+            ext_price = Decimal("0")
+            lig_price = Decimal("0")
+
+        pos = OpenPosition(
+            position_id=f"recovered-{int(datetime.now().timestamp())}",
+            open_time=datetime.now().timestamp(),
+            ext_price=ext_price,
+            lig_price=lig_price,
+            open_spread=open_spread,
+            quantity=qty,
+            ext_order_id="recovered",
+            lig_order_id="recovered",
+            is_active=True,
+        )
+        self.portfolio.add_position(pos)
+        logger.info(f"已从交易所仓位重建Portfolio | qty={qty} | open_spread={open_spread:.3%}")
+        return True
+
     def format_status(self) -> str:
         """
         格式化策略状态为单行日志
