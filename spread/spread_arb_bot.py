@@ -2729,8 +2729,30 @@ class SpreadArbBot:
                                 f"对冲{ext_filled_qty}完成，剩余{remaining}继续等待"
                             )
                     else:
-                        # 全部成交，进入验证状态
+                        # ========== 修复：Maker 模式下创建 _pending_open_position ==========
                         if is_opening:
+                            # 获取当前价差信息
+                            spread_info = self.spread_monitor.get_current_spread()
+                            if spread_info and spread_info.is_valid():
+                                # 创建 _pending_open_position（用于后续添加到 Portfolio）
+                                self._pending_open_position = OpenPosition(
+                                    position_id=str(uuid.uuid4()),
+                                    open_time=datetime.now().timestamp(),
+                                    ext_price=ext_filled_price,
+                                    lig_price=result.lighter_price or Decimal('0'),
+                                    open_spread=spread_info.spread_pct,
+                                    quantity=ext_filled_qty,
+                                    ext_order_id=self._maker_wait_state.current_order.order_id,
+                                    lig_order_id=result.lighter_order_id,
+                                    is_active=True,
+                                )
+                                logger.info(
+                                    f"创建待确认仓位 | Maker模式 | "
+                                    f"ext_price={ext_filled_price} | "
+                                    f"lig_price={result.lighter_price} | "
+                                    f"open_spread={spread_info.spread_pct:.3%}"
+                                )
+
                             import time
                             self._opening_wait_start_time = time.time()
                             self.state_manager.set_state(BotState.OPENING_WAIT, "对冲完成，验证仓位")
@@ -2739,6 +2761,20 @@ class SpreadArbBot:
                 else:
                     # 没有maker_wait_state，直接进入验证
                     if is_opening:
+                        # ========== 修复：Maker 模式下创建 _pending_open_position ==========
+                        spread_info = self.spread_monitor.get_current_spread()
+                        if spread_info and spread_info.is_valid():
+                            self._pending_open_position = OpenPosition(
+                                position_id=str(uuid.uuid4()),
+                                open_time=datetime.now().timestamp(),
+                                ext_price=ext_filled_price,
+                                lig_price=result.lighter_price or Decimal('0'),
+                                open_spread=spread_info.spread_pct,
+                                quantity=ext_filled_qty,
+                                ext_order_id="maker_open",
+                                lig_order_id=result.lighter_order_id,
+                                is_active=True,
+                            )
                         import time
                         self._opening_wait_start_time = time.time()
                         self.state_manager.set_state(BotState.OPENING_WAIT, "对冲完成，验证仓位")
