@@ -466,44 +466,14 @@ class SpreadArbBot:
         if should_open:
             print(f"🔍 [开仓触发] should_open=True, 准备执行开仓流程...")
 
-        if should_open:
-            # 风控验证
-            print(f"🔍 [开仓触发] 开始风控验证...")
-            validation = await self.risk_manager.validate_open_position(
-                self.order_book_manager,
-                self.config.target_quantity,
-                spread_info
-            )
-
-            if not validation.is_valid:
-                print(f"🔍 [开仓触发] 风控验证失败: {validation.reason}")
-                logger.warning(f"开仓风控失败: {validation.reason}")
-                return
-
-            print(f"🔍 [开仓触发] 风控验证通过，开始余额检测...")
-
-            # ========== 新增 (003-spreading-improvements): 余额检测 ==========
-            balance_result = await self.funds_checker.check_before_opening(
-                target_quantity=self.config.target_quantity,
-                ext_price=spread_info.ext_ask,  # Extended买入价格
-                lig_price=spread_info.lig_bid   # Lighter卖出价格
-            )
-
-            if not balance_result.is_sufficient:
-                print(f"🔍 [开仓触发] 余额检测失败: {balance_result.format_log()}")
-                logger.warning(f"余额不足，跳过本次开仓: {balance_result.format_log()}")
-                return
-
-            print(f"🔍 [开仓触发] 余额检测通过，准备切换到OPENING状态...")
-
-            # 切换到开仓状态
-            # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
-            current_threshold = self.config.current_open_threshold
-            self.state_manager.set_state(
-                BotState.OPENING,
-                f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
-            )
-            await self.state_manager.save_state()
+        if await self._apply_spread_rules(
+            BotState.IDLE,
+            spread_info,
+            rule_ids=["open"],
+            should_open=should_open,
+            reason=reason,
+        ):
+            return
 
     async def _process_opening_state(self) -> None:
         """处理 OPENING 状态：执行开仓"""
@@ -676,50 +646,14 @@ class SpreadArbBot:
         # 检查是否可以继续开仓（等差数列策略）
         should_open, reason = self.open_strategy.should_open(spread_info)
 
-        if should_open:
-            # 可以继续开仓！切换到开仓状态
-            # 风控验证
-            validation = await self.risk_manager.validate_open_position(
-                self.order_book_manager,
-                self.config.target_quantity,
-                spread_info
-            )
-
-            if not validation.is_valid:
-                print(f"⚠️ 继续开仓风控失败: {validation.reason}")
-            else:
-                # 风控通过，等待一段时间确保前一次开仓的订单查询已完成
-                # 防止 Extended API 限流（两次开仓太近会导致订单查询冲突）
-                import time
-                current_time = time.time()
-
-                # 检查距离上次开仓的时间
-                if hasattr(self, '_last_open_time') and self._last_open_time is not None:
-                    elapsed_since_last_open = current_time - self._last_open_time
-                    min_interval = 5.0  # 最小间隔 5 秒
-
-                    if elapsed_since_last_open < min_interval:
-                        wait_time = min_interval - elapsed_since_last_open
-                        logger.info(f"等待 {wait_time:.1f} 秒后继续开仓（避免 API 限流）")
-                        await asyncio.sleep(wait_time)
-
-                # 检查是否已有持仓（继续开仓 vs 首次开仓）
-                has_existing_position = self.close_strategy.get_total_quantity() > 0
-
-                if has_existing_position:
-                    # 已有持仓，这是继续开仓（加仓）
-                    # 切换到 OPENING 状态（输出状态转换日志）
-                    self.state_manager.set_state(BotState.OPENING, f"继续开仓（加仓）: {reason}")
-                    self._last_open_time = current_time  # 记录开仓时间
-                    await self.state_manager.save_state()
-                    # 加仓逻辑会在 OPENING 状态中处理
-                else:
-                    # 首次开仓，正常走 OPENING 流程
-                    self.state_manager.set_state(BotState.OPENING, f"首次开仓: {reason}")
-                    self._last_open_time = current_time  # 记录开仓时间
-                    await self.state_manager.save_state()
-
-                return  # 直接返回，不再执行后续逻辑
+        if await self._apply_spread_rules(
+            BotState.HOLDING,
+            spread_info,
+            rule_ids=["open"],
+            should_open=should_open,
+            reason=reason,
+        ):
+            return
 
         # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差，下一次开仓价差，平仓需要价差，结果）
         # 限制频率：每5秒输出一次
@@ -769,30 +703,12 @@ class SpreadArbBot:
             self._last_spread_log_time = current_time
 
         # ========== 新增 (003-spreading-improvements): 使用双模式平仓策略 ==========
-        decision = await self.close_strategy.should_close(spread_info)
-
-        if decision.should_close:
-            # 根据利润水平选择平仓模式
-            total_quantity = self.close_strategy.get_total_quantity()
-
-            if decision.use_market:
-                # 市价平仓：立即执行
-                await self._execute_market_close(total_quantity)
-                logger.info(
-                    f"市价平仓触发 | 开仓{decision.total_position_spread:.3%} | "
-                    f"当前{decision.current_spread:.3%} < 市价阈值{decision.market_threshold:.3%} | "
-                    f"预期利润{decision.expected_profit_market:.3%}"
-                )
-            else:
-                # 限价平仓：挂单等待成交
-                await self._execute_limit_close(total_quantity)
-                logger.info(
-                    f"限价平仓触发 | 开仓{decision.total_position_spread:.3%} | "
-                    f"当前{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%} | "
-                    f"预期利润{decision.expected_profit_limit:.3%}"
-                )
-
-            await self.state_manager.save_state()
+        if await self._apply_spread_rules(
+            BotState.HOLDING,
+            spread_info,
+            rule_ids=["close"],
+        ):
+            return
 
     async def _process_closing_state(self) -> None:
         """
@@ -806,40 +722,11 @@ class SpreadArbBot:
 
         # 获取当前价差信息
         spread_info = self.spread_monitor.get_current_spread()
-        if not spread_info or not spread_info.is_valid():
-            logger.warning("无法获取有效价差信息，使用默认模式（挂单平仓）")
-            # 默认使用挂单平仓，直接执行挂单
-            await self._execute_maker_close()
-            return
-
-        # 使用 close_strategy 判断平仓模式
-        decision = await self.close_strategy.should_close(spread_info)
-
-        if not decision.should_close:
-            logger.warning("进入CLOSING状态但不满足平仓条件，使用默认模式（挂单平仓）")
-            # 默认使用挂单平仓，直接执行挂单
-            await self._execute_maker_close()
-            return
-
-        # 根据决策执行平仓
-        close_mode = "市价" if decision.use_market else "限价挂单"
-        logger.info(
-            f"平仓模式判断: {close_mode} | "
-            f"持仓价差={decision.total_position_spread:.3%} | "
-            f"实时价差={decision.current_spread:.3%} | "
-            f"{'市价阈值' if decision.use_market else '限价阈值'}={decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}"
+        await self._apply_spread_rules(
+            BotState.CLOSING,
+            spread_info,
+            rule_ids=["mode"],
         )
-
-        if decision.use_market:
-            # 市价平仓：切换到 CLOSING_TAKER 状态
-            self.state_manager.set_state(
-                BotState.CLOSING_TAKER,
-                f"市价平仓 | 利润大 | 实时价差{decision.current_spread:.3%}"
-            )
-            await self.state_manager.save_state()
-        else:
-            # 限价挂单平仓：直接执行挂单
-            await self._execute_maker_close()
 
     async def _execute_maker_close(self) -> None:
         """
@@ -2673,73 +2560,12 @@ class SpreadArbBot:
 
             # ========== 主循环只处理：价差保护 + 平仓检查 + 价格偏离 ==========
 
-            # 检查价差保护 (003-spreading-improvements: 使用阶梯开仓阈值)
-            if spread_info and spread_info.is_valid():
-                current_threshold = self.config.current_open_threshold
-                if spread_info.spread_pct < current_threshold:
-                    # 价差不满足条件，取消订单
-                    spread_value = spread_info.spread_pct
-                    logger.warning(
-                        f"⚠️ 价差保护触发 | "
-                        f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
-                    )
-                    await self.trade_executor.cancel_extended_maker_order(order_id)
-
-                    # 先检查实际仓位（订单可能已成交但API返回有延迟）
-                    ext_position = await self.extended_client.get_account_positions()
-                    lig_position = await self.lighter_client.get_account_positions()
-                    tolerance = Decimal("0.001")
-                    has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
-
-                    if has_position:
-                        # 有仓位，进入 HOLDING 状态
-                        reason = f"价差保护触发但检测到仓位，进入持仓（Ext={ext_position}, Lig={lig_position}）"
-                        self.state_manager.set_state(BotState.HOLDING, reason)
-                        logger.info(f"💥 价差保护触发但有仓位 -> 进入HOLDING | Ext={ext_position} Lig={lig_position}")
-                    else:
-                        # 无仓位，进入 IDLE 状态
-                        reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
-                        self.state_manager.set_state(BotState.IDLE, reason)
-
-                    self._maker_wait_state.reset()
-                    await self.state_manager.save_state()
-                    return
-
-            # ========== 新增：检查是否有持仓需要平仓 ==========
-            # 在开仓等待过程中，如果已有持仓（加仓情况）且满足平仓条件，应该优先平仓
-            total_quantity = self.close_strategy.get_total_quantity()
-            if total_quantity > 0 and spread_info and spread_info.is_valid():
-                decision = await self.close_strategy.should_close(spread_info)
-                if decision.should_close:
-                    # 需要平仓，取消开仓挂单
-                    close_mode = "市价" if decision.use_market else "限价"
-                    logger.warning(
-                        f"⚠️ 开仓过程中检测到平仓信号 | {close_mode}平仓 | "
-                        f"实时价差{decision.current_spread:.3%} | "
-                        f"阈值={decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}"
-                    )
-                    print(f"⚠️ 开仓过程中检测到平仓信号，取消开仓挂单，准备{close_mode}平仓")
-
-                    # 取消开仓挂单
-                    await self.trade_executor.cancel_extended_maker_order(order_id)
-
-                    if decision.use_market:
-                        # 市价平仓：立即执行
-                        await self._execute_market_close(total_quantity)
-                        logger.info(f"💥 开仓挂单已取消，执行市价平仓 | 数量={total_quantity}")
-                    else:
-                        # 限价平仓：进入 CLOSING 状态
-                        reason = (
-                            f"开仓过程中检测到平仓信号 | "
-                            f"实时价差{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%}"
-                        )
-                        self.state_manager.set_state(BotState.CLOSING, reason)
-                        logger.info(f"💥 开仓挂单已取消，进入限价平仓状态 | 原因={reason}")
-
-                    # 重置等待状态并保存
-                    self._maker_wait_state.reset()
-                    await self.state_manager.save_state()
-                    return
+            if await self._apply_spread_rules(
+                BotState.OPENING_MAKER_WAIT,
+                spread_info,
+                rule_ids=["protect", "close_preempt"],
+            ):
+                return
 
             # 检查价格偏离（只对未成交的订单进行）
             price_deviated = await self.price_monitor.check_and_notify_price_deviation(
@@ -2816,7 +2642,15 @@ class SpreadArbBot:
             # - PARTIALLY_FILLED: 部分成交 -> LIGHTER_HEDGING
             # - CANCELED: 订单取消 -> HOLDING
 
-            # ========== 主循环只处理：价格偏离 ==========
+            # ========== 主循环只处理：价差检查 + 价格偏离 ==========
+
+            spread_info = self.spread_monitor.get_current_spread()
+            if await self._apply_spread_rules(
+                BotState.CLOSING_MAKER_WAIT,
+                spread_info,
+                rule_ids=["close_cancel"],
+            ):
+                return
 
             # 检查价格偏离
             order_id = self._maker_wait_state.current_order.order_id
@@ -3109,12 +2943,384 @@ class SpreadArbBot:
 
                 # 根据Edge Case决策：只强制平仓本次新开仓的Extended仓位
                 # 保留原有持仓不动
-                await self._handle_hedging_failure(is_opening, ext_filled_qty)
+            await self._handle_hedging_failure(is_opening, ext_filled_qty)
 
         except Exception as e:
             logger.error(f"LIGHTER_HEDGING状态处理异常: {e}")
             # 异常时也触发失败处理
             await self._handle_hedging_failure(True, 0)
+
+    def _get_spread_rule_table(self) -> Dict[BotState, list]:
+        if not hasattr(self, "_spread_rule_table"):
+            self._spread_rule_table = {
+                BotState.IDLE: [("open", self._handle_idle_spread_transition)],
+                BotState.HOLDING: [
+                    ("open", self._handle_holding_open_transition),
+                    ("close", self._handle_holding_close_transition),
+                ],
+                BotState.CLOSING: [("mode", self._handle_closing_spread_transition)],
+                BotState.OPENING_MAKER_WAIT: [
+                    ("protect", self._handle_opening_maker_wait_spread_protect),
+                    ("close_preempt", self._handle_opening_maker_wait_spread_close_preempt),
+                ],
+                BotState.CLOSING_MAKER_WAIT: [("close_cancel", self._handle_closing_maker_wait_spread_transition)],
+            }
+        return self._spread_rule_table
+
+    async def _apply_spread_rules(self, state: BotState, spread_info, rule_ids: Optional[list] = None, **context) -> bool:
+        """根据状态执行价差规则表，返回是否已处理并触发状态转换"""
+        handlers = self._get_spread_rule_table().get(state, [])
+        for rule_id, handler in handlers:
+            if rule_ids is not None and rule_id not in rule_ids:
+                continue
+            result = await handler(spread_info, **context)
+            if result:
+                return True
+        return False
+
+    def _log_spread_rule(self, level: str, state: BotState, action: str, message: str, also_print: bool = False) -> None:
+        prefix = f"[SPREAD][{state.value}][{action}] "
+        log_func = getattr(logger, level, logger.info)
+        log_func(prefix + message)
+        if also_print:
+            print(prefix + message)
+
+    async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", **_) -> bool:
+        """IDLE状态：处理价差触发的开仓转换"""
+        if not should_open:
+            return False
+
+        # 风控验证
+        self._log_spread_rule("info", BotState.IDLE, "open_check", "开始风控验证", also_print=True)
+        validation = await self.risk_manager.validate_open_position(
+            self.order_book_manager,
+            self.config.target_quantity,
+            spread_info
+        )
+
+        if not validation.is_valid:
+            self._log_spread_rule(
+                "warning",
+                BotState.IDLE,
+                "open_risk_fail",
+                f"风控验证失败: {validation.reason}",
+                also_print=True,
+            )
+            return True
+
+        self._log_spread_rule("info", BotState.IDLE, "open_check", "风控通过，开始余额检测", also_print=True)
+
+        # ========== 新增 (003-spreading-improvements): 余额检测 ==========
+        balance_result = await self.funds_checker.check_before_opening(
+            target_quantity=self.config.target_quantity,
+            ext_price=spread_info.ext_ask,  # Extended买入价格
+            lig_price=spread_info.lig_bid   # Lighter卖出价格
+        )
+
+        if not balance_result.is_sufficient:
+            self._log_spread_rule(
+                "warning",
+                BotState.IDLE,
+                "open_balance_fail",
+                f"余额检测失败: {balance_result.format_log()}",
+                also_print=True,
+            )
+            return True
+
+        self._log_spread_rule("info", BotState.IDLE, "open_ready", "余额通过，切换到OPENING", also_print=True)
+
+        # 切换到开仓状态
+        # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
+        current_threshold = self.config.current_open_threshold
+        self.state_manager.set_state(
+            BotState.OPENING,
+            f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
+        )
+        await self.state_manager.save_state()
+        return True
+
+    async def _handle_holding_open_transition(self, spread_info, should_open: bool = False, reason: str = "", **_) -> bool:
+        """HOLDING状态：处理价差触发的继续开仓转换"""
+        if not should_open:
+            return False
+
+        # 可以继续开仓！切换到开仓状态
+        # 风控验证
+        validation = await self.risk_manager.validate_open_position(
+            self.order_book_manager,
+            self.config.target_quantity,
+            spread_info
+        )
+
+        if not validation.is_valid:
+            self._log_spread_rule(
+                "warning",
+                BotState.HOLDING,
+                "open_risk_fail",
+                f"继续开仓风控失败: {validation.reason}",
+                also_print=True,
+            )
+            return True
+
+        # 风控通过，等待一段时间确保前一次开仓的订单查询已完成
+        # 防止 Extended API 限流（两次开仓太近会导致订单查询冲突）
+        import time
+        current_time = time.time()
+
+        # 检查距离上次开仓的时间
+        if hasattr(self, '_last_open_time') and self._last_open_time is not None:
+            elapsed_since_last_open = current_time - self._last_open_time
+            min_interval = 5.0  # 最小间隔 5 秒
+
+            if elapsed_since_last_open < min_interval:
+                wait_time = min_interval - elapsed_since_last_open
+                self._log_spread_rule(
+                    "info",
+                    BotState.HOLDING,
+                    "open_delay",
+                    f"等待 {wait_time:.1f} 秒后继续开仓（避免 API 限流）",
+                )
+                await asyncio.sleep(wait_time)
+
+        # 检查是否已有持仓（继续开仓 vs 首次开仓）
+        has_existing_position = self.close_strategy.get_total_quantity() > 0
+
+        if has_existing_position:
+            # 已有持仓，这是继续开仓（加仓）
+            # 切换到 OPENING 状态（输出状态转换日志）
+            self.state_manager.set_state(BotState.OPENING, f"继续开仓（加仓）: {reason}")
+            self._last_open_time = current_time  # 记录开仓时间
+            await self.state_manager.save_state()
+            # 加仓逻辑会在 OPENING 状态中处理
+        else:
+            # 首次开仓，正常走 OPENING 流程
+            self.state_manager.set_state(BotState.OPENING, f"首次开仓: {reason}")
+            self._last_open_time = current_time  # 记录开仓时间
+            await self.state_manager.save_state()
+
+        return True
+
+    async def _handle_holding_close_transition(self, spread_info, **_) -> bool:
+        """HOLDING状态：处理价差触发的平仓转换"""
+        decision = await self.close_strategy.should_close(spread_info)
+
+        if not decision.should_close:
+            return False
+
+        # 根据利润水平选择平仓模式
+        total_quantity = self.close_strategy.get_total_quantity()
+
+        if decision.use_market:
+            # 市价平仓：立即执行
+            await self._execute_market_close(total_quantity)
+            self._log_spread_rule(
+                "info",
+                BotState.HOLDING,
+                "close_market",
+                f"开仓{decision.total_position_spread:.3%} | "
+                f"当前{decision.current_spread:.3%} < 市价阈值{decision.market_threshold:.3%} | "
+                f"预期利润{decision.expected_profit_market:.3%}",
+            )
+        else:
+            # 限价平仓：挂单等待成交
+            await self._execute_limit_close(total_quantity)
+            self._log_spread_rule(
+                "info",
+                BotState.HOLDING,
+                "close_limit",
+                f"开仓{decision.total_position_spread:.3%} | "
+                f"当前{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%} | "
+                f"预期利润{decision.expected_profit_limit:.3%}",
+            )
+
+        await self.state_manager.save_state()
+        return True
+
+    async def _handle_closing_spread_transition(self, spread_info, **_) -> bool:
+        """CLOSING状态：根据价差决定市价/限价平仓"""
+        if not spread_info or not spread_info.is_valid():
+            self._log_spread_rule(
+                "warning",
+                BotState.CLOSING,
+                "close_default",
+                "无法获取有效价差信息，使用默认模式（挂单平仓）",
+            )
+            # 默认使用挂单平仓，直接执行挂单
+            await self._execute_maker_close()
+            return True
+
+        # 使用 close_strategy 判断平仓模式
+        decision = await self.close_strategy.should_close(spread_info)
+
+        if not decision.should_close:
+            self._log_spread_rule(
+                "warning",
+                BotState.CLOSING,
+                "close_default",
+                "进入CLOSING状态但不满足平仓条件，使用默认模式（挂单平仓）",
+            )
+            # 默认使用挂单平仓，直接执行挂单
+            await self._execute_maker_close()
+            return True
+
+        # 根据决策执行平仓
+        close_mode = "市价" if decision.use_market else "限价挂单"
+        self._log_spread_rule(
+            "info",
+            BotState.CLOSING,
+            "close_mode",
+            f"{close_mode} | 持仓价差={decision.total_position_spread:.3%} | "
+            f"实时价差={decision.current_spread:.3%} | "
+            f"{'市价阈值' if decision.use_market else '限价阈值'}="
+            f"{decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}",
+        )
+
+        if decision.use_market:
+            # 市价平仓：切换到 CLOSING_TAKER 状态
+            self.state_manager.set_state(
+                BotState.CLOSING_TAKER,
+                f"市价平仓 | 利润大 | 实时价差{decision.current_spread:.3%}"
+            )
+            await self.state_manager.save_state()
+        else:
+            # 限价挂单平仓：直接执行挂单
+            await self._execute_maker_close()
+        return True
+
+    async def _handle_opening_maker_wait_spread_protect(self, spread_info, **_) -> bool:
+        """OPENING_MAKER_WAIT状态：价差保护"""
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+
+        order_id = self._maker_wait_state.current_order.order_id
+
+        # 检查价差保护 (003-spreading-improvements: 使用阶梯开仓阈值)
+        if spread_info and spread_info.is_valid():
+            current_threshold = self.config.current_open_threshold
+            if spread_info.spread_pct < current_threshold:
+                # 价差不满足条件，取消订单
+                spread_value = spread_info.spread_pct
+                self._log_spread_rule(
+                    "warning",
+                    BotState.OPENING_MAKER_WAIT,
+                    "open_protect",
+                    f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})",
+                )
+                await self.trade_executor.cancel_extended_maker_order(order_id)
+
+                # 先检查实际仓位（订单可能已成交但API返回有延迟）
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+                if has_position:
+                    # 有仓位，进入 HOLDING 状态
+                    reason = f"价差保护触发但检测到仓位，进入持仓（Ext={ext_position}, Lig={lig_position}）"
+                    self.state_manager.set_state(BotState.HOLDING, reason)
+                    self._log_spread_rule(
+                        "info",
+                        BotState.OPENING_MAKER_WAIT,
+                        "open_protect_hold",
+                        f"价差保护触发但有仓位 -> 进入HOLDING | Ext={ext_position} Lig={lig_position}",
+                    )
+                else:
+                    # 无仓位，进入 IDLE 状态
+                    threshold_value = current_threshold
+                    reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
+                    self.state_manager.set_state(BotState.IDLE, reason)
+
+                self._maker_wait_state.reset()
+                await self.state_manager.save_state()
+                return True
+
+        return False
+
+    async def _handle_opening_maker_wait_spread_close_preempt(self, spread_info, **_) -> bool:
+        """OPENING_MAKER_WAIT状态：平仓信号处理"""
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+
+        order_id = self._maker_wait_state.current_order.order_id
+
+        # 在开仓等待过程中，如果已有持仓（加仓情况）且满足平仓条件，应该优先平仓
+        total_quantity = self.close_strategy.get_total_quantity()
+        if total_quantity > 0 and spread_info and spread_info.is_valid():
+            decision = await self.close_strategy.should_close(spread_info)
+            if decision.should_close:
+                # 需要平仓，取消开仓挂单
+                close_mode = "市价" if decision.use_market else "限价"
+                self._log_spread_rule(
+                    "warning",
+                    BotState.OPENING_MAKER_WAIT,
+                    "close_preempt",
+                    f"{close_mode}平仓 | 实时价差{decision.current_spread:.3%} | "
+                    f"阈值={decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}",
+                    also_print=True,
+                )
+
+                # 取消开仓挂单
+                await self.trade_executor.cancel_extended_maker_order(order_id)
+
+                if decision.use_market:
+                    # 市价平仓：立即执行
+                    await self._execute_market_close(total_quantity)
+                    self._log_spread_rule(
+                        "info",
+                        BotState.OPENING_MAKER_WAIT,
+                        "close_preempt_market",
+                        f"开仓挂单已取消，执行市价平仓 | 数量={total_quantity}",
+                    )
+                else:
+                    # 限价平仓：进入 CLOSING 状态
+                    reason = (
+                        f"开仓过程中检测到平仓信号 | "
+                        f"实时价差{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%}"
+                    )
+                    self.state_manager.set_state(BotState.CLOSING, reason)
+                    self._log_spread_rule(
+                        "info",
+                        BotState.OPENING_MAKER_WAIT,
+                        "close_preempt_limit",
+                        f"开仓挂单已取消，进入限价平仓状态 | 原因={reason}",
+                    )
+
+                # 重置等待状态并保存
+                self._maker_wait_state.reset()
+                await self.state_manager.save_state()
+                return True
+
+        return False
+
+    async def _handle_closing_maker_wait_spread_transition(self, spread_info, **_) -> bool:
+        """CLOSING_MAKER_WAIT状态：价差不满足则撤单回HOLDING"""
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+
+        if not spread_info or not spread_info.is_valid():
+            return False
+
+        decision = await self.close_strategy.should_close(spread_info)
+        if decision.should_close:
+            return False
+
+        order_id = self._maker_wait_state.current_order.order_id
+        self._log_spread_rule(
+            "warning",
+            BotState.CLOSING_MAKER_WAIT,
+            "close_cancel",
+            f"实时价差{decision.current_spread:.3%} >= 限价阈值{decision.limit_threshold:.3%}",
+        )
+        await self.trade_executor.cancel_extended_maker_order(order_id)
+
+        reason = (
+            f"平仓条件失效，取消挂单（实时价差{decision.current_spread:.3%} >= "
+            f"限价阈值{decision.limit_threshold:.3%}）"
+        )
+        self.state_manager.set_state(BotState.HOLDING, reason)
+        self._maker_wait_state.reset()
+        await self.state_manager.save_state()
+        return True
 
     async def _handle_hedging_failure(self, is_opening: bool, ext_filled_qty: Decimal) -> None:
         """
