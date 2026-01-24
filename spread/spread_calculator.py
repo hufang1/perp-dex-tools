@@ -4,7 +4,7 @@
 负责：
 1. 计算开仓价差（Extended Ask VWAP vs Lighter Bid VWAP）
 2. 计算平仓价差（Lighter Ask VWAP vs Extended Bid VWAP）
-3. 判断是否满足开仓/平仓条件
+3. 判断是否满足开仓/平仓条件（平仓使用利润口径）
 4. 检测极端价差
 """
 
@@ -47,7 +47,7 @@ class SpreadCalculator:
         Args:
             open_threshold: 开仓阈值（默认 0.2%）
             slippage_buffer: 滑点保护（默认 0.05%）
-            min_profit: 最小利润（默认 0.1%）
+        min_profit: 最小利润阈值（默认 0.1%）
             max_spread: 极端价差阈值（默认 5%）
         """
         self.open_threshold = open_threshold
@@ -241,8 +241,8 @@ class SpreadCalculator:
         """
         判断是否应该平仓
 
-        条件：开仓价差 - 平仓价差 >= 最小利润
-        即：价差收敛幅度达到利润目标
+        条件：利润 = 开仓价差 - 平仓价差 >= 最小利润
+        即：利润达到目标
 
         Args:
             open_spread: 开仓价差

@@ -1272,12 +1272,12 @@ class CloseModeDecision:
         if self.use_market:
             return (
                 f"市价平仓 | 利润大 | "
-                f"价差{self.current_spread:.3%} < 市价阈值{self.market_threshold:.3%}"
+                f"利润{self.expected_profit_market:.3%} >= 市价阈值{self.market_threshold:.3%}"
             )
         else:
             return (
                 f"限价平仓 | 利润小 | "
-                f"价差{self.current_spread:.3%} < 限价阈值{self.limit_threshold:.3%}"
+                f"利润{self.expected_profit_limit:.3%} >= 限价阈值{self.limit_threshold:.3%}"
             )
 
     def format_log(self) -> str:
@@ -1285,7 +1285,7 @@ class CloseModeDecision:
         if not self.should_close:
             return (
                 f"持仓监控 | 总开仓={self.total_position_spread:.3%} | "
-                f"当前={self.current_spread:.3%} | "
+                f"利润={self.expected_profit_limit:.3%} | "
                 f"限价阈值={self.limit_threshold:.3%} | "
                 f"市价阈值={self.market_threshold:.3%}"
             )

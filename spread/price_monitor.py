@@ -4,7 +4,7 @@
 负责：
 1. 监控Extended订单簿BBO价格（best bid/ask）
 2. 监控Lighter订单簿BBO价格
-3. 计算实时价差（Lighter卖价 - Extended买价）
+3. 计算平仓口径价差（Lighter买价 - Extended卖价）
 4. 检测价格偏离（价格位置优化）
 5. 检测价差保护触发条件
 """
@@ -55,8 +55,8 @@ class SpreadConfig:
     价差配置数据类
 
     Attributes:
-        open_threshold: 开仓阈值（默认0.09%）
-        close_threshold: 平仓阈值（默认0.06%）
+        open_threshold: 开仓阈值（默认0.09%，使用开仓口径）
+        close_threshold: 平仓利润阈值（默认0.06%）
         monitor_interval: 监控间隔（默认0.5秒）
         price_deviation_threshold: 价格偏离阈值（默认1 tick）
     """
@@ -70,7 +70,7 @@ class PriceMonitor:
     """
     实时价差和价格监控器
 
-    监控Extended和Lighter的订单簿价格，计算实时价差，
+    监控Extended和Lighter的订单簿价格，计算平仓口径价差，
     检测价格偏离和价差保护触发条件。
 
     使用方式：
@@ -83,7 +83,7 @@ class PriceMonitor:
     Attributes:
         config: 价差配置
         current_snapshot: 当前价格快照
-        on_spread_protection: 价差保护触发回调
+        on_spread_protection: 开仓价差保护触发回调
         on_price_deviation: 价格偏离回调
     """
 
@@ -167,7 +167,7 @@ class PriceMonitor:
                 best_ask_price = min(asks.keys(), key=lambda x: Decimal(x))
                 lig_ask = Decimal(best_ask_price)
 
-        # Calculate spread: (lig_ask - ext_bid) / ext_bid
+        # 计算平仓口径价差: (lig_ask - ext_bid) / ext_bid
         spread_abs = Decimal('0')
         spread_pct = Decimal('0')
         if ext_bid > 0 and lig_ask > 0:
@@ -241,11 +241,14 @@ class PriceMonitor:
         if not self.current_snapshot.is_valid():
             return
 
-        # Check if spread is below opening threshold
-        if self.current_snapshot.spread_pct < self.config.open_threshold:
+        # Check if open spread is below opening threshold
+        open_spread = self._calculate_open_spread_pct()
+        if open_spread is None:
+            return
+        if open_spread < self.config.open_threshold:
             logger.info(
                 f"⚠️ 价差保护触发 | "
-                f"实时价差: {self.current_snapshot.spread_pct:.3%} < "
+                f"开仓价差: {open_spread:.3%} < "
                 f"开仓阈值: {self.config.open_threshold:.3%}"
             )
             if self.on_spread_protection:
@@ -401,16 +404,19 @@ class PriceMonitor:
         if not self.current_snapshot.is_valid():
             return False, "价格数据无效"
 
-        if self.current_snapshot.spread_pct >= self.config.open_threshold:
+        open_spread = self._calculate_open_spread_pct()
+        if open_spread is None:
+            return False, "价格数据无效"
+        if open_spread >= self.config.open_threshold:
             return True, (
                 f"满足开仓条件: "
-                f"价差{self.current_snapshot.spread_pct:.3%} >= "
+                f"开仓价差{open_spread:.3%} >= "
                 f"阈值{self.config.open_threshold:.3%}"
             )
         else:
             return False, (
                 f"不满足开仓条件: "
-                f"价差{self.current_snapshot.spread_pct:.3%} < "
+                f"开仓价差{open_spread:.3%} < "
                 f"阈值{self.config.open_threshold:.3%}"
             )
 
@@ -427,8 +433,7 @@ class PriceMonitor:
         if not self.current_snapshot.is_valid():
             return False, "价格数据无效"
 
-        # Calculate: open_spread - current_spread - fees > close_threshold
-        # Assuming maker fees are ~0%, so fees ≈ 0
+        # 利润 = 开仓价差 - 当前平仓价差
         profit = open_spread - self.current_snapshot.spread_pct
 
         if profit > self.config.close_threshold:
@@ -459,6 +464,14 @@ class PriceMonitor:
             self.current_snapshot.lig_bid,
             self.current_snapshot.lig_ask
         )
+
+    def _calculate_open_spread_pct(self) -> Optional[Decimal]:
+        """计算开仓口径价差: (lig_bid - ext_ask) / ext_ask"""
+        if not self.current_snapshot.is_valid():
+            return None
+        if self.current_snapshot.ext_ask <= 0:
+            return None
+        return (self.current_snapshot.lig_bid - self.current_snapshot.ext_ask) / self.current_snapshot.ext_ask
 
     def get_current_spread(self) -> Optional[Tuple[Decimal, Decimal]]:
         """

@@ -30,7 +30,7 @@ class SmartCloseStrategy:
     """
     智能平仓策略
 
-    平仓条件：开仓价差 >= 当前价差 + 盈利目标 + 手续费
+    平仓条件：利润 = 开仓价差 - 当前平仓价差 >= 阈值
     """
 
     def __init__(self, config: BotConfig, extended_client=None, lighter_client=None):
@@ -193,7 +193,20 @@ class SmartCloseStrategy:
         Returns:
             CloseModeDecision: 包含是否平仓、原因、使用哪种模式
         """
-        if not spread_info or not spread_info.is_valid():
+        if not spread_info:
+            return CloseModeDecision(
+                should_close=False,
+                use_market=False,
+                total_position_spread=Decimal("0"),
+                current_spread=Decimal("0"),
+                market_threshold=Decimal("0"),
+                limit_threshold=Decimal("0"),
+            )
+        # 平仓口径允许负价差，仅校验价格合法性
+        if (spread_info.ext_bid <= 0 or spread_info.ext_ask <= 0 or
+            spread_info.lig_bid <= 0 or spread_info.lig_ask <= 0 or
+            spread_info.ext_bid >= spread_info.ext_ask or
+            spread_info.lig_bid >= spread_info.lig_ask):
             return CloseModeDecision(
                 should_close=False,
                 use_market=False,
@@ -216,19 +229,20 @@ class SmartCloseStrategy:
             )
 
         current_spread = spread_info.spread_pct
+        profit_spread = total_spread - current_spread
 
-        # 计算阈值（003-spreading-improvements: 使用新的配置参数）
-        # 市价平仓阈值：当前价差 < 总开仓 - 市价阈值B
-        market_threshold = total_spread - self.config.market_close_spread_b
-        # 限价平仓阈值：当前价差 < 总开仓 - 限价阈值A
-        limit_threshold = total_spread - self.config.limit_close_spread_a
+        # 计算利润阈值（003-spreading-improvements: 使用新的配置参数）
+        # 市价平仓阈值：利润 >= 市价阈值B
+        market_threshold = self.config.market_close_spread_b
+        # 限价平仓阈值：利润 >= 限价阈值A
+        limit_threshold = self.config.limit_close_spread_a
 
         # 判断平仓模式
-        if current_spread < market_threshold:
+        if profit_spread >= market_threshold:
             # 市价平仓：利润大，立即兑现
             reason = (
                 f"市价平仓 | 利润大 | "
-                f"价差{current_spread:.3%} < 市价阈值{market_threshold:.3%}"
+                f"利润{profit_spread:.3%} >= 市价阈值{market_threshold:.3%}"
             )
             return CloseModeDecision(
                 should_close=True,
@@ -237,13 +251,13 @@ class SmartCloseStrategy:
                 current_spread=current_spread,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
-                expected_profit_market=total_spread - current_spread,
+                expected_profit_market=profit_spread,
             )
-        elif current_spread < limit_threshold:
+        elif profit_spread >= limit_threshold:
             # 限价平仓：利润小，使用限价单降低成本
             reason = (
                 f"限价平仓 | 利润小 | "
-                f"价差{current_spread:.3%} < 限价阈值{limit_threshold:.3%}"
+                f"利润{profit_spread:.3%} >= 限价阈值{limit_threshold:.3%}"
             )
             return CloseModeDecision(
                 should_close=True,
@@ -252,7 +266,7 @@ class SmartCloseStrategy:
                 current_spread=current_spread,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
-                expected_profit_limit=total_spread - current_spread,
+                expected_profit_limit=profit_spread,
             )
         else:
             # 不满足平仓条件
@@ -263,6 +277,8 @@ class SmartCloseStrategy:
                 current_spread=current_spread,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
+                expected_profit_limit=profit_spread,
+                expected_profit_market=profit_spread,
             )
 
     async def get_total_position_spread(self) -> Decimal:
