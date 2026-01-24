@@ -2220,23 +2220,23 @@ class SpreadArbBot:
                         logger.info(
                             f"开仓订单已取消，但有其他持仓 {total_quantity}，进入HOLDING状态"
                         )
-                    handled = await self._safe_exit_maker_wait(
-                        BotState.HOLDING,
-                        f"开仓订单已取消，但有持仓({total_quantity})",
-                        is_opening=True,
-                    )
-                    if handled:
-                        return
-                else:
-                    # 无持仓，进入 IDLE 状态
-                    logger.info("开仓订单已取消，无持仓，进入IDLE状态")
-                    handled = await self._safe_exit_maker_wait(
-                        BotState.IDLE,
-                        "开仓订单已取消（WebSocket）",
-                        is_opening=True,
-                    )
-                    if handled:
-                        return
+                        handled = await self._safe_exit_maker_wait(
+                            BotState.HOLDING,
+                            f"开仓订单已取消，但有持仓({total_quantity})",
+                            is_opening=True,
+                        )
+                        if handled:
+                            return
+                    else:
+                        # 无持仓，进入 IDLE 状态
+                        logger.info("开仓订单已取消，无持仓，进入IDLE状态")
+                        handled = await self._safe_exit_maker_wait(
+                            BotState.IDLE,
+                            "开仓订单已取消（WebSocket）",
+                            is_opening=True,
+                        )
+                        if handled:
+                            return
             else:
                 # 平仓订单取消 -> HOLDING
                 handled = await self._safe_exit_maker_wait(
