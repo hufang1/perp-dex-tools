@@ -1776,7 +1776,7 @@ class SpreadArbBot:
         # ========== 修改 (003-spreading-improvements): 使用阶梯开仓阈值 ==========
         from price_monitor import SpreadConfig as PriceSpreadConfig
         price_config = PriceSpreadConfig(
-            open_threshold=config.current_open_threshold,  # 使用阶梯开仓阈值
+            open_threshold=self.config.current_open_threshold,  # 使用阶梯开仓阈值
             close_threshold=self.config.fixed_close_threshold,
             monitor_interval=self.config.price_monitor_interval,
             price_deviation_threshold=1  # 1 tick
