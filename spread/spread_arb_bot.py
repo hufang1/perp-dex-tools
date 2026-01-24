@@ -1870,9 +1870,9 @@ class SpreadArbBot:
         print(f"   - initial_open_spread = {self.config.initial_open_spread} ({self.config.initial_open_spread:.3%})")
         print(f"   - spread_step = {self.config.spread_step} ({self.config.spread_step:.3%})")
         print(f"   - opening_count = {self.config.successful_opening_count}")
-        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
-        print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.successful_opening_count} * {self.config.spread_step}) = {config.current_open_threshold}")
-        logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.successful_opening_count}, current_threshold={config.current_open_threshold:.3%}")
+        print(f"   - current_open_threshold = {self.config.current_open_threshold} ({self.config.current_open_threshold:.3%})")
+        print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.successful_opening_count} * {self.config.spread_step}) = {self.config.current_open_threshold}")
+        logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.successful_opening_count}, current_threshold={self.config.current_open_threshold:.3%}")
 
         # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
