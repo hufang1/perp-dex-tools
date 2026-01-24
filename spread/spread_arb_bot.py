@@ -2214,21 +2214,36 @@ class SpreadArbBot:
                         logger.info(
                             f"开仓订单已取消，但有其他持仓 {total_quantity}，进入HOLDING状态"
                         )
-                        self.state_manager.set_state(
-                            BotState.HOLDING,
-                            f"开仓订单已取消，但有持仓({total_quantity})"
-                        )
-                    else:
-                        # 无持仓，进入 IDLE 状态
-                        logger.info("开仓订单已取消，无持仓，进入IDLE状态")
-                        self.state_manager.set_state(BotState.IDLE, "开仓订单已取消（WebSocket）")
+                    handled = await self._safe_exit_maker_wait(
+                        BotState.HOLDING,
+                        f"开仓订单已取消，但有持仓({total_quantity})",
+                        is_opening=True,
+                    )
+                    if handled:
+                        return
                 else:
-                    # 平仓订单取消 -> HOLDING
-                    self.state_manager.set_state(BotState.HOLDING, "平仓订单已取消（WebSocket）")
+                    # 无持仓，进入 IDLE 状态
+                    logger.info("开仓订单已取消，无持仓，进入IDLE状态")
+                    handled = await self._safe_exit_maker_wait(
+                        BotState.IDLE,
+                        "开仓订单已取消（WebSocket）",
+                        is_opening=True,
+                    )
+                    if handled:
+                        return
+            else:
+                # 平仓订单取消 -> HOLDING
+                handled = await self._safe_exit_maker_wait(
+                    BotState.HOLDING,
+                    "平仓订单已取消（WebSocket）",
+                    is_opening=False,
+                )
+                if handled:
+                    return
 
-                # 重置等待状态
-                if hasattr(self, '_maker_wait_state'):
-                    self._maker_wait_state.reset()
+            # 重置等待状态
+            if hasattr(self, '_maker_wait_state'):
+                self._maker_wait_state.reset()
 
                 await self.state_manager.save_state()
 
@@ -2634,8 +2649,8 @@ class SpreadArbBot:
 
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             logger.warning("Maker等待状态未初始化，返回IDLE")
-            self.state_manager.set_state(BotState.IDLE, "Maker等待状态异常")
-            await self.state_manager.save_state()
+            if not await self._safe_exit_maker_wait(BotState.IDLE, "Maker等待状态异常", is_opening=True):
+                await self.state_manager.save_state()
             return
 
         # 获取当前订单ID
@@ -2733,8 +2748,8 @@ class SpreadArbBot:
                 await self.trade_executor.cancel_extended_maker_order(
                     self._maker_wait_state.current_order.order_id
                 )
-            self.state_manager.set_state(BotState.IDLE, f"异常: {e}")
-            await self.state_manager.save_state()
+            if not await self._safe_exit_maker_wait(BotState.IDLE, f"异常: {e}", is_opening=True):
+                await self.state_manager.save_state()
 
     async def _process_closing_maker_wait_state(self) -> None:
         """
@@ -2751,8 +2766,8 @@ class SpreadArbBot:
 
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             logger.warning("Maker等待状态未初始化，返回HOLDING")
-            self.state_manager.set_state(BotState.HOLDING, "Maker等待状态异常")
-            await self.state_manager.save_state()
+            if not await self._safe_exit_maker_wait(BotState.HOLDING, "Maker等待状态异常", is_opening=False):
+                await self.state_manager.save_state()
             return
 
         try:
@@ -2800,8 +2815,8 @@ class SpreadArbBot:
         except Exception as e:
             logger.error(f"CLOSING_MAKER_WAIT状态处理异常: {e}")
             # 出错时返回HOLDING状态
-            self.state_manager.set_state(BotState.HOLDING, f"异常: {e}")
-            await self.state_manager.save_state()
+            if not await self._safe_exit_maker_wait(BotState.HOLDING, f"异常: {e}", is_opening=False):
+                await self.state_manager.save_state()
 
     async def _process_lighter_hedging_state(self) -> None:
         """
@@ -3343,41 +3358,59 @@ class SpreadArbBot:
         if spread_info and spread_info.is_valid():
             current_threshold = self.config.current_open_threshold
             if spread_info.spread_pct < current_threshold:
-                # 价差不满足条件，取消订单
-                spread_value = spread_info.spread_pct
-                self._log_spread_rule(
-                    "warning",
-                    BotState.OPENING_MAKER_WAIT,
-                    "open_protect",
-                    f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})",
-                )
-                await self.trade_executor.cancel_extended_maker_order(order_id)
-
-                # 先检查实际仓位（订单可能已成交但API返回有延迟）
-                ext_position = await self.extended_client.get_account_positions()
-                lig_position = await self.lighter_client.get_account_positions()
-                tolerance = Decimal("0.001")
-                has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
-
-                if has_position:
-                    # 有仓位，进入 HOLDING 状态
-                    reason = f"价差保护触发但检测到仓位，进入持仓（Ext={ext_position}, Lig={lig_position}）"
-                    self.state_manager.set_state(BotState.HOLDING, reason)
+                async with self._maker_lock("open_protect"):
+                    # 价差不满足条件，取消订单
+                    spread_value = spread_info.spread_pct
                     self._log_spread_rule(
-                        "info",
+                        "warning",
                         BotState.OPENING_MAKER_WAIT,
-                        "open_protect_hold",
-                        f"价差保护触发但有仓位 -> 进入HOLDING | Ext={ext_position} Lig={lig_position}",
+                        "open_protect",
+                        f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})",
                     )
-                else:
-                    # 无仓位，进入 IDLE 状态
-                    threshold_value = current_threshold
-                    reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
-                    self.state_manager.set_state(BotState.IDLE, reason)
 
-                self._maker_wait_state.reset()
-                await self.state_manager.save_state()
-                return True
+                    # 先检查是否已成交/部分成交
+                    if await self._handle_maker_fill_before_state_change(
+                        is_opening=True,
+                        reason="价差保护触发时检测到成交，进入对冲",
+                    ):
+                        return True
+
+                    await self.trade_executor.cancel_extended_maker_order(order_id)
+
+                    # 撤单后再次检查是否成交
+                    if await self._handle_maker_fill_before_state_change(
+                        is_opening=True,
+                        reason="撤单后检测到成交，进入对冲",
+                    ):
+                        return True
+
+                    # 先检查实际仓位（订单可能已成交但API返回有延迟）
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    tolerance = Decimal("0.001")
+                    has_position = abs(ext_position) >= tolerance or abs(lig_position) >= tolerance
+
+                    if has_position:
+                        # 有仓位，进入 HOLDING 状态
+                        reason = f"价差保护触发但检测到仓位，进入持仓（Ext={ext_position}, Lig={lig_position}）"
+                        if await self._safe_exit_maker_wait(BotState.HOLDING, reason, is_opening=True):
+                            return True
+                        self._log_spread_rule(
+                            "info",
+                            BotState.OPENING_MAKER_WAIT,
+                            "open_protect_hold",
+                            f"价差保护触发但有仓位 -> 进入HOLDING | Ext={ext_position} Lig={lig_position}",
+                        )
+                    else:
+                        # 无仓位，进入 IDLE 状态
+                        threshold_value = current_threshold
+                        reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 开仓阈值{threshold_value:.3%}）"
+                        if await self._safe_exit_maker_wait(BotState.IDLE, reason, is_opening=True):
+                            return True
+
+                    self._maker_wait_state.reset()
+                    await self.state_manager.save_state()
+                    return True
 
         return False
 
@@ -3393,47 +3426,63 @@ class SpreadArbBot:
         if total_quantity > 0 and spread_info and spread_info.is_valid():
             decision = await self.close_strategy.should_close(spread_info)
             if decision.should_close:
-                # 需要平仓，取消开仓挂单
-                close_mode = "市价" if decision.use_market else "限价"
-                self._log_spread_rule(
-                    "warning",
-                    BotState.OPENING_MAKER_WAIT,
-                    "close_preempt",
-                    f"{close_mode}平仓 | 实时价差{decision.current_spread:.3%} | "
-                    f"阈值={decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}",
-                    also_print=True,
-                )
-
-                # 取消开仓挂单
-                await self.trade_executor.cancel_extended_maker_order(order_id)
-
-                if decision.use_market:
-                    # 市价平仓：立即执行
-                    await self._execute_market_close(total_quantity)
+                async with self._maker_lock("open_close_preempt"):
+                    # 需要平仓，取消开仓挂单
+                    close_mode = "市价" if decision.use_market else "限价"
                     self._log_spread_rule(
-                        "info",
+                        "warning",
                         BotState.OPENING_MAKER_WAIT,
-                        "close_preempt_market",
-                        f"开仓挂单已取消，执行市价平仓 | 数量={total_quantity}",
-                    )
-                else:
-                    # 限价平仓：进入 CLOSING 状态
-                    reason = (
-                        f"开仓过程中检测到平仓信号 | "
-                        f"实时价差{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%}"
-                    )
-                    self.state_manager.set_state(BotState.CLOSING, reason)
-                    self._log_spread_rule(
-                        "info",
-                        BotState.OPENING_MAKER_WAIT,
-                        "close_preempt_limit",
-                        f"开仓挂单已取消，进入限价平仓状态 | 原因={reason}",
+                        "close_preempt",
+                        f"{close_mode}平仓 | 实时价差{decision.current_spread:.3%} | "
+                        f"阈值={decision.market_threshold if decision.use_market else decision.limit_threshold:.3%}",
+                        also_print=True,
                     )
 
-                # 重置等待状态并保存
-                self._maker_wait_state.reset()
-                await self.state_manager.save_state()
-                return True
+                    # 先检查是否已成交/部分成交
+                    if await self._handle_maker_fill_before_state_change(
+                        is_opening=True,
+                        reason="开仓挂单遇到平仓信号时已成交，进入对冲",
+                    ):
+                        return True
+
+                    # 取消开仓挂单
+                    await self.trade_executor.cancel_extended_maker_order(order_id)
+
+                    # 撤单后再次检查是否成交
+                    if await self._handle_maker_fill_before_state_change(
+                        is_opening=True,
+                        reason="撤单后检测到成交，进入对冲",
+                    ):
+                        return True
+
+                    if decision.use_market:
+                        # 市价平仓：立即执行
+                        await self._execute_market_close(total_quantity)
+                        self._log_spread_rule(
+                            "info",
+                            BotState.OPENING_MAKER_WAIT,
+                            "close_preempt_market",
+                            f"开仓挂单已取消，执行市价平仓 | 数量={total_quantity}",
+                        )
+                    else:
+                        # 限价平仓：进入 CLOSING 状态
+                        reason = (
+                            f"开仓过程中检测到平仓信号 | "
+                            f"实时价差{decision.current_spread:.3%} < 限价阈值{decision.limit_threshold:.3%}"
+                        )
+                        if await self._safe_exit_maker_wait(BotState.CLOSING, reason, is_opening=True):
+                            return True
+                        self._log_spread_rule(
+                            "info",
+                            BotState.OPENING_MAKER_WAIT,
+                            "close_preempt_limit",
+                            f"开仓挂单已取消，进入限价平仓状态 | 原因={reason}",
+                        )
+
+                    # 重置等待状态并保存
+                    self._maker_wait_state.reset()
+                    await self.state_manager.save_state()
+                    return True
 
         return False
 
@@ -3449,23 +3498,40 @@ class SpreadArbBot:
         if decision.should_close:
             return False
 
-        order_id = self._maker_wait_state.current_order.order_id
-        self._log_spread_rule(
-            "warning",
-            BotState.CLOSING_MAKER_WAIT,
-            "close_cancel",
-            f"实时价差{decision.current_spread:.3%} >= 限价阈值{decision.limit_threshold:.3%}",
-        )
-        await self.trade_executor.cancel_extended_maker_order(order_id)
+        async with self._maker_lock("close_cancel"):
+            order_id = self._maker_wait_state.current_order.order_id
+            self._log_spread_rule(
+                "warning",
+                BotState.CLOSING_MAKER_WAIT,
+                "close_cancel",
+                f"实时价差{decision.current_spread:.3%} >= 限价阈值{decision.limit_threshold:.3%}",
+            )
 
-        reason = (
-            f"平仓条件失效，取消挂单（实时价差{decision.current_spread:.3%} >= "
-            f"限价阈值{decision.limit_threshold:.3%}）"
-        )
-        self.state_manager.set_state(BotState.HOLDING, reason)
-        self._maker_wait_state.reset()
-        await self.state_manager.save_state()
-        return True
+            # 先检查是否已成交/部分成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=False,
+                reason="平仓条件失效时检测到成交，进入对冲",
+            ):
+                return True
+
+            await self.trade_executor.cancel_extended_maker_order(order_id)
+
+            # 撤单后再次检查是否成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=False,
+                reason="撤单后检测到成交，进入对冲",
+            ):
+                return True
+
+            reason = (
+                f"平仓条件失效，取消挂单（实时价差{decision.current_spread:.3%} >= "
+                f"限价阈值{decision.limit_threshold:.3%}）"
+            )
+            if await self._safe_exit_maker_wait(BotState.HOLDING, reason, is_opening=False):
+                return True
+            self._maker_wait_state.reset()
+            await self.state_manager.save_state()
+            return True
 
     async def _handle_hedging_failure(self, is_opening: bool, ext_filled_qty: Decimal) -> None:
         """
@@ -3502,6 +3568,115 @@ class SpreadArbBot:
             logger.error(f"强制平仓异常: {e}")
             self.state_manager.set_state(BotState.PAUSED, f"强制平仓异常: {e}")
             await self.state_manager.save_state()
+
+    async def _get_maker_order_fill_info(self, order_id: str) -> tuple[Decimal, str, Decimal]:
+        """
+        获取Maker订单成交信息
+
+        Returns:
+            filled_qty, status, avg_price
+        """
+        filled_qty = Decimal("0")
+        avg_price = Decimal("0")
+        status = "UNKNOWN"
+
+        try:
+            order_info = await self.trade_executor.get_extended_order_info(order_id)
+            if order_info:
+                status = str(order_info.get("status", status)).upper()
+                raw_filled = order_info.get("filled_size", "0")
+                if isinstance(raw_filled, str):
+                    filled_qty = Decimal(raw_filled)
+                elif isinstance(raw_filled, (int, float)):
+                    filled_qty = Decimal(str(raw_filled))
+                else:
+                    filled_qty = Decimal(raw_filled) if raw_filled else Decimal("0")
+
+                raw_avg = order_info.get("avg_price") or order_info.get("avg_fill_price")
+                if raw_avg is not None:
+                    avg_price = Decimal(str(raw_avg))
+        except Exception as e:
+            logger.warning(f"获取订单成交信息失败 | {order_id} | {e}")
+
+        return filled_qty, status, avg_price
+
+    async def _handle_maker_fill_before_state_change(self, is_opening: bool, reason: str) -> bool:
+        """
+        在状态切换前检测挂单是否已成交/部分成交，避免单边风险
+        """
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+
+        order = self._maker_wait_state.current_order
+        filled_qty, status, avg_price = await self._get_maker_order_fill_info(order.order_id)
+
+        if filled_qty <= 0 and status not in ["FILLED", "PARTIALLY_FILLED"]:
+            return False
+
+        if filled_qty <= 0:
+            filled_qty = order.filled_quantity or Decimal("0")
+        if filled_qty <= 0:
+            return False
+
+        if avg_price <= 0:
+            avg_price = order.avg_fill_price or order.price
+
+        # 更新 MakerWaitState 中的订单状态
+        order.status = "FILLED" if status == "FILLED" else "PARTIALLY_FILLED"
+        order.filled_quantity = filled_qty
+        order.avg_fill_price = avg_price
+
+        # 进入 LIGHTER_HEDGING 状态对冲
+        if not hasattr(self, '_hedging_state'):
+            from models import HedgingState
+            self._hedging_state = HedgingState()
+        self._hedging_state.ext_filled_quantity = filled_qty
+        self._hedging_state.ext_filled_price = avg_price
+        self._hedging_state.start_time = datetime.now()
+
+        if is_opening:
+            self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"{reason}（Ext成交{filled_qty}）")
+        else:
+            self._hedging_state.is_closing = True
+            self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"{reason}（Ext成交{filled_qty}）")
+
+        await self.state_manager.save_state()
+        return True
+
+    async def _safe_exit_maker_wait(self, next_state: BotState, reason: str, is_opening: bool) -> bool:
+        """
+        在离开Maker等待状态前做成交检查，避免错过已成交订单
+        """
+        return await self._transition_state(
+            next_state=next_state,
+            reason=reason,
+            guard=lambda: self._handle_maker_fill_before_state_change(
+                is_opening=is_opening,
+                reason="状态切换前检测到成交，进入对冲",
+            ),
+        )
+
+    async def _transition_state(
+        self,
+        next_state: BotState,
+        reason: str,
+        guard=None,
+    ) -> bool:
+        """
+        统一状态切换入口（可选守卫）
+
+        Returns:
+            True if guard handled transition (skip set_state), False otherwise.
+        """
+        if guard is not None:
+            try:
+                handled = await guard()
+                if handled:
+                    return True
+            except Exception as e:
+                logger.warning(f"状态切换守卫异常: {e}")
+        self.state_manager.set_state(next_state, reason)
+        return False
 
     async def _reposition_maker_order(self, is_opening: bool) -> None:
         """
