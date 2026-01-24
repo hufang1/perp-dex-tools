@@ -54,7 +54,7 @@ class StateManager:
         BotState.ERROR: "错误",
         # 新增 (003-spreading-improvements)
         BotState.CLOSING_LIMIT: "限价平仓中",
-        BotState.CLOSING_MARKET: "市价平仓中",
+        BotState.CLOSING_TAKER: "市价平仓中",
     }
 
     def __init__(self, state_file: Path):
@@ -370,7 +370,7 @@ class StateManager:
         BotState.ERROR: "错误",
         # 新增 (003-spreading-improvements)
         BotState.CLOSING_LIMIT: "限价平仓中",
-        BotState.CLOSING_MARKET: "市价平仓中",
+        BotState.CLOSING_TAKER: "市价平仓中",
     }
 
     def set_config(self, config: BotConfig) -> None:

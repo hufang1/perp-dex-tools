@@ -25,14 +25,11 @@ class BotState(Enum):
     HOLDING = "HOLDING"     # 持仓中
     CLOSING = "CLOSING"     # 平仓中
     CLOSING_MAKER_WAIT = "CLOSING_MAKER_WAIT"  # 平仓挂单等待成交（Maker模式）
+    CLOSING_TAKER = "CLOSING_TAKER"   # 市价平仓中（立即执行）
     LIGHTER_HEDGING = "LIGHTER_HEDGING"  # lighter对冲中（Maker模式，Extended成交后对冲）
     CLOSING_WAIT = "CLOSING_WAIT"  # 平仓后等待确认仓位
     PAUSED = "PAUSED"       # 风控暂停模式（API异常时）
     ERROR = "ERROR"         # 错误状态
-
-    # ========== 新增状态 (003-spreading-improvements) ==========
-    CLOSING_LIMIT = "CLOSING_LIMIT"      # 限价平仓中（等待成交），取代 CLOSING_MAKER_WAIT
-    CLOSING_MARKET = "CLOSING_MARKET"    # 市价平仓中（立即执行），新增
 
 
 class PositionState(Enum):
