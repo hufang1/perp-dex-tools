@@ -148,8 +148,8 @@ class SpreadArbBot:
         print(f"   - initial_open_spread = {config.initial_open_spread} ({config.initial_open_spread:.3%})")
         print(f"   - spread_step = {config.spread_step} ({config.spread_step:.3%})")
         print(f"   - successful_opening_count = {config.successful_opening_count}")
-        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.config.current_open_threshold:.3%})")
-        logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.successful_opening_count}, current_threshold={config.config.current_open_threshold:.3%}")
+        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
+        logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.successful_opening_count}, current_threshold={config.current_open_threshold:.3%}")
 
     async def start(self) -> None:
         """启动机器人"""
