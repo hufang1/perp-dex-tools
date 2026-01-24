@@ -248,7 +248,7 @@ class ExtendedClient(BaseExchangeClient):
                     return OrderResult(success=False, error_message='Failed to place order')
 
                 # Extract order ID from response
-                order_id = order_result.data.id
+                order_id = str(order_result.data.id)  # 转换为字符串
                 if not order_id:
                     return OrderResult(success=False, error_message='No order ID in response')
 
@@ -348,7 +348,7 @@ class ExtendedClient(BaseExchangeClient):
                         return OrderResult(success=False, error_message='Failed to place taker order')
 
                 # Extract order ID from response
-                order_id = order_result.data.id
+                order_id = str(order_result.data.id)  # 转换为字符串
                 if not order_id:
                     return OrderResult(success=False, error_message='No order ID in response')
 
@@ -466,7 +466,7 @@ class ExtendedClient(BaseExchangeClient):
                     return OrderResult(success=False, error_message='Failed to place order')
 
                 # Extract order ID from response
-                order_id = order_result.data.id
+                order_id = str(order_result.data.id)  # 转换为字符串
                 if not order_id:
                     return OrderResult(success=False, error_message='No order ID in response')
 
@@ -642,7 +642,7 @@ class ExtendedClient(BaseExchangeClient):
                         order_status = order.status
 
                     contract_orders.append(OrderInfo(
-                        order_id=order.id,
+                        order_id=str(order.id),  # 转换为字符串
                         side=order.side.lower(),
                         size=Decimal(order.qty) - Decimal(order.filled_qty),  # PATCH: changed this to remaining size to match with the trading bot logic, might cause issues later if main trading bot logic is changed
                         price=Decimal(order.price),
@@ -1036,14 +1036,14 @@ class ExtendedClient(BaseExchangeClient):
                 return OrderResult(success=False, error_message='Failed to place order')
 
             # Extract order ID from response
-            order_id = order_result.data.id
+            order_id = str(order_result.data.id)  # 转换为字符串，避免后续切片操作报错
             if not order_id:
                 return OrderResult(success=False, error_message='No order ID in response')
 
             # Return detailed order information for monitoring
             return OrderResult(
                 success=True,
-                order_id=order_id,
+                order_id=order_id,  # 现在是字符串类型
                 side=side.value,
                 size=quantity,
                 price=rounded_price,
