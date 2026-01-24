@@ -2502,20 +2502,26 @@ class SpreadArbBot:
                     self.extended_client.config.contract_id
                 )
 
-                # 获取当前仓位价差
-                position = self.state_manager.get_position()
-                position_spread_str = "无"
-                if position and position.entry_spread > 0:
-                    position_spread_str = f"{position.entry_spread:.3%}"
+                # 获取当前仓位价差（使用close_strategy的portfolio获取加权平均）
+                position_spread = self.close_strategy.get_weighted_avg_spread()
+
+                # 计算平仓阈值（与smart_close_strategy逻辑一致）
+                if position_spread > 0:
+                    position_spread_str = f"{position_spread:.3%}"
+                    market_threshold = position_spread - self.config.market_close_spread_b
+                    limit_threshold = position_spread - self.config.limit_close_spread_a
+                    close_threshold_str = f"限≤{limit_threshold:.3%} 市≤{market_threshold:.3%}"
+                else:
+                    position_spread_str = "无"
+                    close_threshold_str = "无仓位"
 
                 # 输出监控日志（每秒一次）
                 print(
                     f"📊 状态「开仓挂单等待成交」 | "
                     f"实时价差{spread_info.spread_pct:.3%} | "
                     f"ext_bid={ext_bid:.2f} | "
-                    f"仓位价差{position_spread_str} | "
-                    f"限平{self.config.limit_close_spread_a:.2%} | "
-                    f"市平{self.config.market_close_spread_b:.2%}"
+                    f"仓位{position_spread_str} | "
+                    f"{close_threshold_str}"
                 )
 
             # ========== 订单成交/取消由 WebSocket 处理，主循环不再检测 ==========
