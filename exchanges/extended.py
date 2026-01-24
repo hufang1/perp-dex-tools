@@ -688,35 +688,128 @@ class ExtendedClient(BaseExchangeClient):
         return contract_orders
 
     async def get_account_positions(self) -> Decimal:
-        """Get account positions."""
-        # contract_id should be market name, e.g. ETH-USD
-        positions_data = await self.perpetual_trading_client.account.get_positions(market_names=[self.config.ticker+"-USD"])
-        if not positions_data or not hasattr(positions_data, 'data'):
-            self.logger.log("No positions or failed to get positions", "WARNING")
-            position_amt = Decimal(0)
-        else:
+        """
+        Get account positions.
+
+        Returns:
+            Decimal: 持仓数量（绝对值）
+        """
+        result = await self.get_detailed_position()
+        return result['quantity']
+
+    async def get_detailed_position(self) -> Dict[str, Any]:
+        """
+        获取详细的仓位信息，包括平均开仓价格
+
+        Returns:
+            Dict containing:
+            - quantity: 持仓数量（绝对值）
+            - avg_price: 平均开仓价格
+            - market: 市场名称
+        """
+        try:
+            # contract_id should be market name, e.g. ETH-USD
+            positions_data = await self.perpetual_trading_client.account.get_positions(
+                market_names=[self.config.ticker+"-USD"]
+            )
+
+            if not positions_data or not hasattr(positions_data, 'data'):
+                self.logger.log(
+                    f"[get_detailed_position] API返回无数据 | "
+                    f"positions_data存在={positions_data is not None} | "
+                    f"has_data={hasattr(positions_data, 'data') if positions_data else False}",
+                    "WARNING"
+                )
+                return {
+                    'quantity': Decimal('0'),
+                    'avg_price': Decimal('0'),
+                    'market': self.config.contract_id
+                }
+
             # The API returns positions under data
             positions = positions_data.data
-            if positions:
-                # Find position for current contract
-                position = None
-                for p in positions:
-                    if p.market == self.config.contract_id:
-                        position = p
-                        break
+            if not positions:
+                self.logger.log(
+                    f"[get_detailed_position] positions列表为空",
+                    "WARNING"
+                )
+                return {
+                    'quantity': Decimal('0'),
+                    'avg_price': Decimal('0'),
+                    'market': self.config.contract_id
+                }
 
-                if position:
-                    # 注意：如果 position.size 是 float，需要先转换为字符串以保持精度
-                    size_value = position.size
-                    if isinstance(size_value, float):
-                        position_amt = abs(Decimal(str(size_value)))
-                    else:
-                        position_amt = abs(Decimal(size_value))
+            self.logger.log(
+                f"[get_detailed_position] 查询到 {len(positions)} 个仓位",
+                "DEBUG"
+            )
+
+            # Find position for current contract
+            position = None
+            for p in positions:
+                if p.market == self.config.contract_id:
+                    position = p
+                    break
+
+            if position:
+                # 获取持仓数量
+                size_value = position.size
+                if isinstance(size_value, float):
+                    quantity = abs(Decimal(str(size_value)))
                 else:
-                    position_amt = Decimal(0)
+                    quantity = abs(Decimal(size_value))
+
+                # 尝试获取平均开仓价格（可能有多种字段名）
+                avg_price = Decimal('0')
+                found_attrs = []
+                for attr in ['avg_price', 'average_price', 'avg_entry_price', 'average_entry_price']:
+                    if hasattr(position, attr):
+                        found_attrs.append(attr)
+                        price_value = getattr(position, attr)
+                        if price_value is not None and price_value != 0:
+                            if isinstance(price_value, float):
+                                avg_price = Decimal(str(price_value))
+                            else:
+                                avg_price = Decimal(price_value)
+                            break
+
+                self.logger.log(
+                    f"[get_detailed_position] 找到仓位 | "
+                    f"market={position.market} | "
+                    f"quantity={quantity} | "
+                    f"avg_price={avg_price} | "
+                    f"检查的字段={found_attrs}",
+                    "INFO" if avg_price > 0 else "DEBUG"
+                )
+
+                return {
+                    'quantity': quantity,
+                    'avg_price': avg_price,
+                    'market': self.config.contract_id
+                }
             else:
-                position_amt = Decimal(0)
-        return position_amt
+                self.logger.log(
+                    f"[get_detailed_position] 未找到market={self.config.contract_id}的仓位 | "
+                    f"可用markets: {[p.market for p in positions]}",
+                    "WARNING"
+                )
+                return {
+                    'quantity': Decimal('0'),
+                    'avg_price': Decimal('0'),
+                    'market': self.config.contract_id
+                }
+
+        except Exception as e:
+            self.logger.log(
+                f"[get_detailed_position] 查询失败: {e} | "
+                f"traceback={traceback.format_exc()}",
+                "ERROR"
+            )
+            return {
+                'quantity': Decimal('0'),
+                'avg_price': Decimal('0'),
+                'market': self.config.contract_id
+            }
     
     async def handle_account(self, message):
         """Handle order updates from WebSocket using correct pattern."""

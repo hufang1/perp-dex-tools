@@ -2729,29 +2729,94 @@ class SpreadArbBot:
                                 f"对冲{ext_filled_qty}完成，剩余{remaining}继续等待"
                             )
                     else:
-                        # ========== 修复：Maker 模式下创建 _pending_open_position ==========
+                        # ========== 修复：使用交易所API获取真实平均价格 ==========
                         if is_opening:
-                            # 获取当前价差信息
-                            spread_info = self.spread_monitor.get_current_spread()
-                            if spread_info and spread_info.is_valid():
-                                # 创建 _pending_open_position（用于后续添加到 Portfolio）
-                                self._pending_open_position = OpenPosition(
-                                    position_id=str(uuid.uuid4()),
-                                    open_time=datetime.now().timestamp(),
-                                    ext_price=ext_filled_price,
-                                    lig_price=result.lighter_price or Decimal('0'),
-                                    open_spread=spread_info.spread_pct,
-                                    quantity=ext_filled_qty,
-                                    ext_order_id=self._maker_wait_state.current_order.order_id,
-                                    lig_order_id=result.lighter_order_id,
-                                    is_active=True,
-                                )
+                            # 尝试从交易所API获取真实的平均开仓价格
+                            try:
                                 logger.info(
-                                    f"创建待确认仓位 | Maker模式 | "
-                                    f"ext_price={ext_filled_price} | "
-                                    f"lig_price={result.lighter_price} | "
-                                    f"open_spread={spread_info.spread_pct:.3%}"
+                                    f"[_create_pending_position] 尝试从交易所获取真实价格..."
                                 )
+
+                                ext_pos = await self.extended_client.get_detailed_position()
+                                lig_pos = await self.lighter_client.get_detailed_position()
+
+                                logger.info(
+                                    f"[_create_pending_position] API返回 | "
+                                    f"ext_pos={ext_pos} | "
+                                    f"lig_pos={lig_pos}"
+                                )
+
+                                # 使用交易所返回的真实平均价格，如果有的话
+                                ext_avg_price = ext_pos.get('avg_price', Decimal('0'))
+                                lig_avg_price = lig_pos.get('avg_price', Decimal('0'))
+
+                                logger.info(
+                                    f"[_create_pending_position] 提取的价格 | "
+                                    f"ext_avg_price={ext_avg_price:.2f} | "
+                                    f"lig_avg_price={lig_avg_price:.2f}"
+                                )
+
+                                # 如果API返回了有效价格，使用真实价格；否则使用成交价格
+                                if ext_avg_price > 0:
+                                    actual_ext_price = ext_avg_price
+                                    logger.info(f"[_create_pending_position] 使用Ext真实价格: {actual_ext_price:.2f}")
+                                else:
+                                    actual_ext_price = ext_filled_price
+                                    logger.warning(
+                                        f"[_create_pending_position] Ext API未返回有效价格，使用成交价格: {actual_ext_price:.2f}"
+                                    )
+
+                                if lig_avg_price > 0:
+                                    actual_lig_price = lig_avg_price
+                                    logger.info(f"[_create_pending_position] 使用Lig真实价格: {actual_lig_price:.2f}")
+                                else:
+                                    actual_lig_price = result.lighter_price or ext_filled_price
+                                    logger.warning(
+                                        f"[_create_pending_position] Lig API未返回有效价格，使用成交价格: {actual_lig_price:.2f}"
+                                    )
+
+                                # 计算真实价差
+                                if actual_ext_price > 0:
+                                    actual_spread = (actual_lig_price - actual_ext_price) / actual_ext_price
+                                else:
+                                    actual_spread = Decimal('0')
+
+                                logger.info(
+                                    f"[_create_pending_position] 最终价格 | "
+                                    f"ext={actual_ext_price:.2f} | "
+                                    f"lig={actual_lig_price:.2f} | "
+                                    f"spread={actual_spread:.3%} | "
+                                    f"成交价: ext={ext_filled_price:.2f}, lig={result.lighter_price or 0:.2f}"
+                                )
+
+                            except Exception as e:
+                                logger.error(
+                                    f"[_create_pending_position] 获取交易所真实价格失败: {e} | "
+                                    f"使用成交价格作为备选 | ext={ext_filled_price:.2f}, lig={result.lighter_price or 0:.2f}"
+                                )
+                                actual_ext_price = ext_filled_price
+                                actual_lig_price = result.lighter_price or ext_filled_price
+                                actual_spread = Decimal('0')
+
+                            # 创建 _pending_open_position（用于后续添加到 Portfolio）
+                            self._pending_open_position = OpenPosition(
+                                position_id=str(uuid.uuid4()),
+                                open_time=datetime.now().timestamp(),
+                                ext_price=actual_ext_price,
+                                lig_price=actual_lig_price,
+                                open_spread=actual_spread,
+                                quantity=ext_filled_qty,
+                                ext_order_id=self._maker_wait_state.current_order.order_id,
+                                lig_order_id=result.lighter_order_id,
+                                is_active=True,
+                            )
+                            logger.info(
+                                f"[_create_pending_position] 创建待确认仓位 | Maker模式 | "
+                                f"ext_price={actual_ext_price:.2f} | "
+                                f"lig_price={actual_lig_price:.2f} | "
+                                f"open_spread={actual_spread:.3%} | "
+                                f"quantity={ext_filled_qty}"
+                            )
 
                             import time
                             self._opening_wait_start_time = time.time()

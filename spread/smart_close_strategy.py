@@ -292,15 +292,12 @@ class SmartCloseStrategy:
 
     async def _fetch_exchange_avg_prices(self) -> tuple[Decimal, Decimal]:
         """
-        从交易所获取平均开仓价格（新增 003-spreading-improvements）
+        从交易所获取平均开仓价格
 
         并发查询两个交易所的持仓信息，获取平均开仓价格。
 
         Returns:
             (ext_avg_price, lig_avg_price): 两个交易所的平均开仓价格
-
-        Raises:
-            Exception: API调用失败时抛出
         """
         import asyncio
 
@@ -309,38 +306,54 @@ class SmartCloseStrategy:
             logger.warning("交易所客户端未注入，使用本地加权平均")
             return (Decimal("0"), Decimal("0"))
 
+        logger.debug(
+            f"[_fetch_exchange_avg_prices] 开始查询交易所平均价格..."
+        )
+
         try:
-            # 并发查询两个交易所的持仓
+            # 并发查询两个交易所的详细持仓信息
             ext_pos_result, lig_pos_result = await asyncio.gather(
-                self.extended_client.get_account_positions(),
-                self.lighter_client.get_account_positions(),
+                self.extended_client.get_detailed_position(),
+                self.lighter_client.get_detailed_position(),
                 return_exceptions=True
             )
 
             # 处理Extended结果
             ext_avg_price = Decimal("0")
             if isinstance(ext_pos_result, Exception):
-                logger.warning(f"获取Extended持仓失败: {ext_pos_result}")
-            elif isinstance(ext_pos_result, dict) and 'avg_entry_price' in ext_pos_result:
-                ext_avg_price = Decimal(str(ext_pos_result['avg_entry_price']))
+                logger.warning(f"[_fetch_exchange_avg_prices] 获取Extended持仓失败: {ext_pos_result}")
+            elif isinstance(ext_pos_result, dict) and 'avg_price' in ext_pos_result:
+                ext_avg_price = ext_pos_result['avg_price']
+                logger.info(
+                    f"[_fetch_exchange_avg_prices] Extended真实价格: {ext_avg_price:.2f}"
+                )
             else:
-                logger.warning(f"Extended持仓数据格式异常: {ext_pos_result}")
+                logger.warning(
+                    f"[_fetch_exchange_avg_prices] Extended持仓数据格式异常: {ext_pos_result}"
+                )
 
             # 处理Lighter结果
             lig_avg_price = Decimal("0")
             if isinstance(lig_pos_result, Exception):
-                logger.warning(f"获取Lighter持仓失败: {lig_pos_result}")
-            elif isinstance(lig_pos_result, dict) and 'avg_entry_price' in lig_pos_result:
-                lig_avg_price = Decimal(str(lig_pos_result['avg_entry_price']))
+                logger.warning(f"[_fetch_exchange_avg_prices] 获取Lighter持仓失败: {lig_pos_result}")
+            elif isinstance(lig_pos_result, dict) and 'avg_price' in lig_pos_result:
+                lig_avg_price = lig_pos_result['avg_price']
+                logger.info(
+                    f"[_fetch_exchange_avg_prices] Lighter真实价格: {lig_avg_price:.2f}"
+                )
             else:
-                logger.warning(f"Lighter持仓数据格式异常: {lig_pos_result}")
+                logger.warning(
+                    f"[_fetch_exchange_avg_prices] Lighter持仓数据格式异常: {lig_pos_result}"
+                )
 
             logger.debug(
-                f"交易所平均价格: Ext={ext_avg_price:.2f}, Lig={lig_avg_price:.2f}"
+                f"[_fetch_exchange_avg_prices] 交易所平均价格: Ext={ext_avg_price:.2f}, Lig={lig_avg_price:.2f}"
             )
 
             return ext_avg_price, lig_avg_price
 
         except Exception as e:
-            logger.error(f"查询交易所持仓异常: {e}")
+            logger.error(
+                f"[_fetch_exchange_avg_prices] 查询交易所持仓异常: {e}"
+            )
             raise

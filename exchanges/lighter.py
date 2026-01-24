@@ -7,6 +7,7 @@ import asyncio
 import time
 import logging
 import warnings
+import traceback
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -573,23 +574,92 @@ class LighterClient(BaseExchangeClient):
         return account_data.accounts[0].positions
 
     async def get_account_positions(self) -> Decimal:
-        """Get account positions using official SDK."""
-        # Get account info which includes positions
-        positions = await self._fetch_positions_with_retry()
+        """
+        Get account positions using official SDK.
 
-        # Find position for current market
-        for position in positions:
-            if position.market_id == self.config.contract_id:
-                # 返回绝对值（仓位大小），与 extended.py 保持一致
-                # 注意：如果 position.position 是 float，需要先转换为字符串以保持精度
-                pos_value = position.position
-                if isinstance(pos_value, float):
-                    # 从浮点数构造 Decimal 会丢失精度，先转字符串
-                    return abs(Decimal(str(pos_value)))
-                else:
-                    return abs(Decimal(pos_value))
+        Returns:
+            Decimal: 持仓数量（绝对值）
+        """
+        result = await self.get_detailed_position()
+        return result['quantity']
 
-        return Decimal(0)
+    async def get_detailed_position(self) -> Dict[str, Any]:
+        """
+        获取详细的仓位信息，包括平均开仓价格
+
+        Returns:
+            Dict containing:
+            - quantity: 持仓数量（绝对值）
+            - avg_price: 平均开仓价格
+            - market_id: 市场ID
+        """
+        try:
+            # Get account info which includes positions
+            positions = await self._fetch_positions_with_retry()
+
+            self.logger.log(
+                f"[get_detailed_position] 查询到 {len(positions)} 个仓位",
+                "DEBUG"
+            )
+
+            # Find position for current market
+            for position in positions:
+                if position.market_id == self.config.contract_id:
+                    # 返回绝对值（仓位大小），与 extended.py 保持一致
+                    pos_value = position.position
+                    if isinstance(pos_value, float):
+                        quantity = abs(Decimal(str(pos_value)))
+                    else:
+                        quantity = abs(Decimal(pos_value))
+
+                    # 获取平均开仓价格
+                    avg_price = Decimal('0')
+                    if hasattr(position, 'avg_price') and position.avg_price:
+                        avg_price = Decimal(str(position.avg_price))
+                        self.logger.log(
+                            f"[get_detailed_position] 找到仓位 | "
+                            f"market_id={position.market_id} | "
+                            f"quantity={quantity} | "
+                            f"avg_price={avg_price}",
+                            "INFO"
+                        )
+                    else:
+                        self.logger.log(
+                            f"[get_detailed_position] 找到仓位但无avg_price字段 | "
+                            f"market_id={position.market_id} | "
+                            f"quantity={quantity} | "
+                            f"position attrs={dir(position)}",
+                            "WARNING"
+                        )
+
+                    return {
+                        'quantity': quantity,
+                        'avg_price': avg_price,
+                        'market_id': position.market_id
+                    }
+
+            self.logger.log(
+                f"[get_detailed_position] 未找到market_id={self.config.contract_id}的仓位",
+                "WARNING"
+            )
+
+            return {
+                'quantity': Decimal('0'),
+                'avg_price': Decimal('0'),
+                'market_id': self.config.contract_id
+            }
+
+        except Exception as e:
+            self.logger.log(
+                f"[get_detailed_position] 查询失败: {e} | "
+                f"traceback={traceback.format_exc()}",
+                "ERROR"
+            )
+            return {
+                'quantity': Decimal('0'),
+                'avg_price': Decimal('0'),
+                'market_id': self.config.contract_id
+            }
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
