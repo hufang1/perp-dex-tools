@@ -73,7 +73,7 @@ class ArithmeticOpenStrategy:
             reason = (
                 f"开仓: 价差{current_spread:.3%} >= 阈值{current_threshold:.3%} "
                 f"(初始={self.config.initial_open_spread:.3%}, "
-                f"次数={self.config.opening_count}, "
+                f"成功开仓次数={self.config.successful_opening_count}, "
                 f"步长={self.config.spread_step:.3%})"
             )
             return True, reason
@@ -82,7 +82,7 @@ class ArithmeticOpenStrategy:
             reason = (
                 f"价差{current_spread:.3%}未达到阶梯阈值{current_threshold:.3%} "
                 f"(初始={self.config.initial_open_spread:.3%}, "
-                f"次数={self.config.opening_count}, "
+                f"成功开仓次数={self.config.successful_opening_count}, "
                 f"步长={self.config.spread_step:.3%})"
             )
             return False, reason
@@ -137,16 +137,18 @@ class ArithmeticOpenStrategy:
         """
         开仓成功回调 (003-spreading-improvements)
 
-        在开仓成功后调用，增加开仓次数并更新策略状态。
+        在开仓成功后调用，增加成功开仓次数并更新策略状态。
+
+        方案B：使用 successful_opening_count 只计算真正成功的开仓
 
         Args:
             actual_spread: 实际开仓价差
         """
-        old_count = self.config.opening_count
-        self.config.opening_count += 1
+        old_count = self.config.successful_opening_count
+        self.config.successful_opening_count += 1
 
         logger.info(
-            f"开仓成功 | 开仓次数: {old_count} -> {self.config.opening_count} | "
+            f"✅ 开仓成功 | 成功开仓次数: {old_count} -> {self.config.successful_opening_count} | "
             f"下次阈值: {self.config.current_open_threshold:.3%} | "
             f"实际价差: {actual_spread:.3%}"
         )
@@ -159,13 +161,13 @@ class ArithmeticOpenStrategy:
         """
         所有仓位平仓回调 (003-spreading-improvements)
 
-        在所有仓位平仓后调用，重置开仓次数。
+        在所有仓位平仓后调用，重置成功开仓次数。
         """
-        old_count = self.config.opening_count
-        self.config.opening_count = 0
+        old_count = self.config.successful_opening_count
+        self.config.successful_opening_count = 0
 
         logger.info(
-            f"所有仓位已平仓 | 重置开仓次数: {old_count} -> 0 | "
+            f"🔄 所有仓位已平仓 | 重置成功开仓次数: {old_count} -> 0 | "
             f"下次阈值恢复为: {self.config.current_open_threshold:.3%}"
         )
 
@@ -177,14 +179,16 @@ class ArithmeticOpenStrategy:
         """
         获取当前阶梯开仓状态 (003-spreading-improvements)
 
+        方案B：使用 successful_opening_count
+
         Returns:
             TieredOpeningState: 当前阶梯开仓状态快照
         """
         return TieredOpeningState(
-            current_count=self.config.opening_count,
+            current_count=self.config.successful_opening_count,
             current_threshold=self.config.current_open_threshold,
             next_threshold=self.config.initial_open_spread + (
-                (self.config.opening_count + 1) * self.config.spread_step
+                (self.config.successful_opening_count + 1) * self.config.spread_step
             ),
             initial_spread=self.config.initial_open_spread,
             step_size=self.config.spread_step,

@@ -147,9 +147,9 @@ class SpreadArbBot:
         print(f"🔧 [配置初始化] 阶梯开仓参数:")
         print(f"   - initial_open_spread = {config.initial_open_spread} ({config.initial_open_spread:.3%})")
         print(f"   - spread_step = {config.spread_step} ({config.spread_step:.3%})")
-        print(f"   - opening_count = {config.opening_count}")
-        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
-        logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.opening_count}, current_threshold={config.current_open_threshold:.3%}")
+        print(f"   - successful_opening_count = {config.successful_opening_count}")
+        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.config.current_open_threshold:.3%})")
+        logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.successful_opening_count}, current_threshold={config.config.current_open_threshold:.3%}")
 
     async def start(self) -> None:
         """启动机器人"""
@@ -321,6 +321,49 @@ class SpreadArbBot:
                 logger.error(f"交易循环异常: {e}", exc_info=True)
                 # 继续运行，不要因为单次错误而停止
 
+    async def _enter_idle_state(self, reason: str, check_positions: bool = True) -> None:
+        """
+        进入 IDLE 状态的统一方法
+
+        自动检查持仓情况，如果没有持仓则重置成功开仓次数。
+
+        Args:
+            reason: 进入 IDLE 状态的原因
+            check_positions: 是否检查实际持仓（默认True）
+        """
+        old_count = self.config.successful_opening_count
+
+        # 检查实际持仓（如果需要）
+        should_reset = False
+        if check_positions:
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+
+                tolerance = Decimal("0.001")
+                has_positions = abs(ext_position) > tolerance or abs(lig_position) > tolerance
+
+                if not has_positions:
+                    should_reset = True
+                    logger.info(f"确认无持仓，重置成功开仓次数: {old_count} -> 0")
+                else:
+                    logger.info(f"仍有持仓 Ext={ext_position} Lig={lig_position}，不重置开仓次数")
+            except Exception as e:
+                logger.warning(f"检查持仓失败，不重置开仓次数: {e}")
+        else:
+            # 不检查持仓，直接重置
+            should_reset = True
+
+        # 重置成功开仓次数（如果需要）
+        if should_reset:
+            await self.open_strategy.on_all_positions_closed()
+
+        # 设置状态
+        self.state_manager.set_state(BotState.IDLE, reason)
+        await self.state_manager.save_state()
+
+        logger.info(f"进入IDLE状态: {reason}")
+
     async def _process_idle_state(self) -> None:
         """处理 IDLE 状态：监控价差，寻找开仓机会"""
         if not self.order_book_manager.is_ready():
@@ -390,14 +433,14 @@ class SpreadArbBot:
         if self.config.use_maker_mode:
             # Maker模式：使用阶梯开仓阈值 (003-spreading-improvements: 改为使用阶梯阈值)
             should_open, reason = self.open_strategy.should_open(spread_info)
-            current_threshold = self.config.current_open_threshold
-            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
+            current_threshold = config.current_open_threshold
+            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.successful_opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
         else:
             # Taker模式：使用阶梯开仓策略 (003-spreading-improvements)
             should_open, reason = self.open_strategy.should_open(spread_info)
             # 使用新的 current_open_threshold 显示当前阶梯阈值
-            current_threshold = self.config.current_open_threshold
-            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
+            current_threshold = config.current_open_threshold
+            threshold_info = f"开仓阈值{current_threshold:.3%}(阶梯:次{self.config.successful_opening_count},初{self.config.initial_open_spread:.3%},步{self.config.spread_step:.3%})"
 
         # 输出空闲状态监控日志（每5秒一次）
         if not hasattr(self, '_last_idle_log_time'):
@@ -407,7 +450,7 @@ class SpreadArbBot:
             current_spread = spread_info.spread_pct
             status_text = "开仓" if should_open else "不开仓"
             # ========== 新增: 添加计算公式的调试信息 ==========
-            calc_formula = f"{self.config.initial_open_spread:.3%}+({self.config.opening_count}*{self.config.spread_step:.3%})={self.config.current_open_threshold:.3%}"
+            calc_formula = f"{self.config.initial_open_spread:.3%}+({self.config.successful_opening_count}*{self.config.spread_step:.3%})={config.current_open_threshold:.3%}"
             print(f"📊 状态「空闲」 实时价差{current_spread:.3%} 下次{threshold_info} 计算:{calc_formula} {status_text}")
             self._last_idle_log_time = current_time
 
@@ -452,10 +495,10 @@ class SpreadArbBot:
 
             # 切换到开仓状态
             # ========== 修改 (003-spreading-improvements): 统一使用阶梯开仓阈值 ==========
-            current_threshold = self.config.current_open_threshold
+            current_threshold = config.current_open_threshold
             self.state_manager.set_state(
                 BotState.OPENING,
-                f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.opening_count})"
+                f"价差{spread_info.spread_pct:.3%} >= 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
             )
             await self.state_manager.save_state()
 
@@ -1160,10 +1203,8 @@ class SpreadArbBot:
 
                 await self._force_close_positions()
 
-                # 强平后进入 IDLE 状态
-                logger.info("✅ 强平完成，进入IDLE状态")
-                self.state_manager.set_state(BotState.IDLE, "平仓后仓位不一致，已强制清理")
-                await self.state_manager.save_state()
+                # 强平后进入 IDLE 状态（使用统一方法，自动重置开仓次数）
+                await self._enter_idle_state("平仓后仓位不一致，已强制清理", check_positions=True)
 
             else:
                 # 两边都有持仓，平仓失败
@@ -1735,7 +1776,7 @@ class SpreadArbBot:
         # ========== 修改 (003-spreading-improvements): 使用阶梯开仓阈值 ==========
         from price_monitor import SpreadConfig as PriceSpreadConfig
         price_config = PriceSpreadConfig(
-            open_threshold=self.config.current_open_threshold,  # 使用阶梯开仓阈值
+            open_threshold=config.current_open_threshold,  # 使用阶梯开仓阈值
             close_threshold=self.config.fixed_close_threshold,
             monitor_interval=self.config.price_monitor_interval,
             price_deviation_threshold=1  # 1 tick
@@ -1828,18 +1869,17 @@ class SpreadArbBot:
         print(f"🔧 [状态加载后] 阶梯开仓参数:")
         print(f"   - initial_open_spread = {self.config.initial_open_spread} ({self.config.initial_open_spread:.3%})")
         print(f"   - spread_step = {self.config.spread_step} ({self.config.spread_step:.3%})")
-        print(f"   - opening_count = {self.config.opening_count}")
-        print(f"   - current_open_threshold = {self.config.current_open_threshold} ({self.config.current_open_threshold:.3%})")
-        print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.opening_count} * {self.config.spread_step}) = {self.config.current_open_threshold}")
-        logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.opening_count}, current_threshold={self.config.current_open_threshold:.3%}")
+        print(f"   - opening_count = {self.config.successful_opening_count}")
+        print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
+        print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.successful_opening_count} * {self.config.spread_step}) = {config.current_open_threshold}")
+        logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.successful_opening_count}, current_threshold={config.current_open_threshold:.3%}")
 
         # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
         if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
                      BotState.CLOSING, BotState.CLOSING_WAIT, BotState.CLOSING_MAKER_WAIT]:
             logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
-            self.state_manager.set_state(BotState.IDLE, "程序重启，重置未完成的交易状态")
-            await self.state_manager.save_state()
+            await self._enter_idle_state("程序重启，重置未完成的交易状态", check_positions=True)
 
         # 检查HOLDING状态但实际没有持仓的情况
         if state == BotState.HOLDING:
@@ -1850,9 +1890,7 @@ class SpreadArbBot:
 
             if not has_position:
                 logger.info(f"检测到{state.value}状态但实际无持仓，重置为IDLE")
-                self.state_manager.set_state(BotState.IDLE, "程序重启，检测到无实际持仓，重置状态")
-                await self.state_manager.save_state()
-                await self.state_manager.save_state()
+                await self._enter_idle_state("程序重启，检测到无实际持仓，重置状态", check_positions=False)
 
         position = self.state_manager.get_position()
         if position:
@@ -2083,8 +2121,24 @@ class SpreadArbBot:
 
             # 根据订单类型决定下一个状态
             if order.is_opening:
-                # 开仓订单取消 -> IDLE
-                self.state_manager.set_state(BotState.IDLE, "开仓订单已取消（WebSocket）")
+                # ========== 修复：开仓订单取消，先检查是否有其他持仓 ==========
+                # 检查 Portfolio 中是否有其他持仓
+                portfolio = self.close_strategy.get_portfolio()
+                total_quantity = portfolio.get_total_quantity()
+
+                if total_quantity > 0:
+                    # 有其他持仓，进入 HOLDING 状态
+                    logger.info(
+                        f"开仓订单已取消，但有其他持仓 {total_quantity}，进入HOLDING状态"
+                    )
+                    self.state_manager.set_state(
+                        BotState.HOLDING,
+                        f"开仓订单已取消，但有持仓({total_quantity})"
+                    )
+                else:
+                    # 无持仓，进入 IDLE 状态
+                    logger.info("开仓订单已取消，无持仓，进入IDLE状态")
+                    self.state_manager.set_state(BotState.IDLE, "开仓订单已取消（WebSocket）")
             else:
                 # 平仓订单取消 -> HOLDING
                 self.state_manager.set_state(BotState.HOLDING, "平仓订单已取消（WebSocket）")
@@ -2475,13 +2529,13 @@ class SpreadArbBot:
 
             # 检查价差保护 (003-spreading-improvements: 使用阶梯开仓阈值)
             if spread_info and spread_info.is_valid():
-                current_threshold = self.config.current_open_threshold
+                current_threshold = config.current_open_threshold
                 if spread_info.spread_pct < current_threshold:
                     # 价差不满足条件，取消订单
                     spread_value = spread_info.spread_pct
                     logger.warning(
                         f"⚠️ 价差保护触发 | "
-                        f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.opening_count})"
+                        f"实时价差{spread_value:.3%} < 阶梯开仓阈值{current_threshold:.3%}(次{self.config.successful_opening_count})"
                     )
                     await self.trade_executor.cancel_extended_maker_order(order_id)
 

@@ -430,17 +430,35 @@ class BotConfig:
 
     opening_count: int = 0
     """
-    当前开仓次数
+    当前开仓次数（已弃用，保留用于兼容性）
     - 初始值为0
-    - 每次开仓成功后+1
+    - 已被 successful_opening_count 替代
+    """
+
+    successful_opening_count: int = 0
+    """
+    成功开仓次数（方案B：只计算真正成功的开仓）
+    - 初始值为0
+    - 只在仓位成功添加到Portfolio后递增
     - 所有仓位平仓后重置为0
-    - 用于计算当前开仓阈值
+    - 用于计算当前开仓阈值（阶梯开仓）
+    - 不受开仓失败、重试、部分成交影响
     """
 
     @property
     def current_open_threshold(self) -> Decimal:
-        """计算当前开仓阈值"""
-        return self.initial_open_spread + (self.opening_count * self.spread_step)
+        """
+        计算当前开仓阈值（使用成功开仓次数）
+
+        阶梯开仓公式：
+        - 第1次开仓：initial_open_spread + 0 * spread_step
+        - 第2次开仓：initial_open_spread + 1 * spread_step
+        - 第N次开仓：initial_open_spread + (N-1) * spread_step
+
+        Returns:
+            当前开仓阈值
+        """
+        return self.initial_open_spread + (self.successful_opening_count * self.spread_step)
 
     # 双模式平仓配置
     limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.002"))
