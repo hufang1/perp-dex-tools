@@ -683,16 +683,13 @@ class SpreadArbBot:
         current_time = time.time()
         if current_time - self._last_holding_log_time >= self._holding_log_interval:
             current_spread = spread_info.spread_pct
-            cached_spread = self.config.cached_open_spread
-            spread_step = self.config.spread_step
-
-            # 计算下一次开仓价差
-            if cached_spread == 0:
-                next_open_threshold = self.config.min_spread_threshold
-                open_formula = f">={next_open_threshold:.3%}"
-            else:
-                next_open_threshold = cached_spread + spread_step
-                open_formula = f">=(上次开仓{cached_spread:.3%}+步长{spread_step:.3%}={next_open_threshold:.3%})"
+            current_threshold = self.config.current_open_threshold
+            open_formula = (
+                f">={current_threshold:.3%}"
+                f"(阶梯:次{self.config.successful_opening_count},"
+                f"初{self.config.initial_open_spread:.3%},"
+                f"步{self.config.spread_step:.3%})"
+            )
 
             # 计算平仓价差（与 close_strategy 一致：限价阈值/市价阈值）
             entry_spread = self.close_strategy.get_weighted_avg_spread()
@@ -717,10 +714,17 @@ class SpreadArbBot:
                 result = "不开仓"
 
             # 组合日志，用括号组织逻辑
+            position_spread_text = f"{entry_spread:.3%}" if entry_spread > 0 else "无"
             if close_formula:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，平仓阈值{close_formula}），结果：{result}")
+                print(
+                    f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
+                    f"当前仓位价差{position_spread_text}，平仓阈值{close_formula}），结果：{result}"
+                )
             else:
-                print(f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}），结果：{result}")
+                print(
+                    f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
+                    f"当前仓位价差{position_spread_text}），结果：{result}"
+                )
             self._last_holding_log_time = current_time
 
         # 记录实时价差到CSV（每10秒一次）
@@ -1005,11 +1009,6 @@ class SpreadArbBot:
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
                     self.close_strategy.add_position(self._pending_open_position)
-
-                    # 更新上次开仓价差（只在仓位确认成功后才更新）
-                    logger.info(f"准备更新开仓价差: 当前={self.config.cached_open_spread:.3%}, 新值={self._pending_open_position.open_spread:.3%}")
-                    self.open_strategy.update_cached_spread(self._pending_open_position.open_spread)
-                    logger.info(f"更新后开仓价差: {self.config.cached_open_spread:.3%}")
 
                     # ========== 新增 (003-spreading-improvements): 阶梯开仓回调 ==========
                     # 调用开仓成功回调，增加开仓次数
@@ -1934,6 +1933,9 @@ class SpreadArbBot:
         print(f"   - 计算公式: current = initial + (count * step) = {self.config.initial_open_spread} + ({self.config.successful_opening_count} * {self.config.spread_step}) = {self.config.current_open_threshold}")
         logger.info(f"[状态加载后] 阶梯开仓配置: initial={self.config.initial_open_spread:.3%}, step={self.config.spread_step:.3%}, count={self.config.successful_opening_count}, current_threshold={self.config.current_open_threshold:.3%}")
 
+        # 不保留上次实际开仓价差，统一重置
+        self.config.cached_open_spread = Decimal("0")
+
         # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
         if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
@@ -2510,15 +2512,29 @@ class SpreadArbBot:
                     'profit_pct', 'elapsed_time', 'status'
                 ])
 
-        # 初始化实时价差CSV文件
+        # 初始化实时价差CSV文件（若表头不一致则新建文件）
+        spread_header = [
+            'timestamp', 'state', 'ext_bid', 'ext_ask',
+            'lig_bid', 'lig_ask', 'spread_abs', 'spread_pct',
+            'position_spread', 'portfolio_qty', 'total_entry_spread'
+        ]
+        if self._spread_csv_path.exists():
+            try:
+                with open(self._spread_csv_path, 'r', newline='') as f:
+                    reader = csv.reader(f)
+                    first_row = next(reader, [])
+                if first_row and first_row != spread_header:
+                    suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    self._spread_csv_path = self._csv_log_dir / f"spread_data_{date_str}_{suffix}.csv"
+            except Exception as e:
+                logger.warning(f"读取价差CSV表头失败，重建新文件: {e}")
+                suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._spread_csv_path = self._csv_log_dir / f"spread_data_{date_str}_{suffix}.csv"
+
         if not self._spread_csv_path.exists():
             with open(self._spread_csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'state', 'ext_bid', 'ext_ask',
-                    'lig_bid', 'lig_ask', 'spread_abs', 'spread_pct',
-                    'cached_open_spread', 'portfolio_qty', 'total_entry_spread'
-                ])
+                writer.writerow(spread_header)
 
         logger.info(f"CSV日志文件: 开仓={self._open_csv_path}, 平仓={self._close_csv_path}, 价差={self._spread_csv_path}")
 
@@ -2625,7 +2641,7 @@ class SpreadArbBot:
                 str(spread_info.lig_ask),
                 str(spread_info.spread_abs),
                 str(spread_info.spread_pct),
-                str(self.config.cached_open_spread),
+                str(portfolio.get_weighted_avg_spread() if portfolio else 0),
                 str(portfolio.total_quantity if portfolio else 0),
                 str(portfolio.get_total_entry_spread() if portfolio else 0)
             )
