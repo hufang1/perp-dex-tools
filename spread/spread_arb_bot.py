@@ -160,6 +160,8 @@ class SpreadArbBot:
         self._last_dashboard_sample_time: float = 0.0
         self._last_close_context: Optional[Dict[str, object]] = None
         self._maker_close_fail_count: int = 0
+        self._last_maker_order_id: Optional[str] = None
+        self._last_maker_is_opening: Optional[bool] = None
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -614,6 +616,8 @@ class SpreadArbBot:
                 side='buy',
                 is_opening=True
             )
+            self._last_maker_order_id = str(result.extended_order_id)
+            self._last_maker_is_opening = True
             self._maker_wait_state.start_time = datetime.now()
 
             # 启动 WebSocket 订单监控
@@ -941,6 +945,8 @@ class SpreadArbBot:
                 side='sell',  # 平仓卖出
                 is_opening=False  # 标记为平仓订单
             )
+            self._last_maker_order_id = str(result.extended_order_id)
+            self._last_maker_is_opening = False
             self._maker_wait_state.start_time = datetime.now()
 
             # 启动 WebSocket 订单监控
@@ -3009,6 +3015,7 @@ class SpreadArbBot:
         5. 完全成交时进入LIGHTER_HEDGING对冲全部
         """
         from models import MakerWaitState, HedgingState
+        time_module = __import__('time')
 
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             logger.warning("Maker等待状态未初始化，返回HOLDING")
@@ -3048,7 +3055,7 @@ class SpreadArbBot:
                     return
 
                 # 检查冷却时间
-                current_time = time.time()
+                current_time = time_module.time()
                 if current_time - self._maker_wait_state.last_reposition_time < self.config.reposition_cooldown:
                     logger.debug(f"重挂冷却中，跳过本次检测")
                     return
@@ -4144,6 +4151,7 @@ class SpreadArbBot:
 
     async def _handle_closing_maker_wait_spread_transition(self, spread_info, **_) -> bool:
         """CLOSING_MAKER_WAIT状态：价差不满足则撤单回HOLDING"""
+        time_module = __import__('time')
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             return False
 
@@ -4158,7 +4166,7 @@ class SpreadArbBot:
             return False
 
         async with self._maker_lock("close_cancel"):
-            now = time.time()
+            now = time_module.time()
             if not hasattr(self, "_last_close_cancel_log_time"):
                 self._last_close_cancel_log_time = 0.0
             order_id = self._maker_wait_state.current_order.order_id
@@ -4195,8 +4203,7 @@ class SpreadArbBot:
                 ext_closed = abs(ext_position) < tolerance
                 lig_closed = abs(lig_position) < tolerance
                 if ext_closed and lig_closed:
-                    import time
-                    self._closing_wait_start_time = time.time()
+                    self._closing_wait_start_time = time_module.time()
                     self.state_manager.set_state(
                         BotState.CLOSING_WAIT,
                         "撤单后检测到无仓位，验证平仓",
@@ -4488,6 +4495,8 @@ class SpreadArbBot:
                     )
                     self._maker_wait_state.current_order = new_order
                     self._maker_wait_state.reposition_count += 1
+                    self._last_maker_order_id = str(result.extended_order_id)
+                    self._last_maker_is_opening = is_opening
 
                     # 重新启动 WebSocket 订单监控（监控新订单）
                     self.maker_order_monitor.start_monitoring(new_order)
@@ -4647,6 +4656,8 @@ class SpreadArbBot:
                 side='sell',  # 平仓时卖出
                 is_opening=False  # 标记为平仓订单
             )
+            self._last_maker_order_id = str(result.extended_order_id)
+            self._last_maker_is_opening = False
 
             self._maker_wait_state.current_order = close_order
 
