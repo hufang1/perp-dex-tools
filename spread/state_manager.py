@@ -43,6 +43,7 @@ class StateManager:
     STATE_NAMES_CN = {
         BotState.IDLE: "空闲",
         BotState.OPENING: "开仓中",
+        BotState.OPENING_TAKER: "市价开仓中",
         BotState.OPENING_MAKER_WAIT: "开仓挂单等待成交",  # 新增 (017-ext-maker-mode)
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",
@@ -138,6 +139,7 @@ class StateManager:
                         ext_order_id=pos_data.get("ext_order_id"),
                         lig_order_id=pos_data.get("lig_order_id"),
                         is_active=pos_data.get("is_active", True),
+                        open_is_taker=pos_data.get("open_is_taker", False),
                     )
                     self._portfolio.add_position(position)
             else:
@@ -156,6 +158,7 @@ class StateManager:
                         ext_order_id=self._position.extended_order_id,
                         lig_order_id=self._position.lighter_order_id,
                         is_active=True,
+                        open_is_taker=False,
                     )
                     self._portfolio.add_position(open_position)
 
@@ -275,6 +278,7 @@ class StateManager:
                             "ext_order_id": pos.ext_order_id,
                             "lig_order_id": pos.lig_order_id,
                             "is_active": pos.is_active,
+                            "open_is_taker": getattr(pos, "open_is_taker", False),
                         }
                         for pos in self._portfolio.positions
                     ],
@@ -352,6 +356,7 @@ class StateManager:
     STATE_NAMES_CN = {
         BotState.IDLE: "空闲",
         BotState.OPENING: "开仓中",
+        BotState.OPENING_TAKER: "市价开仓中",
         BotState.OPENING_MAKER_WAIT: "开仓挂单等待成交",  # 新增 (017-ext-maker-mode)
         BotState.OPENING_WAIT: "开仓等待确认",
         BotState.HOLDING: "持仓中",

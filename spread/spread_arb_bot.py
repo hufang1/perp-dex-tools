@@ -350,6 +350,9 @@ class SpreadArbBot:
                 elif state == BotState.OPENING:
                     await self._process_opening_state()
 
+                elif state == BotState.OPENING_TAKER:
+                    await self._process_opening_taker_state()
+
                 elif state == BotState.OPENING_MAKER_WAIT:  # 新增 (017-ext-maker-mode)
                     await self._process_opening_maker_wait_state()
 
@@ -498,7 +501,7 @@ class SpreadArbBot:
             return
 
         self._update_bollinger(spread_info.spread_pct)
-        should_open, reason = self._should_open_bollinger(spread_info)
+        should_open, reason, use_taker = self._should_open_bollinger(spread_info)
         bands = self._get_bollinger_bands()
         if bands:
             midline, upper, _lower, _std = bands
@@ -530,6 +533,7 @@ class SpreadArbBot:
             spread_info,
             rule_ids=["open"],
             should_open=should_open,
+            use_taker=use_taker,
             reason=reason,
         ):
             return
@@ -555,6 +559,18 @@ class SpreadArbBot:
             await self._process_opening_maker_mode(spread_info)
         else:
             await self._process_opening_taker_mode(spread_info)
+
+    async def _process_opening_taker_state(self) -> None:
+        """处理 OPENING_TAKER 状态：强制市价开仓"""
+        logger.info("执行市价开仓...")
+        import time
+        self._last_open_time = time.time()
+        spread_info = self.spread_monitor.get_current_spread()
+        if spread_info is None or not spread_info.is_valid():
+            logger.warning("无法获取价差信息，取消市价开仓")
+            await self._enter_idle_or_holding_after_open_failure("无法获取价差信息")
+            return
+        await self._process_opening_taker_mode(spread_info)
 
     async def _process_opening_maker_mode(self, spread_info) -> None:
         """处理Maker模式开仓"""
@@ -655,6 +671,7 @@ class SpreadArbBot:
             ext_order_id=result.extended_order_id,
             lig_order_id=result.lighter_order_id,
             is_active=True,
+            open_is_taker=True,
         )
 
         # 输出订单状态信息
@@ -725,13 +742,14 @@ class SpreadArbBot:
         self._update_bollinger(spread_info.spread_pct)
 
         # 检查是否可以继续开仓（布林带策略）
-        should_open, reason = self._should_open_bollinger(spread_info)
+        should_open, reason, use_taker = self._should_open_bollinger(spread_info)
 
         await self._apply_spread_rules(
             BotState.HOLDING,
             spread_info,
             rule_ids=["open"],
             should_open=should_open,
+            use_taker=use_taker,
             reason=reason,
         )
 
@@ -743,6 +761,8 @@ class SpreadArbBot:
             current_spread = spread_info.spread_pct
             close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
             bands = self._get_bollinger_bands()
+            open_taker = self.close_strategy.portfolio.has_open_taker()
+            open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
             if bands:
                 midline, upper, _lower, _std = bands
                 open_formula = f">=上轨{upper:.3%}（中轴{midline:.3%}）"
@@ -754,9 +774,11 @@ class SpreadArbBot:
             entry_spread = self.close_strategy.get_weighted_avg_spread()
             if entry_spread > 0:
                 profit_spread = entry_spread - close_spread
-                market_threshold = self.config.market_close_spread_b
+                market_multiplier = Decimal("2") if open_taker else Decimal("1")
+                market_threshold = self.config.market_close_spread_b * market_multiplier
                 if bands:
-                    close_formula = f"中轴≤{midline:.3%} | 市价利润≥{market_threshold:.3%}"
+                    market_label = "B*2" if open_taker else "B"
+                    close_formula = f"中轴≤{midline:.3%} | 市价利润≥{market_threshold:.3%}({market_label})"
                 else:
                     close_formula = "布林带样本不足"
             else:
@@ -783,6 +805,7 @@ class SpreadArbBot:
             if close_formula:
                 print(
                     f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
+                    f"开仓方式{open_mode_label}，"
                     f"当前仓位价差{position_spread_text}，平仓价差{close_spread_text}，"
                     f"当前利润{profit_text}，"
                     f"平仓阈值{close_formula}），结果：{result}"
@@ -790,6 +813,7 @@ class SpreadArbBot:
             else:
                 print(
                     f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
+                    f"开仓方式{open_mode_label}，"
                     f"当前仓位价差{position_spread_text}，平仓价差{close_spread_text}，"
                     f"当前利润{profit_text}），结果：{result}"
                 )
@@ -2018,7 +2042,7 @@ class SpreadArbBot:
 
         # 程序重启后，如果是OPENING、OPENING_WAIT、OPENING_MAKER_WAIT、CLOSING、CLOSING_WAIT、CLOSING_MAKER_WAIT状态，重置为IDLE
         # 因为之前的交易流程已经失效，需要重新开始
-        if state in [BotState.OPENING, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
+        if state in [BotState.OPENING, BotState.OPENING_TAKER, BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT,
                      BotState.CLOSING, BotState.CLOSING_WAIT, BotState.CLOSING_MAKER_WAIT]:
             logger.info(f"检测到未完成的{state.value}状态，重置为IDLE")
             await self._enter_idle_state("程序重启，重置未完成的交易状态", check_positions=True)
@@ -2801,6 +2825,8 @@ class SpreadArbBot:
                 position_spread = self.close_strategy.get_weighted_avg_spread()
 
                 # 计算平仓阈值（与布林带+利润逻辑一致）
+                open_taker = self.close_strategy.portfolio.has_open_taker()
+                open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
                 if position_spread > 0:
                     position_spread_str = f"{position_spread:.3%}"
                     close_spread_info = self._build_close_spread_info(spread_info)
@@ -2809,11 +2835,15 @@ class SpreadArbBot:
                         profit_str = f"利润{profit_spread:.3%}"
                     else:
                         profit_str = "利润无"
-                    market_threshold = self.config.market_close_spread_b
+                    market_multiplier = Decimal("2") if open_taker else Decimal("1")
+                    market_threshold = self.config.market_close_spread_b * market_multiplier
                     bands = self._get_bollinger_bands()
                     if bands:
                         midline, _upper, _lower, _std = bands
-                        close_threshold_str = f"{profit_str} | 中轴≤{midline:.3%} 市价利润≥{market_threshold:.3%}"
+                        market_label = "B*2" if open_taker else "B"
+                        close_threshold_str = (
+                            f"{profit_str} | 中轴≤{midline:.3%} 市价利润≥{market_threshold:.3%}({market_label})"
+                        )
                     else:
                         close_threshold_str = f"{profit_str} | 布林带样本不足"
                 else:
@@ -2825,6 +2855,7 @@ class SpreadArbBot:
                     f"📊 状态「开仓挂单等待成交」 | "
                     f"实时价差{spread_info.spread_pct:.3%} | "
                     f"ext_bid={ext_bid:.2f} | "
+                    f"开仓方式{open_mode_label} | "
                     f"仓位{position_spread_str} | "
                     f"{close_threshold_str}"
                 )
@@ -3202,6 +3233,7 @@ class SpreadArbBot:
                                 ext_order_id=self._maker_wait_state.current_order.order_id,
                                 lig_order_id=result.lighter_order_id,
                                 is_active=True,
+                                open_is_taker=False,
                             )
                             logger.info(
                                 f"[_create_pending_position] 创建待确认仓位 | Maker模式 | "
@@ -3232,6 +3264,7 @@ class SpreadArbBot:
                                 ext_order_id="maker_open",
                                 lig_order_id=result.lighter_order_id,
                                 is_active=True,
+                                open_is_taker=False,
                             )
                         import time
                         self._opening_wait_start_time = time.time()
@@ -3330,20 +3363,28 @@ class SpreadArbBot:
     def _get_bollinger_bands(self) -> Optional[tuple]:
         return self._boll_last_bands
 
-    def _should_open_bollinger(self, spread_info) -> tuple[bool, str]:
+    def _should_open_bollinger(self, spread_info) -> tuple[bool, str, bool]:
         if not self.config.use_bollinger:
-            return self.open_strategy.should_open(spread_info)
+            should_open, reason = self.open_strategy.should_open(spread_info)
+            return should_open, reason, not self.config.use_maker_mode
         bands = self._get_bollinger_bands()
         if not bands:
-            return False, "布林带样本不足"
+            return False, "布林带样本不足", False
         mean, upper, _lower, _std = bands
         current_spread = spread_info.spread_pct
         if current_spread >= upper:
-            reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}（中轴{mean:.3%}）"
+            use_taker = current_spread >= (upper + self.config.open_taker_gap_bps)
+            if use_taker:
+                reason = (
+                    f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}+gap{self.config.open_taker_gap_bps:.3%} "
+                    f"（中轴{mean:.3%}）"
+                )
+            else:
+                reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}（中轴{mean:.3%}）"
             self._notify_open_trigger(spread_info, mean, upper, reason)
-            return True, reason
+            return True, reason, use_taker
         reason = f"价差{current_spread:.3%}未达上轨{upper:.3%}（中轴{mean:.3%}）"
-        return False, reason
+        return False, reason, False
 
     async def _try_switch_on_insufficient(self, spread_info, balance_reason: str) -> bool:
         """
@@ -3433,7 +3474,9 @@ class SpreadArbBot:
                 "midline": mean,
             }
         )
-        if profit_spread >= self.config.market_close_spread_b:
+        market_multiplier = Decimal("2") if self.close_strategy.portfolio.has_open_taker() else Decimal("1")
+        market_threshold = self.config.market_close_spread_b * market_multiplier
+        if profit_spread >= market_threshold:
             decision["should_close"] = True
             decision["use_market"] = True
             if self.config.notify_close_trigger:
@@ -3526,15 +3569,20 @@ class SpreadArbBot:
         if not self.config.notify_close_trigger:
             return
         mode = "市价" if decision.get("use_market") else "挂单"
+        open_taker = self.close_strategy.portfolio.has_open_taker()
+        open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
+        market_multiplier = Decimal("2") if open_taker else Decimal("1")
+        market_threshold = self.config.market_close_spread_b * market_multiplier
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
             f"模式: {mode}",
+            f"开仓方式: {open_mode_label}",
             f"实时价差: {decision.get('open_spread', Decimal('0')):.3%}",
             f"中轴: {midline:.3%}",
             f"平仓价差: {decision.get('close_spread', Decimal('0')):.3%}",
             f"利润率: {decision.get('profit_spread', Decimal('0')):.3%}",
-            f"阈值B: {self.config.market_close_spread_b:.3%}",
+            f"市价阈值B: {market_threshold:.3%} ({'B*2' if open_taker else 'B'})",
         ]
         self._notify("📉 平仓触发信号", lines)
 
@@ -3572,7 +3620,7 @@ class SpreadArbBot:
 
         await self.state_manager.save_state()
 
-    async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", **_) -> bool:
+    async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", use_taker: bool = False, **_) -> bool:
         """IDLE状态：处理价差触发的开仓转换"""
         if not should_open:
             return False
@@ -3623,11 +3671,15 @@ class SpreadArbBot:
             reason_text = f"价差{spread_info.spread_pct:.3%} >= 上轨{upper:.3%}(中轴{midline:.3%})"
         else:
             reason_text = f"价差{spread_info.spread_pct:.3%} 触发开仓"
-        self.state_manager.set_state(BotState.OPENING, reason_text)
+        open_label = "有市价开仓" if use_taker else "全挂单开仓"
+        self.state_manager.set_state(
+            BotState.OPENING_TAKER if use_taker else BotState.OPENING,
+            reason_text + f" | {open_label}",
+        )
         await self.state_manager.save_state()
         return True
 
-    async def _handle_holding_open_transition(self, spread_info, should_open: bool = False, reason: str = "", **_) -> bool:
+    async def _handle_holding_open_transition(self, spread_info, should_open: bool = False, reason: str = "", use_taker: bool = False, **_) -> bool:
         """HOLDING状态：处理价差触发的继续开仓转换"""
         if not should_open:
             return False
@@ -3699,13 +3751,21 @@ class SpreadArbBot:
         if has_existing_position:
             # 已有持仓，这是继续开仓（加仓）
             # 切换到 OPENING 状态（输出状态转换日志）
-            self.state_manager.set_state(BotState.OPENING, f"继续开仓（加仓）: {reason}")
+            open_label = "有市价开仓" if use_taker else "全挂单开仓"
+            self.state_manager.set_state(
+                BotState.OPENING_TAKER if use_taker else BotState.OPENING,
+                f"继续开仓（加仓）: {reason} | {open_label}",
+            )
             self._last_open_time = current_time  # 记录开仓时间
             await self.state_manager.save_state()
             # 加仓逻辑会在 OPENING 状态中处理
         else:
             # 首次开仓，正常走 OPENING 流程
-            self.state_manager.set_state(BotState.OPENING, f"首次开仓: {reason}")
+            open_label = "有市价开仓" if use_taker else "全挂单开仓"
+            self.state_manager.set_state(
+                BotState.OPENING_TAKER if use_taker else BotState.OPENING,
+                f"首次开仓: {reason} | {open_label}",
+            )
             self._last_open_time = current_time  # 记录开仓时间
             await self.state_manager.save_state()
 
@@ -3731,7 +3791,7 @@ class SpreadArbBot:
                 BotState.HOLDING,
                 "close_market",
                 f"开仓{decision['total_spread']:.3%} | "
-                f"利润{decision['profit_spread']:.3%} >= 市价阈值{self.config.market_close_spread_b:.3%} | "
+                f"利润{decision['profit_spread']:.3%} >= 市价阈值{self.config.market_close_spread_b * Decimal('2'):.3%} | "
                 f"平仓价差{decision['close_spread']:.3%}",
             )
         else:
@@ -3790,14 +3850,14 @@ class SpreadArbBot:
             f"{close_mode} | 持仓价差={decision['total_spread']:.3%} | "
             f"利润={decision['profit_spread']:.3%} | "
             f"{'市价阈值' if decision['use_market'] else '中轴'}="
-            f"{(self.config.market_close_spread_b if decision['use_market'] else decision['midline']):.3%}",
+            f"{(self.config.market_close_spread_b * Decimal('2') if decision['use_market'] else decision['midline']):.3%}",
         )
 
         if decision["use_market"]:
             # 市价平仓：切换到 CLOSING_TAKER 状态
             self.state_manager.set_state(
                 BotState.CLOSING_TAKER,
-                f"市价平仓 | 利润{decision['profit_spread']:.3%} >= 阈值{self.config.market_close_spread_b:.3%}"
+                f"市价平仓 | 利润{decision['profit_spread']:.3%} >= 阈值{self.config.market_close_spread_b * Decimal('2'):.3%}"
             )
             await self.state_manager.save_state()
         else:
@@ -3898,7 +3958,7 @@ class SpreadArbBot:
                         BotState.OPENING_MAKER_WAIT,
                         "close_preempt",
                         f"{close_mode}平仓 | 利润{decision['profit_spread']:.3%} | "
-                        f"阈值={self.config.market_close_spread_b if decision['use_market'] else decision['midline']:.3%}",
+                        f"阈值={(self.config.market_close_spread_b * Decimal('2') if decision['use_market'] else decision['midline']):.3%}",
                         also_print=True,
                     )
 
@@ -3971,7 +4031,7 @@ class SpreadArbBot:
                 "warning",
                 BotState.CLOSING_MAKER_WAIT,
                 "close_cancel",
-                f"未回归中轴{decision['midline']:.3%} 且利润{decision['profit_spread']:.3%} < 市价阈值{self.config.market_close_spread_b:.3%}",
+                f"未回归中轴{decision['midline']:.3%} 且利润{decision['profit_spread']:.3%} < 市价阈值{self.config.market_close_spread_b * Decimal('2'):.3%}",
             )
 
             # 先检查是否已成交/部分成交
@@ -4592,6 +4652,13 @@ def parse_arguments() -> BotConfig:
         help="腾笼换鸟最小持仓时间（分钟）"
     )
     parser.add_argument(
+        "--open-taker-gap-bps",
+        type=Decimal,
+        default=env_default("OPEN_TAKER_GAP_BPS", Decimal, None),
+        dest="open_taker_gap_bps",
+        help="开仓市价触发阈值（上轨+gap，默认: 0.0002 = 0.02%%）"
+    )
+    parser.add_argument(
         "--notify-open-trigger",
         action="store_true",
         dest="notify_open_trigger",
@@ -4654,6 +4721,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['switch_cost_bps'] = args.switch_cost_bps
     if args.switch_min_hold_minutes is not None:
         config_kwargs['switch_min_hold_minutes'] = args.switch_min_hold_minutes
+    if args.open_taker_gap_bps is not None:
+        config_kwargs['open_taker_gap_bps'] = args.open_taker_gap_bps
     if args.notify_open_trigger or env_bool("NOTIFY_OPEN_TRIGGER", False):
         config_kwargs['notify_open_trigger'] = True
     if args.notify_close_trigger or env_bool("NOTIFY_CLOSE_TRIGGER", True):

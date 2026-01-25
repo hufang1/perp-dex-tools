@@ -20,6 +20,7 @@ class BotState(Enum):
     """机器人状态枚举"""
     IDLE = "IDLE"           # 空闲，等待机会
     OPENING = "OPENING"     # 开仓中
+    OPENING_TAKER = "OPENING_TAKER"  # 市价开仓中（立即执行）
     OPENING_MAKER_WAIT = "OPENING_MAKER_WAIT"  # 开仓挂单等待成交（Maker模式）
     OPENING_WAIT = "OPENING_WAIT"  # 开仓后等待确认仓位
     HOLDING = "HOLDING"     # 持仓中
@@ -514,6 +515,12 @@ class BotConfig:
     notify_close_trigger: bool = True
     """是否推送平仓触发（信号）"""
 
+    open_taker_gap_bps: Decimal = field(default_factory=lambda: Decimal("0.0002"))
+    """
+    开仓市价触发阈值：上轨 + gap
+    - 默认0.02% = 0.0002
+    """
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性
@@ -598,6 +605,8 @@ class BotConfig:
         if self.switch_cost_bps < 0:
             return False
         if self.switch_min_hold_minutes < 0:
+            return False
+        if self.open_taker_gap_bps < 0:
             return False
 
         return True
@@ -707,6 +716,7 @@ class OpenPosition:
 
     # 状态
     is_active: bool = True              # 是否仍持有（未平仓）
+    open_is_taker: bool = False         # 是否市价开仓
 
     def format_log(self) -> str:
         """格式化为单行日志"""
@@ -766,6 +776,10 @@ class Portfolio:
     def get_active_positions(self) -> list[OpenPosition]:
         """获取所有活跃仓位"""
         return [p for p in self.positions if p.is_active]
+
+    def has_open_taker(self) -> bool:
+        """是否存在市价开仓的持仓"""
+        return any(p.is_active and getattr(p, "open_is_taker", False) for p in self.positions)
 
     def get_total_entry_spread(self) -> Decimal:
         """获取加权平均开仓价差"""
