@@ -2459,7 +2459,8 @@ class SpreadArbBot:
 
                 # 只有在 OPENING_MAKER_WAIT 或 CLOSING_MAKER_WAIT 状态才处理
                 if current_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
-                    logger.info(f"当前状态={current_state.value}，跳过WebSocket成交回调")
+                    # 可能是价差切换/撤单后仍成交，尝试补对冲
+                    await self._recover_maker_fill_out_of_band(order)
                     return
 
                 # 确保是当前订单
@@ -2496,6 +2497,61 @@ class SpreadArbBot:
 
         except Exception as e:
             logger.error(f"处理订单成交异常: {e}", exc_info=True)
+
+    async def _recover_maker_fill_out_of_band(self, order: MakerOrder) -> None:
+        """成交晚到：不在Maker等待状态时，尝试检测单边并补对冲"""
+        try:
+            if self._last_maker_order_id and str(order.order_id) != self._last_maker_order_id:
+                logger.info(
+                    f"成交订单非最近Maker订单，忽略 | order_id={order.order_id} last={self._last_maker_order_id}"
+                )
+                return
+
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+
+            imbalance = ext_position + lig_position  # lig为负时应接近0
+            if abs(imbalance) < tolerance:
+                logger.info("成交晚到但仓位已平衡，跳过补对冲")
+                return
+
+            hedge_qty = abs(imbalance)
+            if hedge_qty <= 0:
+                return
+
+            # 创建MakerWaitState以携带is_opening给对冲逻辑
+            from models import MakerWaitState
+            if not hasattr(self, '_maker_wait_state'):
+                self._maker_wait_state = MakerWaitState()
+            self._maker_wait_state.current_order = MakerOrder(
+                order_id=order.order_id,
+                price=order.avg_fill_price,
+                quantity=hedge_qty,
+                side=order.side,
+                is_opening=order.is_opening,
+            )
+
+            if not hasattr(self, '_hedging_state'):
+                from models import HedgingState
+                self._hedging_state = HedgingState()
+            self._hedging_state.ext_filled_quantity = hedge_qty
+            self._hedging_state.ext_filled_price = order.avg_fill_price
+            self._hedging_state.start_time = datetime.now()
+
+            if order.is_opening:
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "成交晚到，补Lighter开仓对冲")
+            else:
+                self._hedging_state.is_closing = True
+                self.state_manager.set_state(BotState.LIGHTER_HEDGING, "成交晚到，补Lighter平仓对冲")
+            await self.state_manager.save_state()
+
+            logger.warning(
+                f"成交晚到触发补对冲 | order_id={order.order_id} | "
+                f"ext={ext_position} lig={lig_position} hedge={hedge_qty}"
+            )
+        except Exception as e:
+            logger.error(f"成交晚到补对冲失败: {e}", exc_info=True)
 
     async def _handle_maker_order_partially_filled(self, order: MakerOrder) -> None:
         """
