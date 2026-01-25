@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "../../lib/db";
+import { prisma } from "@/app/lib/db";
 
 function rangeToDate(range: string): Date {
   const now = Date.now();

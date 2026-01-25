@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import Chart from "./Chart";
-import type { MetricsResponse, SpreadPoint, PositionPoint } from "../lib/types";
+import type { MetricsResponse, SpreadPoint, PositionPoint } from "@/app/lib/types";
 
 const ranges = [
   { key: "60m", label: "60分钟" },
