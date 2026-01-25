@@ -9,11 +9,17 @@ export async function GET(request: Request) {
 
   let lastSpreadId = 0;
   let lastPositionId = 0;
+  let closed = false;
 
   const stream = new ReadableStream({
     async start(controller) {
       const push = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          closed = true;
+        }
       };
 
       const tick = async () => {
@@ -64,12 +70,13 @@ export async function GET(request: Request) {
       // initial ping
       push({});
 
-      controller.signal?.addEventListener("abort", () => {
+      request.signal.addEventListener("abort", () => {
+        closed = true;
         clearInterval(timer);
       });
     },
     cancel() {
-      // no-op
+      closed = true;
     },
   });
 
