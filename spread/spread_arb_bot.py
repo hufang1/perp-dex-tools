@@ -4288,6 +4288,64 @@ class SpreadArbBot:
         - 如果强制平仓失败，进入PAUSED状态
         """
         try:
+            # 先检查实际仓位，若已平衡则直接恢复
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                    logger.warning("对冲失败但实际无仓位，清理本地持仓并回到IDLE")
+                    self.close_strategy.close_all()
+                    self._maker_close_fail_count = 0
+                    self.state_manager.update_position(None)
+                    self.state_manager.set_state(BotState.IDLE, "对冲失败但实际无仓位")
+                    await self.state_manager.save_state()
+                    return
+            except Exception as e:
+                logger.warning(f"对冲失败后仓位检查异常: {e}")
+
+            # 如果是平仓对冲失败且Ext已平，则尝试补Lighter减仓
+            if not is_opening:
+                try:
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    tolerance = Decimal("0.001")
+                    if abs(ext_position) < tolerance and abs(lig_position) >= tolerance:
+                        side = "buy" if lig_position < 0 else "sell"
+                        qty = abs(lig_position)
+                        logger.warning(
+                            f"平仓对冲失败，检测到Lighter残仓 {lig_position}，尝试补单减仓"
+                        )
+                        success = False
+                        for attempt in range(1, 4):
+                            try:
+                                await self.trade_executor._place_lighter_order_taker(
+                                    side=side,
+                                    quantity=qty,
+                                    price=None,
+                                    reduce_only=True,
+                                )
+                                logger.info(f"Lighter补单减仓成功 | attempt={attempt} qty={qty}")
+                                success = True
+                                break
+                            except Exception as e:
+                                logger.warning(f"Lighter补单减仓失败 | attempt={attempt} err={e}")
+                                await asyncio.sleep(0.5)
+                        if not success:
+                            logger.error("Lighter补单减仓重试失败，进入风控暂停")
+                            self.state_manager.set_state(
+                                BotState.PAUSED,
+                                f"Lighter补单减仓失败: qty={qty}"
+                            )
+                            await self.state_manager.save_state()
+                            return
+                        self.state_manager.set_state(BotState.CLOSING_WAIT, "补Lighter减仓后验证平仓")
+                        self._closing_wait_start_time = time.time()
+                        await self.state_manager.save_state()
+                        return
+                except Exception as e:
+                    logger.warning(f"补Lighter减仓失败: {e}")
+
             logger.warning(
                 f"🔄 开始强制平仓Extended仓位 | "
                 f"is_opening={is_opening} | "

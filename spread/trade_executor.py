@@ -1026,7 +1026,7 @@ class TradeExecutor:
                 execution_time=time.time() - start_time
             )
 
-    async def _wait_for_lighter_order(self, lighter_order_id: str, timeout: float = 3.0) -> bool:
+    async def _wait_for_lighter_order(self, lighter_order_id: str, timeout: float = 6.0) -> bool:
         """
         等待Lighter订单成交（专用于Maker模式对冲）
 
@@ -1043,35 +1043,30 @@ class TradeExecutor:
         import time
         start_time = time.time()
 
-        # IOC订单立即执行，等待一小段时间后查询持仓
-        await asyncio.sleep(0.5)  # 等待500ms让订单执行
+        end_time = start_time + timeout
+        await asyncio.sleep(0.5)
 
-        # 通过查询持仓来验证对冲是否成功
-        try:
-            lighter_position = await self.lighter_client.get_account_positions()
+        while time.time() < end_time:
+            try:
+                lighter_position = await self.lighter_client.get_account_positions()
+                if lighter_position > 0:
+                    logger.info(
+                        f"✅ Lighter对冲验证成功 | "
+                        f"order_id={lighter_order_id} | "
+                        f"持仓={lighter_position}"
+                    )
+                    return True
+            except Exception as e:
+                logger.error(f"查询Lighter持仓失败: {e}")
+                logger.warning("⚠️ 无法验证Lighter对冲，稍后重试")
+            await asyncio.sleep(0.5)
 
-            # 如果有持仓说明对冲成功
-            if lighter_position > 0:
-                logger.info(
-                    f"✅ Lighter对冲验证成功 | "
-                    f"order_id={lighter_order_id} | "
-                    f"持仓={lighter_position}"
-                )
-                return True
-            else:
-                logger.warning(
-                    f"⚠️ Lighter对冲后无持仓 | "
-                    f"order_id={lighter_order_id} | "
-                    f"可能订单未成交或已取消"
-                )
-                return False
-
-        except Exception as e:
-            logger.error(f"查询Lighter持仓失败: {e}")
-            # 如果查询失败，但place_limit_order成功了，我们假设订单成功
-            # 因为IOC订单要么成交要么取消，place_limit_order成功说明订单已发送
-            logger.warning(f"⚠️ 无法验证Lighter对冲，假设成功（因为订单发送成功）")
-            return True
+        logger.warning(
+            f"⚠️ Lighter对冲超时 | "
+            f"order_id={lighter_order_id} | "
+            f"timeout={timeout}s"
+        )
+        return False
 
     # ========== 新增方法 (003-spreading-improvements): 取消订单验证 ==========
 
