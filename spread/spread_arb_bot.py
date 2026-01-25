@@ -4014,15 +4014,15 @@ class SpreadArbBot:
                     ):
                         return True
 
-        if decision["use_market"]:
-            # 市价平仓：立即执行
-            await self._execute_market_close(total_quantity)
-            self._log_spread_rule(
-                "info",
-                BotState.OPENING_MAKER_WAIT,
-                "close_preempt_market",
-                f"开仓挂单已取消，执行市价平仓 | 数量={total_quantity}",
-            )
+                    if decision["use_market"]:
+                        # 市价平仓：立即执行
+                        await self._execute_market_close(total_quantity)
+                        self._log_spread_rule(
+                            "info",
+                            BotState.OPENING_MAKER_WAIT,
+                            "close_preempt_market",
+                            f"开仓挂单已取消，执行市价平仓 | 数量={total_quantity}",
+                        )
                     else:
                         # 限价平仓：进入 CLOSING 状态
                         reason = (
