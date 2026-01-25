@@ -749,6 +749,22 @@ class SpreadArbBot:
                 self.state_manager.set_state(BotState.IDLE, "持仓信息丢失")
                 await self.state_manager.save_state()
                 return
+        else:
+            # 本地有持仓，但交易所可能已平仓：同步校验
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                    logger.warning("检测到实际无仓位，清理本地持仓并回到IDLE")
+                    self.close_strategy.close_all()
+                    self._maker_close_fail_count = 0
+                    self.state_manager.update_position(None)
+                    self.state_manager.set_state(BotState.IDLE, "实际无仓位，清理本地持仓")
+                    await self.state_manager.save_state()
+                    return
+            except Exception as e:
+                logger.warning(f"同步仓位检查失败: {e}")
 
         # 使用SpreadMonitor获取当前价差 (016-spread-optimize)
         spread_info = self.spread_monitor.get_current_spread()
@@ -4520,6 +4536,18 @@ class SpreadArbBot:
         logger.info(f"执行市价平仓: 数量={total_quantity}")
 
         try:
+            # 如果交易所已无仓位，直接回到IDLE
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                logger.warning("市价平仓前检测到无仓位，跳过下单并回到IDLE")
+                self.close_strategy.close_all()
+                self._maker_close_fail_count = 0
+                self.state_manager.update_position(None)
+                self.state_manager.set_state(BotState.IDLE, "无仓位，跳过市价平仓")
+                await self.state_manager.save_state()
+                return
             # 创建临时Position对象（execute_close_position需要）
             temp_position = Position(
                 state=PositionState.LONG,
@@ -4575,6 +4603,18 @@ class SpreadArbBot:
         logger.info(f"执行限价平仓: 数量={total_quantity}")
 
         try:
+            # 如果交易所已无仓位，直接回到IDLE
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                logger.warning("限价平仓前检测到无仓位，跳过下单并回到IDLE")
+                self.close_strategy.close_all()
+                self._maker_close_fail_count = 0
+                self.state_manager.update_position(None)
+                self.state_manager.set_state(BotState.IDLE, "无仓位，跳过限价平仓")
+                await self.state_manager.save_state()
+                return
             # 使用Maker模式平仓（017-ext-maker-mode已经支持）
             result = await self.trade_executor.place_maker_close_order(total_quantity)
 
