@@ -539,6 +539,9 @@ class BotConfig:
     dashboard_sample_interval: float = 1.0
     """Dashboard采样频率（秒）"""
 
+    dashboard_position_interval: float = 60.0
+    """Dashboard仓位/余额采样间隔（秒）"""
+
     maker_close_fail_threshold: int = 3
     """Maker平仓失败阈值，超过后自动改用市价平仓"""
 
@@ -630,6 +633,8 @@ class BotConfig:
         if self.open_taker_gap_bps < 0:
             return False
         if self.dashboard_sample_interval <= 0:
+            return False
+        if self.dashboard_position_interval <= 0:
             return False
         if self.maker_close_fail_threshold < 1:
             return False
@@ -1137,6 +1142,7 @@ class ExchangePositionBalance:
         exchange: 交易所名称 ("lighter" 或 "extended")
         current_position: 当前持仓数量（绝对值）
         available_balance: 可用余额（保证金）
+        total_balance: 总余额（保证金）
         max_position: 最大可开仓数量（基于可用余额和杠杆）
         leverage: 杠杆倍数
         margin_used: 已使用保证金
@@ -1145,6 +1151,7 @@ class ExchangePositionBalance:
     exchange: str
     current_position: Decimal = field(default_factory=lambda: Decimal('0'))
     available_balance: Decimal = field(default_factory=lambda: Decimal('0'))
+    total_balance: Decimal = field(default_factory=lambda: Decimal('0'))
     max_position: Decimal = field(default_factory=lambda: Decimal('0'))
     leverage: Decimal = field(default_factory=lambda: Decimal('1'))
     margin_used: Decimal = field(default_factory=lambda: Decimal('0'))

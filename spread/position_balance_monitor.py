@@ -215,6 +215,7 @@ class PositionBalanceMonitor:
                 exchange="lighter",
                 current_position=current_position,
                 available_balance=available_balance,
+                total_balance=total_balance,
                 max_position=max_position,
                 leverage=self._lighter_leverage,
                 margin_used=margin_used,
@@ -237,6 +238,7 @@ class PositionBalanceMonitor:
             current_position = await self.extended_client.get_account_positions()
 
             available_balance = Decimal('0')
+            total_balance = Decimal('0')
             balance_found = False
 
             # 使用SDK的get_balance方法
@@ -253,9 +255,15 @@ class PositionBalanceMonitor:
                     elif hasattr(balance_model, 'balance'):
                         available_balance = balance_model.balance
                         balance_found = True
+                    if hasattr(balance_model, 'balance'):
+                        total_balance = balance_model.balance
+                    elif hasattr(balance_model, 'available_for_trade'):
+                        total_balance = balance_model.available_for_trade
 
             if not balance_found:
                 logger.warning("无法获取Extended余额信息")
+            if total_balance == 0 and available_balance > 0:
+                total_balance = available_balance
 
             # 最大可开仓数量 = 可用余额 * 杠杆
             max_position = available_balance * self._extended_leverage
@@ -264,6 +272,7 @@ class PositionBalanceMonitor:
                 exchange="extended",
                 current_position=current_position,
                 available_balance=available_balance,
+                total_balance=total_balance,
                 max_position=max_position,
                 leverage=self._extended_leverage,
                 margin_used=Decimal('0'),

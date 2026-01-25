@@ -44,6 +44,8 @@ export async function GET(req: NextRequest) {
       lig: Number(p.ligQty),
       extAvail: Number(p.extAvailUsd),
       ligAvail: Number(p.ligAvailUsd),
+      extTotal: Number(p.extTotalUsd),
+      ligTotal: Number(p.ligTotalUsd),
     })),
   };
 

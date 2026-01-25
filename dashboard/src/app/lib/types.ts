@@ -13,6 +13,8 @@ export type PositionPoint = {
   lig: number;
   extAvail: number;
   ligAvail: number;
+  extTotal?: number;
+  ligTotal?: number;
 };
 
 export type MetricsResponse = {

@@ -55,6 +55,8 @@ export async function GET(request: Request) {
               lig: Number(position.ligQty),
               extAvail: Number(position.extAvailUsd),
               ligAvail: Number(position.ligAvailUsd),
+              extTotal: Number(position.extTotalUsd),
+              ligTotal: Number(position.ligTotalUsd),
             };
           }
           if (payload.spread || payload.position) {

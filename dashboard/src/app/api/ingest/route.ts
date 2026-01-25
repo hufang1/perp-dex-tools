@@ -40,6 +40,8 @@ export async function POST(req: NextRequest) {
           ligQty: p.ligQty,
           extAvailUsd: p.extAvailUsd,
           ligAvailUsd: p.ligAvailUsd,
+          extTotalUsd: p.extTotalUsd ?? 0,
+          ligTotalUsd: p.ligTotalUsd ?? 0,
         },
       })
     );

@@ -59,6 +59,9 @@ export default function Dashboard() {
 
   const latestSpread = data?.latest?.spread ?? spreadSeries[spreadSeries.length - 1];
   const latestPosition = data?.latest?.position ?? positionSeries[positionSeries.length - 1];
+  const extTotal = latestPosition?.extTotal ?? 0;
+  const ligTotal = latestPosition?.ligTotal ?? 0;
+  const totalSum = extTotal + ligTotal;
 
   const spreadOption = useMemo(() => {
     const labels = spreadSeries.map((p) => p.t);
@@ -156,6 +159,49 @@ export default function Dashboard() {
     };
   }, [positionSeries]);
 
+  const totalBalanceOption = useMemo(() => {
+    const labels = positionSeries.map((p) => p.t);
+    return {
+      tooltip: { trigger: "axis" },
+      legend: { textStyle: { color: "#c7d6ce" } },
+      grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: { color: "#90a39a" },
+        boundaryGap: false,
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#90a39a" },
+        splitLine: { lineStyle: { color: "#1e2722" } },
+      },
+      series: [
+        {
+          name: "Ext总金额",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => p.extTotal ?? 0),
+          lineStyle: { color: "#6fe3a1" },
+        },
+        {
+          name: "Lig总金额",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => p.ligTotal ?? 0),
+          lineStyle: { color: "#5bb2ff" },
+        },
+        {
+          name: "合计",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0)),
+          lineStyle: { color: "#ffb86b" },
+        },
+      ],
+    };
+  }, [positionSeries]);
+
   return (
     <main>
       <div className="grid grid-2">
@@ -211,15 +257,32 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-3" style={{ marginTop: 16 }}>
-        <div className="panel kpi">
-          <div className="label">Ext仓位</div>
-          <div className="value">{latestPosition?.ext ?? "-"}</div>
+      <div className="grid grid-2" style={{ marginTop: 16 }}>
+        <div className="panel">
+          <h3>两边总金额</h3>
+          <div className="grid grid-3">
+            <div className="kpi">
+              <div className="label">Extended 总金额</div>
+              <div className="value">{extTotal.toFixed(2)}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">Lighter 总金额</div>
+              <div className="value">{ligTotal.toFixed(2)}</div>
+            </div>
+            <div className="kpi">
+              <div className="label">合计</div>
+              <div className="value">{totalSum.toFixed(2)}</div>
+            </div>
+          </div>
+          <p className="muted" style={{ marginTop: 8 }}>每1分钟采样一次</p>
         </div>
-        <div className="panel kpi">
-          <div className="label">Lig仓位</div>
-          <div className="value">{latestPosition?.lig ?? "-"}</div>
+        <div className="panel">
+          <h3>总金额趋势（{ranges.find((r) => r.key === range)?.label ?? range}）</h3>
+          <Chart option={totalBalanceOption} />
         </div>
+      </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
         <div className="panel kpi">
           <div className="label">Symbol</div>
           <div className="value">{symbol}</div>

@@ -158,6 +158,7 @@ class SpreadArbBot:
         self._notifier: Optional[FeishuNotifier] = None
         self._dashboard_ingestor: Optional[DashboardIngestor] = None
         self._last_dashboard_sample_time: float = 0.0
+        self._last_dashboard_position_time: float = 0.0
         self._last_close_context: Optional[Dict[str, object]] = None
         self._maker_close_fail_count: int = 0
         self._last_maker_order_id: Optional[str] = None
@@ -3753,14 +3754,19 @@ class SpreadArbBot:
         close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
 
         ext_qty = lig_qty = ext_avail = lig_avail = Decimal("0")
+        ext_total = lig_total = Decimal("0")
+        include_position = now - self._last_dashboard_position_time >= self.config.dashboard_position_interval
         try:
-            snapshot = await self.position_balance_monitor.get_position_balance()
-            if snapshot.extended:
-                ext_qty = snapshot.extended.current_position
-                ext_avail = snapshot.extended.available_balance
-            if snapshot.lighter:
-                lig_qty = snapshot.lighter.current_position
-                lig_avail = snapshot.lighter.available_balance
+            if include_position:
+                snapshot = await self.position_balance_monitor.get_position_balance()
+                if snapshot.extended:
+                    ext_qty = snapshot.extended.current_position
+                    ext_avail = snapshot.extended.available_balance
+                    ext_total = snapshot.extended.total_balance
+                if snapshot.lighter:
+                    lig_qty = snapshot.lighter.current_position
+                    lig_avail = snapshot.lighter.available_balance
+                    lig_total = snapshot.lighter.total_balance
         except Exception as e:
             logger.debug(f"Dashboard仓位快照获取失败: {e}")
 
@@ -3777,13 +3783,17 @@ class SpreadArbBot:
                 "ligBid": float(spread_info.lig_bid),
                 "ligAsk": float(spread_info.lig_ask),
             },
-            "position": {
+        }
+        if include_position:
+            payload["position"] = {
                 "extQty": float(ext_qty),
                 "ligQty": float(lig_qty),
                 "extAvailUsd": float(ext_avail),
                 "ligAvailUsd": float(lig_avail),
-            },
-        }
+                "extTotalUsd": float(ext_total),
+                "ligTotalUsd": float(lig_total),
+            }
+            self._last_dashboard_position_time = now
         self._dashboard_ingestor.enqueue(payload)
 
     async def _enter_idle_or_holding_after_open_failure(self, reason: str) -> None:
@@ -4988,6 +4998,13 @@ def parse_arguments() -> BotConfig:
         help="Dashboard采样间隔（秒）"
     )
     parser.add_argument(
+        "--dashboard-position-interval",
+        type=float,
+        default=env_default("DASHBOARD_POSITION_INTERVAL", float, None),
+        dest="dashboard_position_interval",
+        help="Dashboard仓位/余额采样间隔（秒）"
+    )
+    parser.add_argument(
         "--maker-close-fail-threshold",
         type=int,
         default=env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None),
@@ -5081,6 +5098,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['dashboard_ingest_url'] = args.dashboard_ingest_url
     if args.dashboard_sample_interval is not None:
         config_kwargs['dashboard_sample_interval'] = args.dashboard_sample_interval
+    if args.dashboard_position_interval is not None:
+        config_kwargs['dashboard_position_interval'] = args.dashboard_position_interval
     if args.maker_close_fail_threshold is not None:
         config_kwargs['maker_close_fail_threshold'] = args.maker_close_fail_threshold
     if args.open_taker_on_upper:
@@ -5102,6 +5121,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['dashboard_ingest_url'] = os.getenv("DASHBOARD_INGEST_URL", "")
     if 'dashboard_sample_interval' not in config_kwargs:
         config_kwargs['dashboard_sample_interval'] = env_default("DASHBOARD_SAMPLE_INTERVAL", float, None) or 1.0
+    if 'dashboard_position_interval' not in config_kwargs:
+        config_kwargs['dashboard_position_interval'] = env_default("DASHBOARD_POSITION_INTERVAL", float, None) or 60.0
     if 'maker_close_fail_threshold' not in config_kwargs:
         config_kwargs['maker_close_fail_threshold'] = env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None) or 3
 
