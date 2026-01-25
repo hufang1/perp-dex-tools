@@ -159,6 +159,7 @@ class SpreadArbBot:
         self._dashboard_ingestor: Optional[DashboardIngestor] = None
         self._last_dashboard_sample_time: float = 0.0
         self._last_close_context: Optional[Dict[str, object]] = None
+        self._maker_close_fail_count: int = 0
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -898,9 +899,19 @@ class SpreadArbBot:
             if not result.success or result.extended_order_id is None:
                 logger.error(f"Extended Maker平仓订单失败: {result.error_message}")
                 self._notify_close_failure(f"Maker平仓订单失败: {result.error_message}")
-                self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
-                await self.state_manager.save_state()
+                self._maker_close_fail_count += 1
+                if self._maker_close_fail_count >= self.config.maker_close_fail_threshold:
+                    logger.warning(
+                        f"Maker平仓失败达到阈值{self.config.maker_close_fail_threshold}，改用市价平仓"
+                    )
+                    await self._execute_market_close(total_quantity)
+                else:
+                    self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
+                    await self.state_manager.save_state()
                 return
+
+            # 成功挂单则清零失败计数
+            self._maker_close_fail_count = 0
 
             # 初始化 Maker 等待状态
             from models import MakerWaitState
@@ -1305,6 +1316,7 @@ class SpreadArbBot:
 
                 # 清除所有持仓记录
                 self.close_strategy.close_all()
+                self._maker_close_fail_count = 0
 
                 # ========== 新增 (003-spreading-improvements): 阶梯开仓重置回调 ==========
                 # 调用所有仓位平仓回调，重置开仓次数
@@ -3164,7 +3176,8 @@ class SpreadArbBot:
                 quantity=ext_filled_qty,
                 side=hedge_side,
                 ext_filled_price=ext_filled_price,
-                price_override=lig_vwap
+                price_override=lig_vwap,
+                reduce_only=not is_opening,
             )
 
             if result.success and result.lighter_filled:
@@ -4567,9 +4580,19 @@ class SpreadArbBot:
 
             if not result.success or result.extended_order_id is None:
                 logger.error(f"Extended Maker平仓订单失败: {result.error_message}")
-                self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
-                await self.state_manager.save_state()
+                self._maker_close_fail_count += 1
+                if self._maker_close_fail_count >= self.config.maker_close_fail_threshold:
+                    logger.warning(
+                        f"Maker平仓失败达到阈值{self.config.maker_close_fail_threshold}，改用市价平仓"
+                    )
+                    await self._execute_market_close(total_quantity)
+                else:
+                    self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
+                    await self.state_manager.save_state()
                 return
+
+            # 成功挂单则清零失败计数
+            self._maker_close_fail_count = 0
 
             # 初始化Maker等待状态
             from models import MakerWaitState
@@ -4800,6 +4823,13 @@ def parse_arguments() -> BotConfig:
         help="Dashboard采样间隔（秒）"
     )
     parser.add_argument(
+        "--maker-close-fail-threshold",
+        type=int,
+        default=env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None),
+        dest="maker_close_fail_threshold",
+        help="Maker平仓失败阈值，超过后自动改用市价平仓"
+    )
+    parser.add_argument(
         "--open-taker-on-upper",
         action="store_true",
         dest="open_taker_on_upper",
@@ -4886,6 +4916,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['dashboard_ingest_url'] = args.dashboard_ingest_url
     if args.dashboard_sample_interval is not None:
         config_kwargs['dashboard_sample_interval'] = args.dashboard_sample_interval
+    if args.maker_close_fail_threshold is not None:
+        config_kwargs['maker_close_fail_threshold'] = args.maker_close_fail_threshold
     if args.open_taker_on_upper:
         config_kwargs['open_taker_on_upper'] = True
     if args.no_open_taker_on_upper:
@@ -4905,6 +4937,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['dashboard_ingest_url'] = os.getenv("DASHBOARD_INGEST_URL", "")
     if 'dashboard_sample_interval' not in config_kwargs:
         config_kwargs['dashboard_sample_interval'] = env_default("DASHBOARD_SAMPLE_INTERVAL", float, None) or 1.0
+    if 'maker_close_fail_threshold' not in config_kwargs:
+        config_kwargs['maker_close_fail_threshold'] = env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None) or 3
 
     return BotConfig(**config_kwargs)
 

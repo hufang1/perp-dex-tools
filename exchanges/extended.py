@@ -298,7 +298,7 @@ class ExtendedClient(BaseExchangeClient):
 
         return OrderResult(success=False, error_message='Max retries exceeded')
     
-    async def place_taker_order(self, contract_id: str, quantity: Decimal, side: str, price: Decimal, max_retries: int = 1) -> OrderResult:
+    async def place_taker_order(self, contract_id: str, quantity: Decimal, side: str, price: Decimal, max_retries: int = 1, reduce_only: bool = False) -> OrderResult:
         """
         Place a taker order (market order) that executes immediately.
 
@@ -328,8 +328,7 @@ class ExtendedClient(BaseExchangeClient):
                 rounded_price = self.round_to_tick(original_price)
                 quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
 
-                # Place the order WITHOUT post_only to allow taker execution
-                order_result = await self.perpetual_trading_client.place_order(
+                order_kwargs = dict(
                     market_name=contract_id,
                     amount_of_synthetic=quantity,
                     price=rounded_price,  # Use original price, don't refetch BBO
@@ -338,6 +337,7 @@ class ExtendedClient(BaseExchangeClient):
                     post_only=False,  # Allow taker execution
                     expire_time=utc_now() + timedelta(minutes=1),
                 )
+                order_result = await self._place_order_with_reduce_only(order_kwargs, reduce_only)
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
                     if retry_count < max_retries - 1:
@@ -398,7 +398,7 @@ class ExtendedClient(BaseExchangeClient):
 
         return OrderResult(success=False, error_message='Max retries exceeded')
 
-    async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
+    async def place_close_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str, reduce_only: bool = True) -> OrderResult:
         """Place a close order with Extended using official SDK with retry logic for POST_ONLY rejections."""
         max_retries = 15
         retry_count = 0
@@ -447,16 +447,16 @@ class ExtendedClient(BaseExchangeClient):
                 rounded_price = self.round_to_tick(adjusted_price)
                 quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
 
-                # Place the order using official SDK (post-only to avoid taker fees)
-                order_result = await self.perpetual_trading_client.place_order(
+                order_kwargs = dict(
                     market_name=contract_id,
                     amount_of_synthetic=quantity,
                     price=rounded_price,
                     side=order_side,
                     time_in_force=TimeInForce.GTT,
                     post_only=True,  # Ensure MAKER orders
-                    expire_time = utc_now() + timedelta(days=90), # SDK 1 hour default
+                    expire_time=utc_now() + timedelta(days=90), # SDK 1 hour default
                 )
+                order_result = await self._place_order_with_reduce_only(order_kwargs, reduce_only)
 
                 if not order_result or not order_result.data or order_result.status != 'OK':
                     # reset to previous values
@@ -971,7 +971,7 @@ class ExtendedClient(BaseExchangeClient):
 
     # ========== 新增方法 (017-ext-maker-mode) ==========
 
-    async def place_maker_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+    async def place_maker_order(self, contract_id: str, quantity: Decimal, direction: str, reduce_only: bool = False) -> OrderResult:
         """
         Place a Maker order (post-only limit order) on Extended.
 
@@ -1021,8 +1021,7 @@ class ExtendedClient(BaseExchangeClient):
             # Round price to tick size
             rounded_price = self.round_to_tick(order_price)
 
-            # Place the order using official SDK with post_only=True
-            order_result = await self.perpetual_trading_client.place_order(
+            order_kwargs = dict(
                 market_name=contract_id,
                 amount_of_synthetic=quantity,
                 price=rounded_price,
@@ -1031,6 +1030,7 @@ class ExtendedClient(BaseExchangeClient):
                 post_only=True,  # Ensure MAKER orders (0% fee)
                 expire_time=utc_now() + timedelta(days=1),
             )
+            order_result = await self._place_order_with_reduce_only(order_kwargs, reduce_only)
 
             if not order_result or not order_result.data or order_result.status != 'OK':
                 return OrderResult(success=False, error_message='Failed to place order')
@@ -1053,6 +1053,28 @@ class ExtendedClient(BaseExchangeClient):
         except Exception as e:
             self.logger.log(f"Error placing maker order: {str(e)}", level="ERROR")
             return OrderResult(success=False, error_message=str(e))
+
+    async def _place_order_with_reduce_only(self, order_kwargs: dict, reduce_only: bool) -> OrderResult:
+        """尝试携带 reduce_only/close_position 下单；若SDK不支持则回退"""
+        if not reduce_only:
+            return await self.perpetual_trading_client.place_order(**order_kwargs)
+        try:
+            return await self.perpetual_trading_client.place_order(
+                **order_kwargs,
+                reduce_only=True,
+            )
+        except TypeError:
+            try:
+                return await self.perpetual_trading_client.place_order(
+                    **order_kwargs,
+                    close_position=True,
+                )
+            except TypeError:
+                self.logger.log(
+                    "place_order不支持reduce_only/close_position，降级为普通下单",
+                    level="WARNING",
+                )
+                return await self.perpetual_trading_client.place_order(**order_kwargs)
 
     def get_order_update_handler(self):
         """

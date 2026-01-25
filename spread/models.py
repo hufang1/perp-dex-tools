@@ -539,6 +539,9 @@ class BotConfig:
     dashboard_sample_interval: float = 1.0
     """Dashboard采样频率（秒）"""
 
+    maker_close_fail_threshold: int = 3
+    """Maker平仓失败阈值，超过后自动改用市价平仓"""
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性
@@ -627,6 +630,8 @@ class BotConfig:
         if self.open_taker_gap_bps < 0:
             return False
         if self.dashboard_sample_interval <= 0:
+            return False
+        if self.maker_close_fail_threshold < 1:
             return False
 
         return True

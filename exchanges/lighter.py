@@ -270,7 +270,7 @@ class LighterClient(BaseExchangeClient):
             return OrderResult(success=True, order_id=str(order_params['client_order_index']))
 
     async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
-                                side: str, time_in_force: int = None) -> OrderResult:
+                                side: str, time_in_force: int = None, reduce_only: bool = False) -> OrderResult:
         """Place a limit order with Lighter using official SDK.
 
         Args:
@@ -317,7 +317,7 @@ class LighterClient(BaseExchangeClient):
             'is_ask': is_ask,
             'order_type': self.lighter_client.ORDER_TYPE_LIMIT,
             'time_in_force': time_in_force,
-            'reduce_only': False,
+            'reduce_only': reduce_only,
             'trigger_price': 0,
             'order_expiry': order_expiry,
         }

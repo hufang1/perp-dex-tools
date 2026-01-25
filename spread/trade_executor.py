@@ -295,8 +295,8 @@ class TradeExecutor:
         try:
             # Taker模式：使用市价单确保即时成交 (016-spread-optimize)
             results = await asyncio.gather(
-                self._place_extended_order_taker("sell", quantity, None),
-                self._place_lighter_order_taker("buy", quantity, None),
+                self._place_extended_order_taker("sell", quantity, None, reduce_only=True),
+                self._place_lighter_order_taker("buy", quantity, None, reduce_only=True),
                 return_exceptions=True
             )
 
@@ -471,14 +471,14 @@ class TradeExecutor:
             order_id = None
             if exchange == "extended":
                 if side == "sell":
-                    result = await self._place_extended_order_taker("sell", quantity, None)
+                    result = await self._place_extended_order_taker("sell", quantity, None, reduce_only=True)
                 else:
-                    result = await self._place_extended_order_taker("buy", quantity, None)
+                    result = await self._place_extended_order_taker("buy", quantity, None, reduce_only=True)
             else:  # lighter
                 if side == "sell":
-                    result = await self._place_lighter_order_taker("sell", quantity, None)
+                    result = await self._place_lighter_order_taker("sell", quantity, None, reduce_only=True)
                 else:
-                    result = await self._place_lighter_order_taker("buy", quantity, None)
+                    result = await self._place_lighter_order_taker("buy", quantity, None, reduce_only=True)
 
             if isinstance(result, Exception):
                 logger.error(f"强平下单失败: {result}")
@@ -620,7 +620,8 @@ class TradeExecutor:
         self,
         side: str,
         quantity: Decimal,
-        price: Optional[Decimal]
+        price: Optional[Decimal],
+        reduce_only: bool = False
     ) -> Dict[str, Any]:
         """
         下 Extended Taker 订单 (001-fix-spread-price优化：加入0.05%滑点保护)
@@ -658,7 +659,8 @@ class TradeExecutor:
                 contract_id=contract_id,
                 quantity=quantity,
                 side=side,
-                price=price
+                price=price,
+                reduce_only=reduce_only
             )
             logger.info(f"Ext Taker订单: {side} {quantity} @ {price:.2f}")
 
@@ -678,7 +680,8 @@ class TradeExecutor:
         self,
         side: str,
         quantity: Decimal,
-        price: Optional[Decimal]
+        price: Optional[Decimal],
+        reduce_only: bool = False
     ) -> Dict[str, Any]:
         """
         下 Lighter Taker 订单 (016-spread-optimize)
@@ -715,7 +718,8 @@ class TradeExecutor:
                 quantity=quantity,
                 price=price,
                 side=side,
-                time_in_force=0  # 0=IOC (Immediate or Cancel): taker模式
+                time_in_force=0,  # 0=IOC (Immediate or Cancel): taker模式
+                reduce_only=reduce_only,
             )
             logger.info(f"Lig Taker订单: {side} {quantity} @ {price}")
 
@@ -898,7 +902,8 @@ class TradeExecutor:
             order_result = await self.extended_client.place_maker_order(
                 contract_id=self.extended_client.config.contract_id,
                 quantity=quantity,
-                direction='sell'  # 平仓时Extended卖出
+                direction='sell',  # 平仓时Extended卖出
+                reduce_only=True,
             )
 
             if not order_result.success:
@@ -937,7 +942,8 @@ class TradeExecutor:
         quantity: Decimal,
         side: str,  # 'buy' or 'sell'
         ext_filled_price: Decimal,
-        price_override: Optional[Decimal] = None
+        price_override: Optional[Decimal] = None,
+        reduce_only: bool = False
     ) -> ExecutionResult:
         """
         在Lighter执行对冲订单（Taker模式，即时成交）
@@ -969,7 +975,7 @@ class TradeExecutor:
                     lig_price = lig_bid  # 卖出使用bid价格
 
             # 下Lighter Taker订单
-            lighter_result = await self._place_lighter_order_taker(side, quantity, lig_price)
+            lighter_result = await self._place_lighter_order_taker(side, quantity, lig_price, reduce_only=reduce_only)
 
             if isinstance(lighter_result, Exception):
                 return ExecutionResult(
