@@ -1097,7 +1097,9 @@ class SpreadArbBot:
             # 检查是否有API错误记录，如果有则进入风控模式而不是IDLE
             if self._api_error_count > 0:
                 print(f"🛡️ 等待超时且API异常，进入风控暂停模式")
-                self.state_manager.set_state(BotState.PAUSED, f"等待超时且API异常，已强平")
+                reason = "等待超时且API异常，已强平"
+                self.state_manager.set_state(BotState.PAUSED, reason)
+                self._notify_paused(reason)
             else:
                 self.state_manager.set_state(BotState.IDLE, f"等待超时({elapsed:.1f}s)，已强平")
             self._opening_wait_start_time = None
@@ -1260,7 +1262,9 @@ class SpreadArbBot:
                         import time
                         self._paused_start_time = time.time()
                         self._last_api_check_time = time.time()
-                        self.state_manager.set_state(BotState.PAUSED, f"回滚后强平失败，仍有残余仓位")
+                        reason = "回滚后强平失败，仍有残余仓位"
+                        self.state_manager.set_state(BotState.PAUSED, reason)
+                        self._notify_paused(reason)
 
                     self._opening_wait_start_time = None
 
@@ -1282,7 +1286,9 @@ class SpreadArbBot:
             import time
             self._paused_start_time = time.time()
             self._last_api_check_time = time.time()
-            self.state_manager.set_state(BotState.PAUSED, f"仓位检查异常: {error_msg}")
+            reason = f"仓位检查异常: {error_msg}"
+            self.state_manager.set_state(BotState.PAUSED, reason)
+            self._notify_paused(reason)
             await self.state_manager.save_state()
             return
 
@@ -1391,7 +1397,9 @@ class SpreadArbBot:
                     logger.error(f"强平失败 Ext={ext_final} Lig={lig_final}，进入风控模式")
                     self._paused_start_time = time.time()
                     self._last_api_check_time = time.time()
-                    self.state_manager.set_state(BotState.PAUSED, f"强平失败，仍有残余仓位")
+                    reason = "强平失败，仍有残余仓位"
+                    self.state_manager.set_state(BotState.PAUSED, reason)
+                    self._notify_paused(reason)
                     await self.state_manager.save_state()
                     return
 
@@ -1443,7 +1451,9 @@ class SpreadArbBot:
             print(f"🛡️ 仓位检查异常，进入风控暂停模式: {e}")
             self._paused_start_time = time.time()
             self._last_api_check_time = time.time()
-            self.state_manager.set_state(BotState.PAUSED, f"仓位检查异常: {e}")
+            reason = f"仓位检查异常: {e}"
+            self.state_manager.set_state(BotState.PAUSED, reason)
+            self._notify_paused(reason)
             await self.state_manager.save_state()
             return
 
@@ -1522,7 +1532,9 @@ class SpreadArbBot:
                 self._api_error_count = 0  # 重置计数
 
                 print(f"🛡️ API连续异常{self._api_error_threshold}次，进入风控暂停模式")
-                self.state_manager.set_state(BotState.PAUSED, f"API异常: {error_message}")
+                reason = f"API异常: {error_message}"
+                self.state_manager.set_state(BotState.PAUSED, reason)
+                self._notify_paused(reason)
                 # 注意：这里不保存状态，避免重启后还是PAUSED状态
         else:
             # 非API错误，重置计数
@@ -3687,6 +3699,14 @@ class SpreadArbBot:
             lines.append(f"仓位: Ext={ext_pos} Lig={lig_pos}")
         self._notify("❌ 开仓失败", lines)
 
+    def _notify_paused(self, reason: str) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"原因: {reason}",
+        ]
+        self._notify("🛡️ 进入风控暂停", lines)
+
     def _notify_open_trigger(self, spread_info, midline: Decimal, upper: Decimal, reason: str) -> None:
         if not self.config.notify_open_trigger:
             return
@@ -4347,10 +4367,9 @@ class SpreadArbBot:
                                 await asyncio.sleep(0.5)
                         if not success:
                             logger.error("Lighter补单减仓重试失败，进入风控暂停")
-                            self.state_manager.set_state(
-                                BotState.PAUSED,
-                                f"Lighter补单减仓失败: qty={qty}"
-                            )
+                            reason = f"Lighter补单减仓失败: qty={qty}"
+                            self.state_manager.set_state(BotState.PAUSED, reason)
+                            self._notify_paused(reason)
                             await self.state_manager.save_state()
                             return
                         self.state_manager.set_state(BotState.CLOSING_WAIT, "补Lighter减仓后验证平仓")
@@ -4375,15 +4394,16 @@ class SpreadArbBot:
             #   - 进入PAUSED状态
 
             # 暂时实现：进入PAUSED状态
-            self.state_manager.set_state(
-                BotState.PAUSED,
-                f"Lighter对冲失败，需要人工处理: ext_filled_qty={ext_filled_qty}"
-            )
+            reason = f"Lighter对冲失败，需要人工处理: ext_filled_qty={ext_filled_qty}"
+            self.state_manager.set_state(BotState.PAUSED, reason)
+            self._notify_paused(reason)
             await self.state_manager.save_state()
 
         except Exception as e:
             logger.error(f"强制平仓异常: {e}")
-            self.state_manager.set_state(BotState.PAUSED, f"强制平仓异常: {e}")
+            reason = f"强制平仓异常: {e}"
+            self.state_manager.set_state(BotState.PAUSED, reason)
+            self._notify_paused(reason)
             await self.state_manager.save_state()
 
     async def _get_maker_order_fill_info(self, order_id: str) -> tuple[Decimal, str, Decimal]:
