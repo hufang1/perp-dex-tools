@@ -5,7 +5,11 @@ import Chart from "./Chart";
 import type { MetricsResponse, SpreadPoint, PositionPoint } from "../lib/types";
 
 const ranges = [
+  { key: "5m", label: "5分钟" },
+  { key: "15m", label: "15分钟" },
   { key: "60m", label: "60分钟" },
+  { key: "4h", label: "4小时" },
+  { key: "8h", label: "8小时" },
   { key: "1d", label: "1天" },
   { key: "7d", label: "7天" },
 ];

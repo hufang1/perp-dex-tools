@@ -3,8 +3,12 @@ import { prisma } from "../../lib/db";
 
 function rangeToDate(range: string): Date {
   const now = Date.now();
+  if (range === "5m") return new Date(now - 5 * 60 * 1000);
+  if (range === "15m") return new Date(now - 15 * 60 * 1000);
   if (range === "7d") return new Date(now - 7 * 24 * 60 * 60 * 1000);
   if (range === "1d") return new Date(now - 24 * 60 * 60 * 1000);
+  if (range === "4h") return new Date(now - 4 * 60 * 60 * 1000);
+  if (range === "8h") return new Date(now - 8 * 60 * 60 * 1000);
   return new Date(now - 60 * 60 * 1000);
 }
 
