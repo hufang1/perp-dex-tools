@@ -4304,11 +4304,15 @@ class SpreadArbBot:
                 lig_position = await self.lighter_client.get_account_positions()
                 tolerance = Decimal("0.001")
                 if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
-                    logger.warning("对冲失败但实际无仓位，清理本地持仓并回到IDLE")
+                    logger.warning("对冲失败但实际无仓位，进入平仓确认")
                     self.close_strategy.close_all()
                     self._maker_close_fail_count = 0
                     self.state_manager.update_position(None)
-                    self.state_manager.set_state(BotState.IDLE, "对冲失败但实际无仓位")
+                    if not is_opening:
+                        self._closing_wait_start_time = time.time()
+                        self.state_manager.set_state(BotState.CLOSING_WAIT, "对冲失败但实际无仓位，验证平仓")
+                    else:
+                        self.state_manager.set_state(BotState.IDLE, "对冲失败但实际无仓位")
                     await self.state_manager.save_state()
                     return
             except Exception as e:
