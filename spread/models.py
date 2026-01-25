@@ -481,6 +481,39 @@ class BotConfig:
     - 买入时在VWAP基础上上浮，卖出时在VWAP基础上下调
     """
 
+    # ========== 新增字段：布林带动态阈值 ==========
+    use_bollinger: bool = True
+    """
+    是否使用布林带动态阈值
+    - True: 开仓/平仓信号基于布林带
+    - False: 使用原阶梯阈值
+    """
+
+    boll_window_minutes: int = 60
+    """布林带统计窗口（分钟）"""
+
+    boll_k: Decimal = field(default_factory=lambda: Decimal("2"))
+    """布林带标准差倍数"""
+
+    boll_sample_interval: float = 1.0
+    """布林带采样间隔（秒）"""
+
+    boll_min_samples: int = 60
+    """布林带最小样本数"""
+
+    # ========== 新增字段：腾笼换鸟 ==========
+    switch_cost_bps: Decimal = field(default_factory=lambda: Decimal("0.000225"))
+    """腾笼换鸟换仓成本（固定）"""
+
+    switch_min_hold_minutes: int = 10
+    """腾笼换鸟：持仓最短时间（分钟）"""
+
+    notify_open_trigger: bool = False
+    """是否推送开仓触发（信号）"""
+
+    notify_close_trigger: bool = True
+    """是否推送平仓触发（信号）"""
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性
@@ -553,6 +586,18 @@ class BotConfig:
         if self.market_close_spread_b <= 0:
             return False
         if self.market_close_spread_b <= self.limit_close_spread_a:
+            return False
+        if self.boll_window_minutes <= 0:
+            return False
+        if self.boll_k <= 0:
+            return False
+        if self.boll_sample_interval <= 0:
+            return False
+        if self.boll_min_samples <= 0:
+            return False
+        if self.switch_cost_bps < 0:
+            return False
+        if self.switch_min_hold_minutes < 0:
             return False
 
         return True
