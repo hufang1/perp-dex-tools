@@ -512,8 +512,6 @@ class BotConfig:
     notify_open_trigger: bool = False
     """是否推送开仓触发（信号）"""
 
-    notify_close_trigger: bool = True
-    """是否推送平仓触发（信号）"""
 
     open_taker_gap_bps: Decimal = field(default_factory=lambda: Decimal("0.0002"))
     """

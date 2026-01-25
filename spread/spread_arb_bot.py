@@ -3503,22 +3503,16 @@ class SpreadArbBot:
             decision["should_close"] = True
             decision["use_market"] = True
             decision["close_reason"] = "profit"
-            if self.config.notify_close_trigger:
-                self._notify_close_trigger(decision, mean)
             return decision
         if self.config.close_market_on_lower and spread_info.spread_pct <= lower:
             decision["should_close"] = True
             decision["use_market"] = True
             decision["close_reason"] = "lower_band"
-            if self.config.notify_close_trigger:
-                self._notify_close_trigger(decision, mean)
             return decision
         if self.config.use_bollinger and spread_info.spread_pct <= mean:
             decision["should_close"] = True
             decision["use_market"] = False
             decision["close_reason"] = "midline"
-            if self.config.notify_close_trigger:
-                self._notify_close_trigger(decision, mean)
             return decision
         return decision
 
@@ -3597,34 +3591,6 @@ class SpreadArbBot:
         ]
         self._notify("✅ 平仓成功", lines)
 
-    def _notify_close_trigger(self, decision: Dict[str, object], midline: Decimal) -> None:
-        if not self.config.notify_close_trigger:
-            return
-        mode = "市价" if decision.get("use_market") else "挂单"
-        open_taker = self.close_strategy.portfolio.has_open_taker()
-        open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
-        market_multiplier = Decimal("2") if open_taker else Decimal("1")
-        market_threshold = self.config.market_close_spread_b * market_multiplier
-        reason_map = {
-            "profit": "利润触发",
-            "lower_band": "下轨触发",
-            "midline": "中轴回归",
-        }
-        close_reason = reason_map.get(decision.get("close_reason", ""), "未知")
-        lines = [
-            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"交易对: {self.config.symbol}",
-            f"模式: {mode}",
-            f"开仓方式: {open_mode_label}",
-            f"触发原因: {close_reason}",
-            f"实时价差: {decision.get('open_spread', Decimal('0')):.3%}",
-            f"中轴: {midline:.3%}",
-            f"下轨: {decision.get('lower', Decimal('0')):.3%}",
-            f"平仓价差: {decision.get('close_spread', Decimal('0')):.3%}",
-            f"利润率: {decision.get('profit_spread', Decimal('0')):.3%}",
-            f"市价阈值B: {market_threshold:.3%} ({'B*2' if open_taker else 'B'})",
-        ]
-        self._notify("📉 平仓触发信号", lines)
 
     def _notify_close_failure(self, reason: str) -> None:
         lines = [
@@ -3995,14 +3961,19 @@ class SpreadArbBot:
                     self._set_close_context(decision, close_spread_info)
                     # 需要平仓，取消开仓挂单
                     close_mode = "市价" if decision["use_market"] else "限价"
-                    self._log_spread_rule(
-                        "warning",
-                        BotState.OPENING_MAKER_WAIT,
-                        "close_preempt",
-                        f"{close_mode}平仓 | 利润{decision['profit_spread']:.3%} | "
-                        f"阈值={(decision['market_threshold'] if decision['use_market'] else decision['midline']):.3%}",
-                        also_print=True,
-                    )
+                    now = time.time()
+                    if not hasattr(self, "_last_close_preempt_log_time"):
+                        self._last_close_preempt_log_time = 0.0
+                    if now - self._last_close_preempt_log_time >= 5.0:
+                        self._log_spread_rule(
+                            "warning",
+                            BotState.OPENING_MAKER_WAIT,
+                            "close_preempt",
+                            f"{close_mode}平仓 | 利润{decision['profit_spread']:.3%} | "
+                            f"阈值={(decision['market_threshold'] if decision['use_market'] else decision['midline']):.3%}",
+                            also_print=True,
+                        )
+                        self._last_close_preempt_log_time = now
 
                     # 先检查是否已成交/部分成交
                     if await self._handle_maker_fill_before_state_change(
@@ -4068,13 +4039,18 @@ class SpreadArbBot:
             return False
 
         async with self._maker_lock("close_cancel"):
+            now = time.time()
+            if not hasattr(self, "_last_close_cancel_log_time"):
+                self._last_close_cancel_log_time = 0.0
             order_id = self._maker_wait_state.current_order.order_id
-            self._log_spread_rule(
-                "warning",
-                BotState.CLOSING_MAKER_WAIT,
-                "close_cancel",
-                f"未回归中轴{decision['midline']:.3%} 且利润{decision['profit_spread']:.3%} < 市价阈值{decision['market_threshold']:.3%}",
-            )
+            if now - self._last_close_cancel_log_time >= 5.0:
+                self._log_spread_rule(
+                    "warning",
+                    BotState.CLOSING_MAKER_WAIT,
+                    "close_cancel",
+                    f"未回归中轴{decision['midline']:.3%} 且利润{decision['profit_spread']:.3%} < 市价阈值{decision['market_threshold']:.3%}",
+                )
+                self._last_close_cancel_log_time = now
 
             # 先检查是否已成交/部分成交
             if await self._handle_maker_fill_before_state_change(
@@ -4730,12 +4706,6 @@ def parse_arguments() -> BotConfig:
         dest="notify_open_trigger",
         help="推送开仓触发信号"
     )
-    parser.add_argument(
-        "--notify-close-trigger",
-        action="store_true",
-        dest="notify_close_trigger",
-        help="推送平仓触发信号"
-    )
 
     parser.add_argument(
         "--dry-run",
@@ -4799,8 +4769,6 @@ def parse_arguments() -> BotConfig:
         config_kwargs['close_market_on_lower'] = False
     if args.notify_open_trigger or env_bool("NOTIFY_OPEN_TRIGGER", False):
         config_kwargs['notify_open_trigger'] = True
-    if args.notify_close_trigger or env_bool("NOTIFY_CLOSE_TRIGGER", True):
-        config_kwargs['notify_close_trigger'] = True
 
     if 'open_taker_on_upper' not in config_kwargs:
         config_kwargs['open_taker_on_upper'] = env_bool("OPEN_TAKER_ON_UPPER", True)
