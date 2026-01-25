@@ -20,6 +20,7 @@ export default function Dashboard() {
   const [symbol, setSymbol] = useState("ETH");
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [connected, setConnected] = useState(false);
+  const [zoom, setZoom] = useState<{ start?: number; end?: number }>({});
 
   useEffect(() => {
     let aborted = false;
@@ -63,15 +64,34 @@ export default function Dashboard() {
   const ligTotal = latestPosition?.ligTotal ?? 0;
   const totalSum = extTotal + ligTotal;
 
+  const buildDataZoom = (len: number) => {
+    if (len < 2) return [];
+    return [
+      {
+        type: "inside",
+        xAxisIndex: 0,
+        zoomOnMouseWheel: true,
+        moveOnMouseWheel: true,
+        start: zoom.start,
+        end: zoom.end,
+      },
+    ];
+  };
+
+  const onZoom = (params: unknown) => {
+    const p = params as { start?: number; end?: number };
+    if (typeof p.start === "number" && typeof p.end === "number") {
+      setZoom({ start: p.start, end: p.end });
+    }
+  };
+
   const spreadOption = useMemo(() => {
     const labels = spreadSeries.map((p) => p.t);
     return {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
-      dataZoom: [
-        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
-      ],
+      dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
@@ -124,7 +144,7 @@ export default function Dashboard() {
         },
       ],
     };
-  }, [spreadSeries]);
+  }, [spreadSeries, zoom]);
 
   const positionOption = useMemo(() => {
     const labels = positionSeries.map((p) => p.t);
@@ -132,9 +152,7 @@ export default function Dashboard() {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
-      dataZoom: [
-        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
-      ],
+      dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
@@ -163,7 +181,7 @@ export default function Dashboard() {
         },
       ],
     };
-  }, [positionSeries]);
+  }, [positionSeries, zoom]);
 
   const totalBalanceOption = useMemo(() => {
     const labels = positionSeries.map((p) => p.t);
@@ -171,9 +189,7 @@ export default function Dashboard() {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
-      dataZoom: [
-        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
-      ],
+      dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
@@ -209,7 +225,7 @@ export default function Dashboard() {
         },
       ],
     };
-  }, [positionSeries]);
+  }, [positionSeries, zoom]);
 
   return (
     <main>
@@ -258,11 +274,11 @@ export default function Dashboard() {
       <div className="grid grid-2" style={{ marginTop: 16 }}>
         <div className="panel">
           <h3>价差 + 布林带</h3>
-          <Chart option={spreadOption} />
+          <Chart option={spreadOption} onEvents={{ datazoom: onZoom }} />
         </div>
         <div className="panel">
           <h3>两边仓位变化</h3>
-          <Chart option={positionOption} />
+          <Chart option={positionOption} onEvents={{ datazoom: onZoom }} />
         </div>
       </div>
 
@@ -287,7 +303,7 @@ export default function Dashboard() {
         </div>
         <div className="panel">
           <h3>总金额趋势（{ranges.find((r) => r.key === range)?.label ?? range}）</h3>
-          <Chart option={totalBalanceOption} />
+          <Chart option={totalBalanceOption} onEvents={{ datazoom: onZoom }} />
         </div>
       </div>
 
