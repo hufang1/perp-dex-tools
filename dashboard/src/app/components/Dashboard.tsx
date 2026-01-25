@@ -192,7 +192,7 @@ export default function Dashboard() {
     return {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
-      grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      grid: { left: 30, right: 40, top: 30, bottom: 30 },
       dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
@@ -200,11 +200,21 @@ export default function Dashboard() {
         axisLabel: { color: "#90a39a" },
         boundaryGap: false,
       },
-      yAxis: {
-        type: "value",
-        axisLabel: { color: "#90a39a" },
-        splitLine: { lineStyle: { color: "#1e2722" } },
-      },
+      yAxis: [
+        {
+          type: "value",
+          axisLabel: { color: "#90a39a" },
+          splitLine: { lineStyle: { color: "#1e2722" } },
+        },
+        {
+          type: "value",
+          axisLabel: {
+            color: "#90a39a",
+            formatter: (val: number) => `${(val * 100).toFixed(2)}%`,
+          },
+          splitLine: { show: false },
+        },
+      ],
       series: [
         {
           name: "Ext总金额",
@@ -226,6 +236,14 @@ export default function Dashboard() {
           smooth: true,
           data: positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0)),
           lineStyle: { color: "#ffb86b" },
+        },
+        {
+          name: "当前利润率",
+          type: "line",
+          smooth: true,
+          yAxisIndex: 1,
+          data: positionSeries.map((p) => p.profitRate ?? 0),
+          lineStyle: { color: "#c77dff" },
         },
       ],
     };

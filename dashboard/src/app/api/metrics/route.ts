@@ -18,13 +18,18 @@ export async function GET(req: NextRequest) {
   const symbol = searchParams.get("symbol") ?? "ETH";
   const since = rangeToDate(range);
 
-  const [spreads, positions] = await Promise.all([
+  const [spreads, positions, pnls] = await Promise.all([
     prisma.spreadSample.findMany({
       where: { symbol, createdAt: { gte: since } },
       orderBy: { createdAt: "asc" },
       take: 5000,
     }),
     prisma.positionSnapshot.findMany({
+      where: { symbol, createdAt: { gte: since } },
+      orderBy: { createdAt: "asc" },
+      take: 5000,
+    }),
+    prisma.pnlSnapshot.findMany({
       where: { symbol, createdAt: { gte: since } },
       orderBy: { createdAt: "asc" },
       take: 5000,
@@ -42,7 +47,7 @@ export async function GET(req: NextRequest) {
       upper: Number(s.upper),
       lower: Number(s.lower),
     })),
-    positions: positions.map((p) => ({
+    positions: positions.map((p, idx) => ({
       t: p.createdAt.toISOString(),
       ext: Number(p.extQty),
       lig: Number(p.ligQty),
@@ -50,6 +55,7 @@ export async function GET(req: NextRequest) {
       ligAvail: Number(p.ligAvailUsd),
       extTotal: Number(p.extTotalUsd),
       ligTotal: Number(p.ligTotalUsd),
+      profitRate: pnls[idx] ? Number(pnls[idx].profit) : 0,
     })),
   };
 

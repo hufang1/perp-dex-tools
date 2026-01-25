@@ -24,13 +24,17 @@ export async function GET(request: Request) {
 
       const tick = async () => {
         try {
-          const [spread, position] = await Promise.all([
+          const [spread, position, pnl] = await Promise.all([
             prisma.spreadSample.findFirst({
               where: { symbol, id: { gt: lastSpreadId } },
               orderBy: { id: "desc" },
             }),
             prisma.positionSnapshot.findFirst({
               where: { symbol, id: { gt: lastPositionId } },
+              orderBy: { id: "desc" },
+            }),
+            prisma.pnlSnapshot.findFirst({
+              where: { symbol },
               orderBy: { id: "desc" },
             }),
           ]);
@@ -57,6 +61,7 @@ export async function GET(request: Request) {
               ligAvail: Number(position.ligAvailUsd),
               extTotal: Number(position.extTotalUsd),
               ligTotal: Number(position.ligTotalUsd),
+              profitRate: pnl ? Number(pnl.profit) : 0,
             };
           }
           if (payload.spread || payload.position) {

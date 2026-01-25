@@ -3813,6 +3813,17 @@ class SpreadArbBot:
                 "extTotalUsd": float(ext_total),
                 "ligTotalUsd": float(lig_total),
             }
+            # 记录当前利润（价差口径），并带上累计收益（USDT）
+            try:
+                entry_spread = self.close_strategy.get_weighted_avg_spread()
+                profit_spread = entry_spread - close_spread
+                stats = self.state_manager.get_stats()
+                payload["pnl"] = {
+                    "profit": float(profit_spread),
+                    "cumulative": float(stats.total_profit if stats else Decimal("0")),
+                }
+            except Exception as e:
+                logger.debug(f"Dashboard利润计算失败: {e}")
             self._last_dashboard_position_time = now
         self._dashboard_ingestor.enqueue(payload)
 

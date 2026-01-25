@@ -15,6 +15,7 @@ export type PositionPoint = {
   ligAvail: number;
   extTotal?: number;
   ligTotal?: number;
+  profitRate?: number;
 };
 
 export type MetricsResponse = {
