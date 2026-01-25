@@ -69,6 +69,9 @@ export default function Dashboard() {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      dataZoom: [
+        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
+      ],
       xAxis: {
         type: "category",
         data: labels,
@@ -129,6 +132,9 @@ export default function Dashboard() {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      dataZoom: [
+        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
+      ],
       xAxis: {
         type: "category",
         data: labels,
@@ -165,6 +171,9 @@ export default function Dashboard() {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      dataZoom: [
+        { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: true },
+      ],
       xAxis: {
         type: "category",
         data: labels,
