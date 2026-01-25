@@ -526,12 +526,18 @@ class BotConfig:
     - False: 超过上轨先挂单，超过 (上轨 + gap) 才市价开仓
     """
 
-    close_market_on_lower: bool = True
+    close_market_on_lower: bool = False
     """
     是否在价差触达下轨时使用市价平仓
     - True: 价差 <= 下轨时市价平仓
     - False: 下轨仅作为参考，不强制市价平仓
     """
+
+    dashboard_ingest_url: str = ""
+    """Dashboard数据写入URL（例如: http://localhost:3000/api/ingest）"""
+
+    dashboard_sample_interval: float = 1.0
+    """Dashboard采样频率（秒）"""
 
     def validate(self) -> bool:
         """
@@ -619,6 +625,8 @@ class BotConfig:
         if self.switch_min_hold_minutes < 0:
             return False
         if self.open_taker_gap_bps < 0:
+            return False
+        if self.dashboard_sample_interval <= 0:
             return False
 
         return True

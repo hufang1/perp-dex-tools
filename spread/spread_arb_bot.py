@@ -39,6 +39,7 @@ from models import (
     RealTimeSpreadInfo,
 )
 from feishu_notifier import FeishuNotifier
+from dashboard_ingestor import DashboardIngestor
 from order_book_manager import OrderBookManager
 from spread_calculator import SpreadCalculator
 from risk_manager import RiskManager
@@ -155,6 +156,8 @@ class SpreadArbBot:
         self._last_open_capacity_log_time: float = 0.0
         self._last_open_capacity_reason: str = ""
         self._notifier: Optional[FeishuNotifier] = None
+        self._dashboard_ingestor: Optional[DashboardIngestor] = None
+        self._last_dashboard_sample_time: float = 0.0
         self._last_close_context: Optional[Dict[str, object]] = None
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
@@ -201,6 +204,10 @@ class SpreadArbBot:
                     f"数量: {self.config.target_quantity}",
                 ],
             )
+
+            # 2.4 启动Dashboard数据写入器（不影响主循环）
+            self._dashboard_ingestor = DashboardIngestor(self.config.dashboard_ingest_url)
+            await self._dashboard_ingestor.start()
 
             # 2.5 设置 Extended 订单更新处理（WebSocket 订单监控）
             self.extended_client.setup_order_update_handler(self._handle_extended_order_update)
@@ -312,6 +319,13 @@ class SpreadArbBot:
                     await asyncio.wait_for(self._notifier.stop(), timeout=2.0)
                 except asyncio.TimeoutError:
                     logger.warning("停止飞书通知器超时")
+
+            # 停止Dashboard写入器（带超时）
+            if self._dashboard_ingestor:
+                try:
+                    await asyncio.wait_for(self._dashboard_ingestor.stop(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning("停止Dashboard写入器超时")
 
             self._notify(
                 "🛑 套利程序停止",
@@ -499,6 +513,8 @@ class SpreadArbBot:
 
         if spread_info is None or not spread_info.is_valid():
             return
+
+        await self._maybe_send_dashboard_snapshot(spread_info)
 
         self._update_bollinger(spread_info.spread_pct)
         should_open, reason, use_taker = self._should_open_bollinger(spread_info)
@@ -740,6 +756,8 @@ class SpreadArbBot:
             return
         close_spread_info = self._build_close_spread_info(spread_info)
         self._update_bollinger(spread_info.spread_pct)
+
+        await self._maybe_send_dashboard_snapshot(spread_info)
 
         # 检查是否可以继续开仓（布林带策略）
         should_open, reason, use_taker = self._should_open_bollinger(spread_info)
@@ -2352,7 +2370,25 @@ class SpreadArbBot:
                         if handled:
                             return
                 else:
-                    # 平仓订单取消 -> HOLDING
+                    # 平仓订单取消 -> 若实际已平仓，进入确认；否则回HOLDING
+                    try:
+                        ext_position = await self.extended_client.get_account_positions()
+                        lig_position = await self.lighter_client.get_account_positions()
+                        tolerance = Decimal("0.001")
+                        ext_closed = abs(ext_position) < tolerance
+                        lig_closed = abs(lig_position) < tolerance
+                        if ext_closed and lig_closed:
+                            import time
+                            self._closing_wait_start_time = time.time()
+                            self.state_manager.set_state(
+                                BotState.CLOSING_WAIT,
+                                "平仓订单取消后检测到无仓位，验证平仓",
+                            )
+                            await self.state_manager.save_state()
+                            return
+                    except Exception as e:
+                        logger.warning(f"平仓取消后检查仓位失败: {e}")
+
                     handled = await self._safe_exit_maker_wait(
                         BotState.HOLDING,
                         "平仓订单已取消（WebSocket）",
@@ -3604,6 +3640,60 @@ class SpreadArbBot:
         """获取开仓名义金额（USDT）"""
         return self.config.target_quantity * spread_info.ext_ask
 
+    async def _maybe_send_dashboard_snapshot(self, spread_info) -> None:
+        """按采样频率写入Dashboard数据（非阻塞）"""
+        if not self._dashboard_ingestor or not self._dashboard_ingestor.enabled:
+            return
+        if not spread_info or not spread_info.is_valid():
+            return
+        now = time.time()
+        if now - self._last_dashboard_sample_time < self.config.dashboard_sample_interval:
+            return
+        self._last_dashboard_sample_time = now
+
+        bands = self._get_bollinger_bands()
+        if bands:
+            midline, upper, lower, _std = bands
+        else:
+            midline = upper = lower = Decimal("0")
+
+        close_spread_info = self._build_close_spread_info(spread_info)
+        close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
+
+        ext_qty = lig_qty = ext_avail = lig_avail = Decimal("0")
+        try:
+            snapshot = await self.position_balance_monitor.get_position_balance()
+            if snapshot.extended:
+                ext_qty = snapshot.extended.current_position
+                ext_avail = snapshot.extended.available_balance
+            if snapshot.lighter:
+                lig_qty = snapshot.lighter.current_position
+                lig_avail = snapshot.lighter.available_balance
+        except Exception as e:
+            logger.debug(f"Dashboard仓位快照获取失败: {e}")
+
+        payload = {
+            "symbol": self.config.symbol,
+            "spread": {
+                "open": float(spread_info.spread_pct),
+                "close": float(close_spread),
+                "mid": float(midline),
+                "upper": float(upper),
+                "lower": float(lower),
+                "extBid": float(spread_info.ext_bid),
+                "extAsk": float(spread_info.ext_ask),
+                "ligBid": float(spread_info.lig_bid),
+                "ligAsk": float(spread_info.lig_ask),
+            },
+            "position": {
+                "extQty": float(ext_qty),
+                "ligQty": float(lig_qty),
+                "extAvailUsd": float(ext_avail),
+                "ligAvailUsd": float(lig_avail),
+            },
+        }
+        self._dashboard_ingestor.enqueue(payload)
+
     async def _enter_idle_or_holding_after_open_failure(self, reason: str) -> None:
         """开仓失败后，根据实际仓位决定进入IDLE或HOLDING"""
         try:
@@ -4067,6 +4157,25 @@ class SpreadArbBot:
                 reason="撤单后检测到成交，进入对冲",
             ):
                 return True
+
+            # 撤单后检查实际仓位，如果已平仓则进入确认流程
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                ext_closed = abs(ext_position) < tolerance
+                lig_closed = abs(lig_position) < tolerance
+                if ext_closed and lig_closed:
+                    import time
+                    self._closing_wait_start_time = time.time()
+                    self.state_manager.set_state(
+                        BotState.CLOSING_WAIT,
+                        "撤单后检测到无仓位，验证平仓",
+                    )
+                    await self.state_manager.save_state()
+                    return True
+            except Exception as e:
+                logger.warning(f"撤单后检查仓位失败: {e}")
 
             reason = (
                 f"平仓条件失效，取消挂单（未回归中轴{decision['midline']:.3%}）"
@@ -4677,6 +4786,20 @@ def parse_arguments() -> BotConfig:
         help="开仓市价触发阈值（上轨+gap，默认: 0.0002 = 0.02%%）"
     )
     parser.add_argument(
+        "--dashboard-ingest-url",
+        type=str,
+        default=env_default("DASHBOARD_INGEST_URL", str, None),
+        dest="dashboard_ingest_url",
+        help="Dashboard写入URL（例如: http://localhost:3000/api/ingest）"
+    )
+    parser.add_argument(
+        "--dashboard-sample-interval",
+        type=float,
+        default=env_default("DASHBOARD_SAMPLE_INTERVAL", float, None),
+        dest="dashboard_sample_interval",
+        help="Dashboard采样间隔（秒）"
+    )
+    parser.add_argument(
         "--open-taker-on-upper",
         action="store_true",
         dest="open_taker_on_upper",
@@ -4759,6 +4882,10 @@ def parse_arguments() -> BotConfig:
         config_kwargs['switch_min_hold_minutes'] = args.switch_min_hold_minutes
     if args.open_taker_gap_bps is not None:
         config_kwargs['open_taker_gap_bps'] = args.open_taker_gap_bps
+    if args.dashboard_ingest_url is not None:
+        config_kwargs['dashboard_ingest_url'] = args.dashboard_ingest_url
+    if args.dashboard_sample_interval is not None:
+        config_kwargs['dashboard_sample_interval'] = args.dashboard_sample_interval
     if args.open_taker_on_upper:
         config_kwargs['open_taker_on_upper'] = True
     if args.no_open_taker_on_upper:
@@ -4774,6 +4901,10 @@ def parse_arguments() -> BotConfig:
         config_kwargs['open_taker_on_upper'] = env_bool("OPEN_TAKER_ON_UPPER", True)
     if 'close_market_on_lower' not in config_kwargs:
         config_kwargs['close_market_on_lower'] = env_bool("CLOSE_MARKET_ON_LOWER", False)
+    if 'dashboard_ingest_url' not in config_kwargs:
+        config_kwargs['dashboard_ingest_url'] = os.getenv("DASHBOARD_INGEST_URL", "")
+    if 'dashboard_sample_interval' not in config_kwargs:
+        config_kwargs['dashboard_sample_interval'] = env_default("DASHBOARD_SAMPLE_INTERVAL", float, None) or 1.0
 
     return BotConfig(**config_kwargs)
 

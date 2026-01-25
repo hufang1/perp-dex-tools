@@ -1,0 +1,61 @@
+// Prisma schema for dashboard
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model SpreadSample {
+  id         Int      @id @default(autoincrement())
+  symbol     String
+  openSpread Decimal
+  closeSpread Decimal
+  midline    Decimal
+  upper      Decimal
+  lower      Decimal
+  extBid     Decimal
+  extAsk     Decimal
+  ligBid     Decimal
+  ligAsk     Decimal
+  createdAt  DateTime @default(now())
+
+  @@index([symbol, createdAt])
+}
+
+model PositionSnapshot {
+  id             Int      @id @default(autoincrement())
+  symbol         String
+  extQty         Decimal
+  ligQty         Decimal
+  extAvailUsd    Decimal
+  ligAvailUsd    Decimal
+  createdAt      DateTime @default(now())
+
+  @@index([symbol, createdAt])
+}
+
+model BotEvent {
+  id        Int      @id @default(autoincrement())
+  symbol    String
+  level     String
+  eventType String
+  message   String
+  state     String?
+  createdAt DateTime @default(now())
+
+  @@index([symbol, createdAt])
+}
+
+model PnlSnapshot {
+  id          Int      @id @default(autoincrement())
+  symbol      String
+  profit      Decimal
+  cumulative  Decimal
+  createdAt   DateTime @default(now())
+
+  @@index([symbol, createdAt])
+}
