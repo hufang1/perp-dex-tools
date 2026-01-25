@@ -524,8 +524,8 @@ class BotConfig:
     open_taker_on_upper: bool = True
     """
     是否在价差超过上轨时使用市价开仓
-    - True: 超过上轨时按 (上轨 + gap) 触发市价开仓
-    - False: 超过上轨仅走挂单开仓
+    - True: 超过上轨时直接市价开仓
+    - False: 超过上轨先挂单，超过 (上轨 + gap) 才市价开仓
     """
 
     close_market_on_lower: bool = True

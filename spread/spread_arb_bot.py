@@ -3382,16 +3382,23 @@ class SpreadArbBot:
         mean, upper, _lower, _std = bands
         current_spread = spread_info.spread_pct
         if current_spread >= upper:
-            use_taker = False
             if self.config.open_taker_on_upper:
+                use_taker = True
+            else:
                 use_taker = current_spread >= (upper + self.config.open_taker_gap_bps)
             if use_taker:
-                reason = (
-                    f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}+gap{self.config.open_taker_gap_bps:.3%} "
-                    f"（中轴{mean:.3%}）"
-                )
+                if self.config.open_taker_on_upper:
+                    reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}（中轴{mean:.3%}）"
+                else:
+                    reason = (
+                        f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}+gap{self.config.open_taker_gap_bps:.3%} "
+                        f"（中轴{mean:.3%}）"
+                    )
             else:
-                reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}（中轴{mean:.3%}）"
+                if self.config.open_taker_on_upper:
+                    reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}（中轴{mean:.3%}）"
+                else:
+                    reason = f"开仓: 价差{current_spread:.3%} >= 上轨{upper:.3%}，等待gap{self.config.open_taker_gap_bps:.3%}触发市价（中轴{mean:.3%}）"
             self._notify_open_trigger(spread_info, mean, upper, reason)
             return True, reason, use_taker
         reason = f"价差{current_spread:.3%}未达上轨{upper:.3%}（中轴{mean:.3%}）"
