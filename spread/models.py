@@ -521,6 +521,20 @@ class BotConfig:
     - 默认0.02% = 0.0002
     """
 
+    open_taker_on_upper: bool = True
+    """
+    是否在价差超过上轨时使用市价开仓
+    - True: 超过上轨时按 (上轨 + gap) 触发市价开仓
+    - False: 超过上轨仅走挂单开仓
+    """
+
+    close_market_on_lower: bool = True
+    """
+    是否在价差触达下轨时使用市价平仓
+    - True: 价差 <= 下轨时市价平仓
+    - False: 下轨仅作为参考，不强制市价平仓
+    """
+
     def validate(self) -> bool:
         """
         验证配置参数的有效性
