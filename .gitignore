@@ -56,7 +56,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+!dashboard/src/app/lib/
+!dashboard/src/app/lib/db.ts
+!dashboard/src/app/lib/types.ts
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
