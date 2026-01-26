@@ -2730,6 +2730,14 @@ class SpreadArbBot:
             if status not in ["FILLED", "PARTIALLY_FILLED"] or filled_qty <= 0:
                 return
 
+            # 额外保险：仅在仓位不平衡时才触发对冲，避免误判
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            imbalance = ext_position + lig_position
+            if abs(imbalance) < tolerance:
+                return
+
             avg_price = order_info.get("avg_price") or order_info.get("avg_fill_price") or order_info.get("price")
             avg_price = Decimal(str(avg_price)) if avg_price is not None else Decimal("0")
 
