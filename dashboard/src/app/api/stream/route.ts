@@ -39,7 +39,7 @@ export async function GET(request: Request) {
             }),
           ]);
 
-          const payload: { spread?: object; position?: object } = {};
+          const payload: { spread?: object; position?: object; pnl?: object } = {};
           if (spread) {
             lastSpreadId = spread.id;
             payload.spread = {
