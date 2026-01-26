@@ -4884,8 +4884,10 @@ class SpreadArbBot:
                     f"耗时={result.execution_time:.3f}s"
                 )
 
-                # 进入IDLE状态
-                self.state_manager.set_state(BotState.IDLE, "市价平仓完成")
+                # 进入CLOSING_WAIT状态，由仓位确认统一收尾/推送
+                import time
+                self._closing_wait_start_time = time.time()
+                self.state_manager.set_state(BotState.CLOSING_WAIT, "市价平仓完成，等待确认")
                 await self.state_manager.save_state()
             else:
                 logger.error(f"市价平仓失败: {result.error_message}")
@@ -4900,7 +4902,9 @@ class SpreadArbBot:
                     self.close_strategy.close_all()
                     self._maker_close_fail_count = 0
                     self.state_manager.update_position(None)
-                    self.state_manager.set_state(BotState.IDLE, "市价平仓完成(仓位确认)")
+                    import time
+                    self._closing_wait_start_time = time.time()
+                    self.state_manager.set_state(BotState.CLOSING_WAIT, "市价平仓完成(仓位确认)")
                     await self.state_manager.save_state()
                 else:
                     self.state_manager.set_state(BotState.HOLDING, "市价平仓失败")
