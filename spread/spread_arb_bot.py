@@ -4890,8 +4890,21 @@ class SpreadArbBot:
             else:
                 logger.error(f"市价平仓失败: {result.error_message}")
                 # 市价平仓失败，回到HOLDING状态
-                self.state_manager.set_state(BotState.HOLDING, "市价平仓失败")
-                await self.state_manager.save_state()
+                # 追加实盘仓位确认，避免状态查询超时导致的误判
+                await asyncio.sleep(1.0)
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                    logger.info("市价平仓确认：实盘已无仓位，按成功处理")
+                    self.close_strategy.close_all()
+                    self._maker_close_fail_count = 0
+                    self.state_manager.update_position(None)
+                    self.state_manager.set_state(BotState.IDLE, "市价平仓完成(仓位确认)")
+                    await self.state_manager.save_state()
+                else:
+                    self.state_manager.set_state(BotState.HOLDING, "市价平仓失败")
+                    await self.state_manager.save_state()
 
         except Exception as e:
             logger.error(f"市价平仓异常: {e}")
