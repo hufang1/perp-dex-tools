@@ -165,6 +165,7 @@ class SpreadArbBot:
         self._last_maker_is_opening: Optional[bool] = None
         self._last_state_seen: Optional[BotState] = None
         self._alignment_check_in_progress: bool = False
+        self._last_maker_recovery_check_time: float = 0.0
         self._run_ext_volume: Decimal = Decimal("0")  # USDT
         self._run_lig_volume: Decimal = Decimal("0")  # USDT
         self._run_total_volume: Decimal = Decimal("0")  # USDT
@@ -373,6 +374,8 @@ class SpreadArbBot:
                 if self._last_state_seen is not None and state != self._last_state_seen:
                     await self._handle_state_transition_alignment(self._last_state_seen, state)
                 self._last_state_seen = state
+                # 兜底：定期检查最近Maker订单是否已成交但未触发对冲
+                await self._maybe_recover_maker_fill_out_of_band()
 
                 if state == BotState.IDLE:
                     await self._process_idle_state()
@@ -924,6 +927,9 @@ class SpreadArbBot:
             use_taker=use_taker,
             reason=reason,
         )
+
+        # 兜底：若状态已切走但挂单未撤单且成交未被WS捕获，定期检查最后一笔Maker订单
+        await self._maybe_recover_maker_fill_out_of_band()
 
         # 输出持仓状态日志（格式：icon 状态「持仓中」 实时价差，开仓阈值，平仓口径价差，平仓阈值，结果）
         # 限制频率：每5秒输出一次
@@ -2698,6 +2704,47 @@ class SpreadArbBot:
             )
         except Exception as e:
             logger.error(f"成交晚到补对冲失败: {e}", exc_info=True)
+
+    async def _maybe_recover_maker_fill_out_of_band(self) -> None:
+        """兜底轮询：检查最近一笔Maker订单是否已成交但未触发对冲"""
+        now = time.time()
+        if now - self._last_maker_recovery_check_time < 3.0:
+            return
+        self._last_maker_recovery_check_time = now
+
+        if not self._last_maker_order_id:
+            return
+
+        # 若仍在Maker等待状态，交给主流程处理
+        current_state = self.state_manager.get_state()
+        if current_state in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT, BotState.LIGHTER_HEDGING]:
+            return
+
+        try:
+            order_info = await self.trade_executor.get_extended_order_info(self._last_maker_order_id)
+            if not order_info:
+                return
+            status = str(order_info.get("status", "")).upper()
+            raw_filled = order_info.get("filled_size", "0")
+            filled_qty = Decimal(str(raw_filled)) if raw_filled is not None else Decimal("0")
+            if status not in ["FILLED", "PARTIALLY_FILLED"] or filled_qty <= 0:
+                return
+
+            avg_price = order_info.get("avg_price") or order_info.get("avg_fill_price") or order_info.get("price")
+            avg_price = Decimal(str(avg_price)) if avg_price is not None else Decimal("0")
+
+            order = MakerOrder(
+                order_id=self._last_maker_order_id,
+                price=avg_price,
+                quantity=filled_qty,
+                side="sell",
+                is_opening=bool(self._last_maker_is_opening),
+                filled_quantity=filled_qty,
+                avg_fill_price=avg_price,
+            )
+            await self._recover_maker_fill_out_of_band(order)
+        except Exception as e:
+            logger.debug(f"兜底检查最近Maker订单失败: {e}")
 
     async def _handle_maker_order_partially_filled(self, order: MakerOrder) -> None:
         """
