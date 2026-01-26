@@ -539,7 +539,7 @@ class BotConfig:
     dashboard_sample_interval: float = 1.0
     """Dashboard采样频率（秒）"""
 
-    dashboard_position_interval: float = 60.0
+    dashboard_position_interval: float = 1.0
     """Dashboard仓位/余额采样间隔（秒）"""
 
     maker_close_fail_threshold: int = 3

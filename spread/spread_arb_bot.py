@@ -5177,7 +5177,7 @@ def parse_arguments() -> BotConfig:
     if 'dashboard_sample_interval' not in config_kwargs:
         config_kwargs['dashboard_sample_interval'] = env_default("DASHBOARD_SAMPLE_INTERVAL", float, None) or 1.0
     if 'dashboard_position_interval' not in config_kwargs:
-        config_kwargs['dashboard_position_interval'] = env_default("DASHBOARD_POSITION_INTERVAL", float, None) or 60.0
+        config_kwargs['dashboard_position_interval'] = env_default("DASHBOARD_POSITION_INTERVAL", float, None) or 1.0
     if 'maker_close_fail_threshold' not in config_kwargs:
         config_kwargs['maker_close_fail_threshold'] = env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None) or 3
 

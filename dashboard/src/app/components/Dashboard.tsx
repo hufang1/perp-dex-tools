@@ -368,39 +368,10 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
+      <div className="grid" style={{ marginTop: 16 }}>
         <div className="panel">
           <h3>价差 + 布林带</h3>
           <Chart option={spreadOption} onEvents={{ datazoom: onZoom }} />
-        </div>
-        <div className="panel">
-          <h3>两边仓位变化</h3>
-          <Chart option={positionOption} onEvents={{ datazoom: onZoom }} />
-        </div>
-      </div>
-
-      <div className="grid grid-2" style={{ marginTop: 16 }}>
-        <div className="panel">
-          <h3>两边总金额</h3>
-          <div className="grid grid-3">
-            <div className="kpi">
-              <div className="label">Extended 总金额</div>
-              <div className="value">{extTotal.toFixed(2)}</div>
-            </div>
-            <div className="kpi">
-              <div className="label">Lighter 总金额</div>
-              <div className="value">{ligTotal.toFixed(2)}</div>
-            </div>
-            <div className="kpi">
-              <div className="label">合计</div>
-              <div className="value">{totalSum.toFixed(2)}</div>
-            </div>
-          </div>
-          <p className="muted" style={{ marginTop: 8 }}>每1分钟采样一次</p>
-        </div>
-        <div className="panel">
-          <h3>总金额趋势（{ranges.find((r) => r.key === range)?.label ?? range}）</h3>
-          <Chart option={totalBalanceOption} onEvents={{ datazoom: onZoom }} />
         </div>
       </div>
 
