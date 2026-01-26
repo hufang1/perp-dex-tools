@@ -293,15 +293,44 @@ class TradeExecutor:
         # logger.info(f"平仓[Taker]: 数量={quantity}")
 
         try:
-            # Taker模式：使用市价单确保即时成交 (016-spread-optimize)
+            # 以交易所真实仓位为上限，避免 reduce-only 超量
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            ext_qty = min(abs(ext_position), quantity)
+            lig_qty = min(abs(lig_position), quantity)
+
+            if ext_qty < tolerance and lig_qty < tolerance:
+                return ExecutionResult(
+                    success=True,
+                    execution_time=time.time() - start_time,
+                    extended_filled=True,
+                    lighter_filled=True
+                )
+
+            tasks = []
+            if ext_qty >= tolerance:
+                tasks.append(self._place_extended_order_taker("sell", ext_qty, None, reduce_only=True))
+            else:
+                tasks.append(None)
+            if lig_qty >= tolerance:
+                tasks.append(self._place_lighter_order_taker("buy", lig_qty, None, reduce_only=True))
+            else:
+                tasks.append(None)
+
             results = await asyncio.gather(
-                self._place_extended_order_taker("sell", quantity, None, reduce_only=True),
-                self._place_lighter_order_taker("buy", quantity, None, reduce_only=True),
+                *(t for t in tasks if t is not None),
                 return_exceptions=True
             )
 
-            extended_result = results[0]
-            lighter_result = results[1]
+            extended_result = None
+            lighter_result = None
+            idx = 0
+            if tasks[0] is not None:
+                extended_result = results[idx]
+                idx += 1
+            if tasks[1] is not None:
+                lighter_result = results[idx]
 
             # 检查是否有错误
             if isinstance(extended_result, Exception):
@@ -318,8 +347,8 @@ class TradeExecutor:
 
             # 等待订单成交
             execution_status = await self.wait_for_execution(
-                extended_result["order_id"],
-                lighter_result["order_id"],
+                extended_result["order_id"] if isinstance(extended_result, dict) else None,
+                lighter_result["order_id"] if isinstance(lighter_result, dict) else None,
                 self.timeout
             )
 
@@ -334,10 +363,10 @@ class TradeExecutor:
                 # )
                 return ExecutionResult(
                     success=True,
-                    extended_order_id=extended_result["order_id"],
-                    lighter_order_id=lighter_result["order_id"],
-                    extended_price=extended_result.get("price"),
-                    lighter_price=lighter_result.get("price"),
+                    extended_order_id=extended_result["order_id"] if isinstance(extended_result, dict) else None,
+                    lighter_order_id=lighter_result["order_id"] if isinstance(lighter_result, dict) else None,
+                    extended_price=extended_result.get("price") if isinstance(extended_result, dict) else None,
+                    lighter_price=lighter_result.get("price") if isinstance(lighter_result, dict) else None,
                     execution_time=execution_time,
                     extended_filled=True,
                     lighter_filled=True
@@ -360,8 +389,8 @@ class TradeExecutor:
 
     async def wait_for_execution(
         self,
-        extended_order_id: str,
-        lighter_order_id: str,
+        extended_order_id: Optional[str],
+        lighter_order_id: Optional[str],
         timeout: float = 3.0
     ) -> Dict[str, Any]:
         """
@@ -381,11 +410,20 @@ class TradeExecutor:
         Raises:
             Exception: 订单查询连续失败时抛出异常
         """
+        # 若两边都没有订单，直接返回完成
+        if extended_order_id is None and lighter_order_id is None:
+            return {
+                "both_filled": True,
+                "extended_filled": True,
+                "lighter_filled": True,
+                "timeout": False
+            }
+
         start_time = time.time()
         check_interval = 0.1  # 100ms 检查一次
 
-        extended_filled = False
-        lighter_filled = False
+        extended_filled = extended_order_id is None
+        lighter_filled = lighter_order_id is None
         # 连续失败计数
         extended_fail_count = 0
         lighter_fail_count = 0
@@ -394,35 +432,36 @@ class TradeExecutor:
         while time.time() - start_time < timeout:
             # 检查订单状态（分别检查，一边失败不影响另一边）
             # Extended
-            try:
-                extended_status = await self._check_order_status(
-                    "extended", extended_order_id,
-                    allow_retries=False  # 不允许重试，失败就抛出异常
-                )
-                extended_fail_count = 0  # 成功则重置计数
-            except Exception as e:
-                extended_fail_count += 1
-                logger.warning(f"Extended订单查询失败 ({extended_fail_count}/{max_fail_count}): {e}")
-                extended_status = {"filled": False}
-                if extended_fail_count >= max_fail_count:
-                    raise Exception(f"Extended订单查询连续失败{max_fail_count}次，可能API异常")
+            if extended_order_id is not None:
+                try:
+                    extended_status = await self._check_order_status(
+                        "extended", extended_order_id,
+                        allow_retries=False  # 不允许重试，失败就抛出异常
+                    )
+                    extended_fail_count = 0  # 成功则重置计数
+                except Exception as e:
+                    extended_fail_count += 1
+                    logger.warning(f"Extended订单查询失败 ({extended_fail_count}/{max_fail_count}): {e}")
+                    extended_status = {"filled": False}
+                    if extended_fail_count >= max_fail_count:
+                        raise Exception(f"Extended订单查询连续失败{max_fail_count}次，可能API异常")
+                extended_filled = extended_status.get("filled", False)
 
             # Lighter
-            try:
-                lighter_status = await self._check_order_status(
-                    "lighter", lighter_order_id,
-                    allow_retries=False
-                )
-                lighter_fail_count = 0
-            except Exception as e:
-                lighter_fail_count += 1
-                logger.warning(f"Lighter订单查询失败 ({lighter_fail_count}/{max_fail_count}): {e}")
-                lighter_status = {"filled": False}
-                if lighter_fail_count >= max_fail_count:
-                    raise Exception(f"Lighter订单查询连续失败{max_fail_count}次，可能API异常")
-
-            extended_filled = extended_status.get("filled", False)
-            lighter_filled = lighter_status.get("filled", False)
+            if lighter_order_id is not None:
+                try:
+                    lighter_status = await self._check_order_status(
+                        "lighter", lighter_order_id,
+                        allow_retries=False
+                    )
+                    lighter_fail_count = 0
+                except Exception as e:
+                    lighter_fail_count += 1
+                    logger.warning(f"Lighter订单查询失败 ({lighter_fail_count}/{max_fail_count}): {e}")
+                    lighter_status = {"filled": False}
+                    if lighter_fail_count >= max_fail_count:
+                        raise Exception(f"Lighter订单查询连续失败{max_fail_count}次，可能API异常")
+                lighter_filled = lighter_status.get("filled", False)
 
             if extended_filled and lighter_filled:
                 # 两边都已成交，成功返回

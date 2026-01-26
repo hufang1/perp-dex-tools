@@ -163,6 +163,8 @@ class SpreadArbBot:
         self._maker_close_fail_count: int = 0
         self._last_maker_order_id: Optional[str] = None
         self._last_maker_is_opening: Optional[bool] = None
+        self._last_state_seen: Optional[BotState] = None
+        self._alignment_check_in_progress: bool = False
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -358,6 +360,9 @@ class SpreadArbBot:
             try:
                 # 获取当前状态
                 state = self.state_manager.get_state()
+                if self._last_state_seen is not None and state != self._last_state_seen:
+                    await self._handle_state_transition_alignment(self._last_state_seen, state)
+                self._last_state_seen = state
 
                 if state == BotState.IDLE:
                     await self._process_idle_state()
@@ -408,6 +413,123 @@ class SpreadArbBot:
             except Exception as e:
                 logger.error(f"交易循环异常: {e}", exc_info=True)
                 # 继续运行，不要因为单次错误而停止
+
+    def _infer_alignment_mode(self, prev_state: BotState, next_state: BotState) -> Optional[str]:
+        opening_states = {
+            BotState.OPENING,
+            BotState.OPENING_TAKER,
+            BotState.OPENING_WAIT,
+            BotState.OPENING_MAKER_WAIT,
+        }
+        closing_states = {
+            BotState.CLOSING,
+            BotState.CLOSING_TAKER,
+            BotState.CLOSING_WAIT,
+            BotState.CLOSING_MAKER_WAIT,
+        }
+        if prev_state in closing_states or next_state in closing_states:
+            return "closing"
+        if prev_state in opening_states or next_state in opening_states:
+            return "opening"
+        if prev_state == BotState.LIGHTER_HEDGING or next_state == BotState.LIGHTER_HEDGING:
+            if hasattr(self, "_hedging_state") and getattr(self._hedging_state, "is_closing", False):
+                return "closing"
+            if self._last_maker_is_opening is not None:
+                return "opening" if self._last_maker_is_opening else "closing"
+        return None
+
+    async def _handle_state_transition_alignment(self, prev_state: BotState, next_state: BotState) -> None:
+        if self._alignment_check_in_progress:
+            return
+        mode = self._infer_alignment_mode(prev_state, next_state)
+        if mode is None:
+            return
+        self._alignment_check_in_progress = True
+        try:
+            ext_position = await self.extended_client.get_account_positions()
+            lig_position = await self.lighter_client.get_account_positions()
+            tolerance = Decimal("0.001")
+            if abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                return
+
+            ext_abs = abs(ext_position)
+            lig_abs = abs(lig_position)
+            diff = abs(ext_abs - lig_abs)
+            if diff < tolerance:
+                return
+
+            if mode == "closing":
+                logger.error(
+                    f"⚠️ 平仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，触发强平"
+                )
+                self._notify(
+                    "⚠️ 仓位不一致(平仓阶段)",
+                    [
+                        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        f"交易对: {self.config.symbol}",
+                        f"阶段: 平仓",
+                        f"Ext仓位: {ext_position}",
+                        f"Lig仓位: {lig_position}",
+                        "动作: 强制全平",
+                    ],
+                )
+                await self._force_close_positions()
+                self.state_manager.set_state(BotState.CLOSING_WAIT, "平仓阶段仓位不一致，强平后验证")
+                await self.state_manager.save_state()
+                return
+
+            pending_qty = None
+            if hasattr(self, "_pending_open_position") and self._pending_open_position:
+                pending_qty = self._pending_open_position.quantity
+            if pending_qty is None:
+                pending_qty = self.config.target_quantity
+
+            reduce_qty = min(diff, pending_qty)
+            if reduce_qty < tolerance:
+                return
+
+            if ext_abs > lig_abs:
+                side = "sell" if ext_position > 0 else "buy"
+                logger.warning(
+                    f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
+                    f"仅回滚本次开仓量{reduce_qty}"
+                )
+                self._notify(
+                    "⚠️ 仓位不一致(开仓阶段)",
+                    [
+                        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        f"交易对: {self.config.symbol}",
+                        f"阶段: 开仓",
+                        f"Ext仓位: {ext_position}",
+                        f"Lig仓位: {lig_position}",
+                        f"回滚数量: {reduce_qty}",
+                        "动作: 回滚单边(本次开仓量)",
+                    ],
+                )
+                await self.trade_executor.rollback_position("extended", reduce_qty, side)
+            else:
+                side = "sell" if lig_position > 0 else "buy"
+                logger.warning(
+                    f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
+                    f"仅回滚本次开仓量{reduce_qty}"
+                )
+                self._notify(
+                    "⚠️ 仓位不一致(开仓阶段)",
+                    [
+                        f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                        f"交易对: {self.config.symbol}",
+                        f"阶段: 开仓",
+                        f"Ext仓位: {ext_position}",
+                        f"Lig仓位: {lig_position}",
+                        f"回滚数量: {reduce_qty}",
+                        "动作: 回滚单边(本次开仓量)",
+                    ],
+                )
+                await self.trade_executor.rollback_position("lighter", reduce_qty, side)
+        except Exception as e:
+            logger.warning(f"仓位对齐检查异常: {e}")
+        finally:
+            self._alignment_check_in_progress = False
 
     async def _enter_idle_state(self, reason: str, check_positions: bool = True) -> None:
         """
@@ -4803,8 +4925,21 @@ class SpreadArbBot:
                 self.state_manager.set_state(BotState.IDLE, "无仓位，跳过限价平仓")
                 await self.state_manager.save_state()
                 return
+
+            effective_qty = min(total_quantity, abs(ext_position))
+            if effective_qty < tolerance:
+                logger.warning(
+                    f"限价平仓前检测到Ext仓位不足，跳过Maker | ext={ext_position}, lig={lig_position}"
+                )
+                if abs(lig_position) >= tolerance:
+                    side = "sell" if lig_position > 0 else "buy"
+                    await self.trade_executor.rollback_position("lighter", abs(lig_position), side)
+                self.state_manager.set_state(BotState.CLOSING_WAIT, "Ext仓位不足，等待仓位确认")
+                await self.state_manager.save_state()
+                return
+
             # 使用Maker模式平仓（017-ext-maker-mode已经支持）
-            result = await self.trade_executor.place_maker_close_order(total_quantity)
+            result = await self.trade_executor.place_maker_close_order(effective_qty)
 
             if not result.success or result.extended_order_id is None:
                 logger.error(f"Extended Maker平仓订单失败: {result.error_message}")
@@ -4831,7 +4966,7 @@ class SpreadArbBot:
             close_order = MakerOrder(
                 order_id=result.extended_order_id,
                 price=result.extended_price,
-                quantity=total_quantity,
+                quantity=effective_qty,
                 side='sell',  # 平仓时卖出
                 is_opening=False  # 标记为平仓订单
             )
