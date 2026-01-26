@@ -58,6 +58,9 @@ export async function GET(req: NextRequest) {
       ligAvail: Number(p.ligAvailUsd),
       extTotal: Number(p.extTotalUsd),
       ligTotal: Number(p.ligTotalUsd),
+      extVolume: Number(p.extVolume ?? 0),
+      ligVolume: Number(p.ligVolume ?? 0),
+      totalVolume: Number(p.totalVolume ?? 0),
       profitRate: pnls[idx] ? Number(pnls[idx].profit) : 0,
     })),
     pnls: pnls.map((p) => ({

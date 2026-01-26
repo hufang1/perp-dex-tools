@@ -61,6 +61,9 @@ export async function GET(request: Request) {
               ligAvail: Number(position.ligAvailUsd),
               extTotal: Number(position.extTotalUsd),
               ligTotal: Number(position.ligTotalUsd),
+              extVolume: Number(position.extVolume ?? 0),
+              ligVolume: Number(position.ligVolume ?? 0),
+              totalVolume: Number(position.totalVolume ?? 0),
               profitRate: pnl ? Number(pnl.profit) : 0,
             };
           }

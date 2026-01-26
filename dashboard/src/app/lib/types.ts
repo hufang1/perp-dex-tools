@@ -15,6 +15,9 @@ export type PositionPoint = {
   ligAvail: number;
   extTotal?: number;
   ligTotal?: number;
+  extVolume?: number;
+  ligVolume?: number;
+  totalVolume?: number;
   profitRate?: number;
 };
 

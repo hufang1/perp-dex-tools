@@ -165,6 +165,11 @@ class SpreadArbBot:
         self._last_maker_is_opening: Optional[bool] = None
         self._last_state_seen: Optional[BotState] = None
         self._alignment_check_in_progress: bool = False
+        self._run_ext_volume: Decimal = Decimal("0")  # USDT
+        self._run_lig_volume: Decimal = Decimal("0")  # USDT
+        self._run_total_volume: Decimal = Decimal("0")  # USDT
+        self._run_profit: Decimal = Decimal("0")
+        self._run_fees: Decimal = Decimal("0")
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -339,6 +344,8 @@ class SpreadArbBot:
                     f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                     f"交易对: {self.config.symbol}",
                     f"统计: {self._format_stats_line()}",
+                    f"本次总交易量(USDT): {self._run_total_volume:.2f}",
+                    f"本次实际盈亏(USDT): {(self._run_profit - self._run_fees):.4f}",
                 ],
             )
 
@@ -1287,6 +1294,12 @@ class SpreadArbBot:
                     self._notify_open_success(ext_position, lig_position)
                     self.close_strategy.add_position(self._pending_open_position)
 
+                    # 记录本次运行的交易量（USDT名义）
+                    open_qty = self._pending_open_position.quantity
+                    ext_notional = self._pending_open_position.ext_price * open_qty
+                    lig_notional = self._pending_open_position.lig_price * open_qty
+                    self._record_run_volume(ext_notional, lig_notional)
+
                     # ========== 新增 (003-spreading-improvements): 阶梯开仓回调 ==========
                     # 调用开仓成功回调，增加开仓次数
                     await self.open_strategy.on_position_opened(self._pending_open_position.open_spread)
@@ -1489,6 +1502,15 @@ class SpreadArbBot:
                     elapsed=elapsed_time,
                     status='平仓成功'
                 )
+
+                # 记录本次运行的交易量与盈亏（USDT名义）
+                ctx = self._last_close_context or {}
+                ext_bid = ctx.get("ext_bid")
+                lig_ask = ctx.get("lig_ask")
+                if isinstance(ext_bid, Decimal) and isinstance(lig_ask, Decimal):
+                    self._record_run_volume(ext_bid * total_quantity, lig_ask * total_quantity)
+                self._run_profit += profit
+                self._run_fees += fees
 
                 self._notify_close_success(profit)
 
@@ -3884,6 +3906,15 @@ class SpreadArbBot:
         """获取开仓名义金额（USDT）"""
         return self.config.target_quantity * spread_info.ext_ask
 
+    def _record_run_volume(self, ext_notional: Decimal, lig_notional: Decimal) -> None:
+        if ext_notional is None or lig_notional is None:
+            return
+        if ext_notional <= 0 and lig_notional <= 0:
+            return
+        self._run_ext_volume += max(Decimal("0"), ext_notional)
+        self._run_lig_volume += max(Decimal("0"), lig_notional)
+        self._run_total_volume = self._run_ext_volume + self._run_lig_volume
+
     async def _maybe_send_dashboard_snapshot(self, spread_info) -> None:
         """按采样频率写入Dashboard数据（非阻塞）"""
         if not self._dashboard_ingestor or not self._dashboard_ingestor.enabled:
@@ -3943,6 +3974,9 @@ class SpreadArbBot:
                 "ligAvailUsd": float(lig_avail),
                 "extTotalUsd": float(ext_total),
                 "ligTotalUsd": float(lig_total),
+                "extVolume": float(self._run_ext_volume),
+                "ligVolume": float(self._run_lig_volume),
+                "totalVolume": float(self._run_total_volume),
             }
             # 记录当前利润（价差口径），并带上累计收益（USDT）
             try:

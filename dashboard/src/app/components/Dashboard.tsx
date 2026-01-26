@@ -290,6 +290,71 @@ export default function Dashboard() {
     };
   }, [positionSeries, zoom]);
 
+  const volumeOption = useMemo(() => {
+    const labels = positionSeries.map((p) => p.t);
+    const totalFunds = positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0));
+    return {
+      tooltip: {
+        trigger: "axis",
+        formatter: (params: Array<{ seriesName: string; value: number; axisValue?: string | number }>) => {
+          if (!Array.isArray(params) || params.length === 0) return "";
+          const header = params[0]?.axisValue ?? "";
+          const lines = params.map((p) => {
+            if (String(p.seriesName).includes("(USDT)")) {
+              return `${p.seriesName}: ${Number(p.value).toFixed(2)}`;
+            }
+            return `${p.seriesName}: ${Number(p.value).toFixed(4)}`;
+          });
+          return [header, ...lines].join("<br/>");
+        },
+      },
+      legend: { textStyle: { color: "#c7d6ce" } },
+      grid: { left: 30, right: 30, top: 30, bottom: 30 },
+      dataZoom: buildDataZoom(labels.length),
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: { color: "#90a39a", formatter: (value: string) => formatTimeLabel(value) },
+        boundaryGap: false,
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { color: "#90a39a" },
+        splitLine: { lineStyle: { color: "#1e2722" } },
+      },
+      series: [
+        {
+          name: "总金额(USDT)",
+          type: "line",
+          smooth: true,
+          data: totalFunds,
+          lineStyle: { color: "#6fe3a1" },
+        },
+        {
+          name: "Ext交易量(USDT)",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => p.extVolume ?? 0),
+          lineStyle: { color: "#5bb2ff" },
+        },
+        {
+          name: "Lig交易量(USDT)",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => p.ligVolume ?? 0),
+          lineStyle: { color: "#ffb86b" },
+        },
+        {
+          name: "交易量总和(USDT)",
+          type: "line",
+          smooth: true,
+          data: positionSeries.map((p) => p.totalVolume ?? 0),
+          lineStyle: { color: "#c77dff" },
+        },
+      ],
+    };
+  }, [positionSeries, zoom]);
+
   const pnlOption = useMemo(() => {
     const labels = pnlSeries.map((p) => p.t);
     return {
@@ -416,6 +481,13 @@ export default function Dashboard() {
         <div className="panel">
           <h3>开仓/平仓价差 + 收益率 + 总资金</h3>
           <Chart option={pnlOption} onEvents={{ datazoom: onZoom }} />
+        </div>
+      </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
+        <div className="panel">
+          <h3>总仓位 + 交易量</h3>
+          <Chart option={volumeOption} onEvents={{ datazoom: onZoom }} />
         </div>
       </div>
 

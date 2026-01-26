@@ -42,6 +42,9 @@ export async function POST(req: NextRequest) {
           ligAvailUsd: p.ligAvailUsd,
           extTotalUsd: p.extTotalUsd ?? 0,
           ligTotalUsd: p.ligTotalUsd ?? 0,
+          extVolume: p.extVolume ?? 0,
+          ligVolume: p.ligVolume ?? 0,
+          totalVolume: p.totalVolume ?? 0,
         },
       })
     );

@@ -35,6 +35,9 @@ model PositionSnapshot {
   ligAvailUsd    Decimal
   extTotalUsd    Decimal @default(0)
   ligTotalUsd    Decimal @default(0)
+  extVolume      Decimal @default(0)
+  ligVolume      Decimal @default(0)
+  totalVolume    Decimal @default(0)
   createdAt      DateTime @default(now())
 
   @@index([symbol, createdAt])
