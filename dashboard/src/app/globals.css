@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
   color-scheme: light;
   --bg: #0f1412;
@@ -92,6 +96,14 @@ button {
 button.active {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+input[type="datetime-local"] {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 8px;
 }
 
 .muted {

@@ -16,21 +16,24 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const range = searchParams.get("range") ?? "60m";
   const symbol = searchParams.get("symbol") ?? "ETH";
-  const since = rangeToDate(range);
+  const startParam = searchParams.get("start");
+  const endParam = searchParams.get("end");
+  const start = startParam ? new Date(startParam) : rangeToDate(range);
+  const end = endParam ? new Date(endParam) : new Date();
 
   const [spreads, positions, pnls] = await Promise.all([
     prisma.spreadSample.findMany({
-      where: { symbol, createdAt: { gte: since } },
+      where: { symbol, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "asc" },
       take: 5000,
     }),
     prisma.positionSnapshot.findMany({
-      where: { symbol, createdAt: { gte: since } },
+      where: { symbol, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "asc" },
       take: 5000,
     }),
     prisma.pnlSnapshot.findMany({
-      where: { symbol, createdAt: { gte: since } },
+      where: { symbol, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "asc" },
       take: 5000,
     }),

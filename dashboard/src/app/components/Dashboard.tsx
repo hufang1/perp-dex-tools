@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Chart from "./Chart";
 import type { MetricsResponse, SpreadPoint, PositionPoint } from "../lib/types";
+import { DateTimePicker } from "./DateTimePicker";
 
 const ranges = [
   { key: "5m", label: "5分钟" },
@@ -19,16 +20,31 @@ function formatPct(value?: number) {
   return `${(value * 100).toFixed(3)}%`;
 }
 
+function formatTimeLabel(iso: string) {
+  const d = new Date(iso);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${mm}:${dd} ${hh}:${mi}:${ss}`;
+}
+
 export default function Dashboard() {
   const [range, setRange] = useState("60m");
   const [symbol, setSymbol] = useState("ETH");
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [connected, setConnected] = useState(false);
   const [zoom, setZoom] = useState<{ start?: number; end?: number }>({});
+  const [startAt, setStartAt] = useState<Date | undefined>(undefined);
+  const [endAt, setEndAt] = useState<Date | undefined>(undefined);
 
   useEffect(() => {
     let aborted = false;
-    fetch(`/api/metrics?range=${range}&symbol=${symbol}`)
+    const params = new URLSearchParams({ range, symbol });
+    if (startAt) params.set("start", startAt.toISOString());
+    if (endAt) params.set("end", endAt.toISOString());
+    fetch(`/api/metrics?${params.toString()}`)
       .then((res) => res.json())
       .then((json: MetricsResponse) => {
         if (!aborted) setData(json);
@@ -37,7 +53,7 @@ export default function Dashboard() {
     return () => {
       aborted = true;
     };
-  }, [range, symbol]);
+  }, [range, symbol, startAt, endAt]);
 
   useEffect(() => {
     const es = new EventSource(`/api/stream?symbol=${symbol}`);
@@ -98,14 +114,27 @@ export default function Dashboard() {
   const spreadOption = useMemo(() => {
     const labels = spreadSeries.map((p) => p.t);
     return {
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        formatter: (params: Array<{ seriesName: string; value: number }>) => {
+          if (!Array.isArray(params) || params.length === 0) return "";
+          const header = params[0]?.axisValue ?? "";
+          const lines = params.map((p) => {
+            if (p.seriesName === "总资金(USDT)") {
+              return `${p.seriesName}: ${Number(p.value).toFixed(2)}`;
+            }
+            return `${p.seriesName}: ${(Number(p.value) * 100).toFixed(3)}%`;
+          });
+          return [header, ...lines].join("<br/>");
+        },
+      },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
       dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
-        axisLabel: { color: "#90a39a" },
+        axisLabel: { color: "#90a39a", formatter: (value: string) => formatTimeLabel(value) },
         boundaryGap: false,
       },
       yAxis: {
@@ -159,14 +188,17 @@ export default function Dashboard() {
   const positionOption = useMemo(() => {
     const labels = positionSeries.map((p) => p.t);
     return {
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        valueFormatter: (val: number) => `${(val * 100).toFixed(3)}%`,
+      },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 30, top: 30, bottom: 30 },
       dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
-        axisLabel: { color: "#90a39a" },
+        axisLabel: { color: "#90a39a", formatter: (value: string) => formatTimeLabel(value) },
         boundaryGap: false,
       },
       yAxis: {
@@ -196,14 +228,17 @@ export default function Dashboard() {
   const totalBalanceOption = useMemo(() => {
     const labels = positionSeries.map((p) => p.t);
     return {
-      tooltip: { trigger: "axis" },
+      tooltip: {
+        trigger: "axis",
+        valueFormatter: (val: number) => `${(val * 100).toFixed(3)}%`,
+      },
       legend: { textStyle: { color: "#c7d6ce" } },
       grid: { left: 30, right: 40, top: 30, bottom: 30 },
       dataZoom: buildDataZoom(labels.length),
       xAxis: {
         type: "category",
         data: labels,
-        axisLabel: { color: "#90a39a" },
+        axisLabel: { color: "#90a39a", formatter: (value: string) => formatTimeLabel(value) },
         boundaryGap: false,
       },
       yAxis: [
@@ -265,7 +300,7 @@ export default function Dashboard() {
       xAxis: {
         type: "category",
         data: labels,
-        axisLabel: { color: "#90a39a" },
+        axisLabel: { color: "#90a39a", formatter: (value: string) => formatTimeLabel(value) },
         boundaryGap: false,
       },
       yAxis: [
@@ -343,6 +378,8 @@ export default function Dashboard() {
               </button>
             ))}
             <button className={connected ? "active" : ""}>{connected ? "实时连接" : "断开"}</button>
+            <DateTimePicker value={startAt} onChange={setStartAt} placeholder="开始时间" />
+            <DateTimePicker value={endAt} onChange={setEndAt} placeholder="结束时间" />
           </div>
         </div>
       </div>
