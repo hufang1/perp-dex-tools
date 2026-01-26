@@ -185,6 +185,9 @@ class SpreadArbBot:
         print(f"   - initial_open_spread = {config.initial_open_spread} ({config.initial_open_spread:.3%})")
         print(f"   - spread_step = {config.spread_step} ({config.spread_step:.3%})")
         print(f"   - successful_opening_count = {config.successful_opening_count}")
+        print(f"🔧 [配置初始化] 平仓阈值参数:")
+        print(f"   - limit_close_spread_a = {config.limit_close_spread_a} ({config.limit_close_spread_a:.3%})")
+        print(f"   - market_close_spread_b = {config.market_close_spread_b} ({config.market_close_spread_b:.3%})")
         print(f"   - current_open_threshold = {config.current_open_threshold} ({config.current_open_threshold:.3%})")
         logger.info(f"阶梯开仓配置: initial={config.initial_open_spread:.3%}, step={config.spread_step:.3%}, count={config.successful_opening_count}, current_threshold={config.current_open_threshold:.3%}")
 
@@ -931,13 +934,13 @@ class SpreadArbBot:
             close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
             bands = self._get_bollinger_bands()
             open_taker = self.close_strategy.portfolio.has_open_taker()
-            open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
+            open_mode_label = "taker" if open_taker else "maker"
             if bands:
                 midline, upper, lower, _std = bands
-                open_formula = f">=上轨{upper:.3%}（中轴{midline:.3%}）"
+                open_formula = f">=upper{upper:.3%}"
             else:
                 midline = Decimal("0")
-                open_formula = "布林带样本不足"
+                open_formula = "NA"
 
             # 计算平仓触发阈值（平仓价差口径）
             entry_spread = self.close_strategy.get_weighted_avg_spread()
@@ -947,11 +950,11 @@ class SpreadArbBot:
                 market_threshold = entry_spread - self.config.market_close_spread_b
                 if bands:
                     close_formula = (
-                        f"平仓价差≤min(中轴{midline:.3%}, 开仓均价差-A{self.config.limit_close_spread_a:.3%})"
-                        f" | 市价平仓≤开仓均价差-B{self.config.market_close_spread_b:.3%}"
+                        f"close<=min(mid{midline:.3%},entry-A{self.config.limit_close_spread_a:.3%})/"
+                        f"<=entry-B{self.config.market_close_spread_b:.3%}"
                     )
                 else:
-                    close_formula = "布林带样本不足"
+                    close_formula = "NA"
             else:
                 profit_spread = Decimal("0")
                 close_formula = ""
@@ -969,25 +972,14 @@ class SpreadArbBot:
             else:
                 result = "不开仓"
 
-            # 组合日志，用括号组织逻辑
-            position_spread_text = f"{entry_spread:.3%}" if entry_spread > 0 else "无"
-            close_spread_text = f"{close_spread:.3%}" if entry_spread > 0 else "无"
-            profit_text = f"{profit_spread:.3%}" if entry_spread > 0 else "无"
-            if close_formula:
-                print(
-                    f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
-                    f"开仓方式{open_mode_label}，"
-                    f"当前仓位价差{position_spread_text}，平仓价差{close_spread_text}，"
-                    f"当前利润{profit_text}，"
-                    f"平仓阈值{close_formula}），结果：{result}"
-                )
-            else:
-                print(
-                    f"📊 状态「持仓中」 实时价差{current_spread:.3%}（开仓阈值{open_formula}，"
-                    f"开仓方式{open_mode_label}，"
-                    f"当前仓位价差{position_spread_text}，平仓价差{close_spread_text}，"
-                    f"当前利润{profit_text}），结果：{result}"
-                )
+            position_spread_text = f"{entry_spread:.3%}" if entry_spread > 0 else "-"
+            close_spread_text = f"{close_spread:.3%}" if entry_spread > 0 else "-"
+            profit_text = f"{profit_spread:.3%}" if entry_spread > 0 else "-"
+            print(
+                f"📊 持仓 spread={current_spread:.3%} | open{open_formula}({open_mode_label}) | "
+                f"entry={position_spread_text} close={close_spread_text} pnl={profit_text} | "
+                f"rule:{close_formula} | {result}"
+            )
             self._last_holding_log_time = current_time
 
         # 记录实时价差到CSV（每10秒一次）
