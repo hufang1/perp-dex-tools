@@ -810,19 +810,16 @@ class SpreadArbBot:
                 midline = Decimal("0")
                 open_formula = "布林带样本不足"
 
-            # 计算平仓价差（与 close_strategy 一致：利润阈值）
+            # 计算平仓触发阈值（平仓价差口径）
             entry_spread = self.close_strategy.get_weighted_avg_spread()
             if entry_spread > 0:
                 profit_spread = entry_spread - close_spread
-                market_multiplier = Decimal("2") if open_taker else Decimal("1")
-                market_threshold = self.config.market_close_spread_b * market_multiplier
+                limit_threshold = min(midline, entry_spread - self.config.limit_close_spread_a)
+                market_threshold = entry_spread - self.config.market_close_spread_b
                 if bands:
-                    market_label = "B*2" if open_taker else "B"
-                    lower_clause = ""
-                    if self.config.close_market_on_lower:
-                        lower_clause = f" | 下轨≤{lower:.3%}市价"
                     close_formula = (
-                        f"中轴≤{midline:.3%}{lower_clause} | 市价利润≥{market_threshold:.3%}({market_label})"
+                        f"平仓价差≤min(中轴{midline:.3%}, 开仓均价差-A{self.config.limit_close_spread_a:.3%})"
+                        f" | 市价平仓≤开仓均价差-B{self.config.market_close_spread_b:.3%}"
                     )
                 else:
                     close_formula = "布林带样本不足"
@@ -2968,7 +2965,7 @@ class SpreadArbBot:
                 # 获取当前仓位价差（使用close_strategy的portfolio获取加权平均）
                 position_spread = self.close_strategy.get_weighted_avg_spread()
 
-                # 计算平仓阈值（与布林带+利润逻辑一致）
+                # 计算平仓阈值（平仓价差口径）
                 open_taker = self.close_strategy.portfolio.has_open_taker()
                 open_mode_label = "有市价开仓" if open_taker else "全挂单开仓"
                 if position_spread > 0:
@@ -2979,18 +2976,14 @@ class SpreadArbBot:
                         profit_str = f"利润{profit_spread:.3%}"
                     else:
                         profit_str = "利润无"
-                    market_multiplier = Decimal("2") if open_taker else Decimal("1")
-                    market_threshold = self.config.market_close_spread_b * market_multiplier
+                    limit_threshold = min(self._get_bollinger_bands()[0], position_spread - self.config.limit_close_spread_a) if self._get_bollinger_bands() else Decimal("0")
+                    market_threshold = position_spread - self.config.market_close_spread_b
                     bands = self._get_bollinger_bands()
                     if bands:
-                        midline, _upper, lower, _std = bands
-                        market_label = "B*2" if open_taker else "B"
-                        lower_clause = ""
-                        if self.config.close_market_on_lower:
-                            lower_clause = f" | 下轨≤{lower:.3%}市价"
+                        midline, _upper, _lower, _std = bands
                         close_threshold_str = (
-                            f"{profit_str} | 中轴≤{midline:.3%}{lower_clause} "
-                            f"市价利润≥{market_threshold:.3%}({market_label})"
+                            f"{profit_str} | 平仓价差≤min(中轴{midline:.3%}, 开仓均价差-A{self.config.limit_close_spread_a:.3%}) "
+                            f"| 市价平仓≤开仓均价差-B{self.config.market_close_spread_b:.3%}"
                         )
                     else:
                         close_threshold_str = f"{profit_str} | 布林带样本不足"
@@ -3615,6 +3608,7 @@ class SpreadArbBot:
             "midline": Decimal("0"),
             "lower": Decimal("0"),
             "market_threshold": Decimal("0"),
+            "limit_threshold": Decimal("0"),
             "close_reason": "",
         }
         if not spread_info or not close_spread_info:
@@ -3627,6 +3621,8 @@ class SpreadArbBot:
         if total_spread <= 0:
             return decision
         profit_spread = total_spread - close_spread_info.spread_pct
+        limit_threshold = min(mean, total_spread - self.config.limit_close_spread_a)
+        market_threshold = total_spread - self.config.market_close_spread_b
         decision.update(
             {
                 "total_spread": total_spread,
@@ -3635,25 +3631,19 @@ class SpreadArbBot:
                 "open_spread": spread_info.spread_pct,
                 "midline": mean,
                 "lower": lower,
+                "limit_threshold": limit_threshold,
+                "market_threshold": market_threshold,
             }
         )
-        market_multiplier = Decimal("2") if self.close_strategy.portfolio.has_open_taker() else Decimal("1")
-        market_threshold = self.config.market_close_spread_b * market_multiplier
-        decision["market_threshold"] = market_threshold
-        if profit_spread >= market_threshold:
+        if close_spread_info.spread_pct <= market_threshold:
             decision["should_close"] = True
             decision["use_market"] = True
-            decision["close_reason"] = "profit"
+            decision["close_reason"] = "market_profit"
             return decision
-        if self.config.close_market_on_lower and spread_info.spread_pct <= lower:
-            decision["should_close"] = True
-            decision["use_market"] = True
-            decision["close_reason"] = "lower_band"
-            return decision
-        if self.config.use_bollinger and spread_info.spread_pct <= mean:
+        if self.config.use_bollinger and close_spread_info.spread_pct <= limit_threshold:
             decision["should_close"] = True
             decision["use_market"] = False
-            decision["close_reason"] = "midline"
+            decision["close_reason"] = "limit_min"
             return decision
         return decision
 
@@ -4015,14 +4005,13 @@ class SpreadArbBot:
         if decision["use_market"]:
             # 市价平仓：立即执行
             await self._execute_market_close(total_quantity)
-            reason_text = "利润触发" if decision.get("close_reason") == "profit" else "下轨触发"
+            reason_text = "市价平仓触发"
             self._log_spread_rule(
                 "info",
                 BotState.HOLDING,
                 "close_market",
                 f"{reason_text} | 开仓{decision['total_spread']:.3%} | "
-                f"利润{decision['profit_spread']:.3%} >= 市价阈值{decision['market_threshold']:.3%} | "
-                f"平仓价差{decision['close_spread']:.3%}",
+                f"平仓价差{decision['close_spread']:.3%} <= 开仓均价差-{self.config.market_close_spread_b:.3%}",
             )
         else:
             # 限价平仓：挂单等待成交
@@ -4032,8 +4021,8 @@ class SpreadArbBot:
                 BotState.HOLDING,
                 "close_limit",
                 f"开仓{decision['total_spread']:.3%} | "
-                f"价差回归中轴{decision['midline']:.3%} | "
-                f"平仓价差{decision['close_spread']:.3%}",
+                f"平仓价差{decision['close_spread']:.3%} <= "
+                f"min(中轴{decision['midline']:.3%}, 开仓均价差-A{self.config.limit_close_spread_a:.3%})",
             )
 
         await self.state_manager.save_state()
@@ -4079,16 +4068,16 @@ class SpreadArbBot:
             "close_mode",
             f"{close_mode} | 持仓价差={decision['total_spread']:.3%} | "
             f"利润={decision['profit_spread']:.3%} | "
-            f"{'市价阈值' if decision['use_market'] else '中轴'}="
-            f"{(decision['market_threshold'] if decision['use_market'] else decision['midline']):.3%}",
+            f"{'市价阈值(平仓价差)' if decision['use_market'] else '限价阈值(平仓价差)'}="
+            f"{(decision['market_threshold'] if decision['use_market'] else decision['limit_threshold']):.3%}",
         )
 
         if decision["use_market"]:
             # 市价平仓：切换到 CLOSING_TAKER 状态
-            reason_text = "下轨触发" if decision.get("close_reason") == "lower_band" else "利润触发"
+            reason_text = "市价平仓触发"
             self.state_manager.set_state(
                 BotState.CLOSING_TAKER,
-                f"市价平仓 | {reason_text} | 利润{decision['profit_spread']:.3%} >= 阈值{decision['market_threshold']:.3%}"
+                f"市价平仓 | {reason_text} | 平仓价差≤开仓均价差-B{self.config.market_close_spread_b:.3%}"
             )
             await self.state_manager.save_state()
         else:
@@ -4192,8 +4181,8 @@ class SpreadArbBot:
                             "warning",
                             BotState.OPENING_MAKER_WAIT,
                             "close_preempt",
-                            f"{close_mode}平仓 | 利润{decision['profit_spread']:.3%} | "
-                            f"阈值={(decision['market_threshold'] if decision['use_market'] else decision['midline']):.3%}",
+                            f"{close_mode}平仓 | 平仓价差{decision['close_spread']:.3%} | "
+                            f"阈值={(decision['market_threshold'] if decision['use_market'] else decision['limit_threshold']):.3%}",
                             also_print=True,
                         )
                         self._last_close_preempt_log_time = now
@@ -4272,7 +4261,8 @@ class SpreadArbBot:
                     "warning",
                     BotState.CLOSING_MAKER_WAIT,
                     "close_cancel",
-                    f"未回归中轴{decision['midline']:.3%} 且利润{decision['profit_spread']:.3%} < 市价阈值{decision['market_threshold']:.3%}",
+                    f"平仓价差{decision['close_spread']:.3%} > "
+                    f"限价阈值{decision['limit_threshold']:.3%} 且 > 市价阈值{decision['market_threshold']:.3%}",
                 )
                 self._last_close_cancel_log_time = now
 
