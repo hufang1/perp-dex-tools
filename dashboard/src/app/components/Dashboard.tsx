@@ -116,7 +116,7 @@ export default function Dashboard() {
     return {
       tooltip: {
         trigger: "axis",
-        formatter: (params: Array<{ seriesName: string; value: number }>) => {
+        formatter: (params: Array<{ seriesName: string; value: number; axisValue?: string }>) => {
           if (!Array.isArray(params) || params.length === 0) return "";
           const header = params[0]?.axisValue ?? "";
           const lines = params.map((p) => {
