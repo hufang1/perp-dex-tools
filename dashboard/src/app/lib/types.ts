@@ -23,6 +23,14 @@ export type MetricsResponse = {
   range: string;
   spreads: SpreadPoint[];
   positions: PositionPoint[];
+  pnls?: {
+    t: string;
+    entry: number;
+    close: number;
+    ideal: number;
+    actual: number;
+    cumulative: number;
+  }[];
   latest?: {
     spread?: SpreadPoint;
     position?: PositionPoint;

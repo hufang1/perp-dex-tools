@@ -3717,15 +3717,34 @@ class SpreadArbBot:
         profit_spread = ctx.get("profit_spread", Decimal("0"))
         ext_bid = ctx.get("ext_bid", Decimal("0"))
         lig_ask = ctx.get("lig_ask", Decimal("0"))
+        entry_spread = self.close_strategy.get_weighted_avg_spread()
+        ideal_rate = entry_spread - close_spread
+        fee_rate = Decimal("0.000225")
+        actual_rate = ideal_rate
+        if self.close_strategy.portfolio.has_open_taker():
+            actual_rate -= fee_rate
+        if self.state_manager.get_state() == BotState.CLOSING_TAKER:
+            actual_rate -= fee_rate
+        total_funds = Decimal("0")
+        try:
+            snapshot = getattr(self.position_balance_monitor, "_cached_snapshot", None)
+            if snapshot and snapshot.is_valid():
+                total_funds = snapshot.extended.total_balance + snapshot.lighter.total_balance
+        except Exception:
+            pass
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
             f"方式: {mode}",
             "方向: Ext卖 / Lig买",
             f"平仓价差率: {close_spread:.3%}",
+            f"平均开仓价差: {entry_spread:.3%}",
+            f"理想收益率: {ideal_rate:.3%}",
+            f"实际收益率: {actual_rate:.3%}",
             f"利润率: {profit_spread:.3%}",
             f"Ext平仓价: {ext_bid:.2f}",
             f"Lig平仓价: {lig_ask:.2f}",
+            f"两边总资金: {total_funds:.2f}",
             f"收益: {profit:.2f}",
         ]
         self._notify("✅ 平仓成功", lines)
@@ -3807,8 +3826,19 @@ class SpreadArbBot:
             try:
                 entry_spread = self.close_strategy.get_weighted_avg_spread()
                 profit_spread = entry_spread - close_spread
+                # 实际收益率 = 理想收益率 - 市价手续费（仅Ext市价开/平仓时扣）
+                fee_rate = Decimal("0.000225")
+                actual_profit = profit_spread
+                if hasattr(self.close_strategy, "portfolio") and self.close_strategy.portfolio.has_open_taker():
+                    actual_profit -= fee_rate
+                if self.state_manager.get_state() == BotState.CLOSING_TAKER:
+                    actual_profit -= fee_rate
                 stats = self.state_manager.get_stats()
                 payload["pnl"] = {
+                    "entry_spread": float(entry_spread),
+                    "close_spread": float(close_spread),
+                    "ideal_rate": float(profit_spread),
+                    "actual_rate": float(actual_profit),
                     "profit": float(profit_spread),
                     "cumulative": float(stats.total_profit if stats else Decimal("0")),
                 }

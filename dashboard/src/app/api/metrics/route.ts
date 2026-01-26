@@ -57,6 +57,14 @@ export async function GET(req: NextRequest) {
       ligTotal: Number(p.ligTotalUsd),
       profitRate: pnls[idx] ? Number(pnls[idx].profit) : 0,
     })),
+    pnls: pnls.map((p) => ({
+      t: p.createdAt.toISOString(),
+      entry: Number(p.entrySpread),
+      close: Number(p.closeSpread),
+      ideal: Number(p.idealRate),
+      actual: Number(p.actualRate),
+      cumulative: Number(p.cumulative),
+    })),
   };
 
   return NextResponse.json(response);

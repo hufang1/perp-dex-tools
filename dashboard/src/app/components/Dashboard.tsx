@@ -45,12 +45,17 @@ export default function Dashboard() {
     es.onerror = () => setConnected(false);
     es.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data) as { spread?: SpreadPoint; position?: PositionPoint };
+        const payload = JSON.parse(event.data) as {
+          spread?: SpreadPoint;
+          position?: PositionPoint;
+          pnl?: { t: string; entry: number; close: number; ideal: number; actual: number; cumulative: number };
+        };
         setData((prev) => {
           if (!prev) return prev;
           const spreads = payload.spread ? [...prev.spreads, payload.spread] : prev.spreads;
           const positions = payload.position ? [...prev.positions, payload.position] : prev.positions;
-          return { ...prev, spreads, positions, latest: payload };
+          const pnls = payload.pnl ? [...(prev.pnls ?? []), payload.pnl] : prev.pnls;
+          return { ...prev, spreads, positions, pnls, latest: payload };
         });
       } catch {
         // ignore malformed
@@ -64,6 +69,7 @@ export default function Dashboard() {
 
   const latestSpread = data?.latest?.spread ?? spreadSeries[spreadSeries.length - 1];
   const latestPosition = data?.latest?.position ?? positionSeries[positionSeries.length - 1];
+  const pnlSeries = useMemo(() => data?.pnls ?? [], [data]);
   const extTotal = latestPosition?.extTotal ?? 0;
   const ligTotal = latestPosition?.ligTotal ?? 0;
   const totalSum = extTotal + ligTotal;
@@ -249,6 +255,75 @@ export default function Dashboard() {
     };
   }, [positionSeries, zoom]);
 
+  const pnlOption = useMemo(() => {
+    const labels = pnlSeries.map((p) => p.t);
+    return {
+      tooltip: { trigger: "axis" },
+      legend: { textStyle: { color: "#c7d6ce" } },
+      grid: { left: 30, right: 40, top: 30, bottom: 30 },
+      dataZoom: buildDataZoom(labels.length),
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: { color: "#90a39a" },
+        boundaryGap: false,
+      },
+      yAxis: [
+        {
+          type: "value",
+          axisLabel: {
+            color: "#90a39a",
+            formatter: (val: number) => `${(val * 100).toFixed(2)}%`,
+          },
+          splitLine: { lineStyle: { color: "#1e2722" } },
+        },
+        {
+          type: "value",
+          axisLabel: { color: "#90a39a" },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        {
+          name: "平均开仓价差",
+          type: "line",
+          smooth: true,
+          data: pnlSeries.map((p) => p.entry),
+          lineStyle: { color: "#6fe3a1" },
+        },
+        {
+          name: "当前平仓价差",
+          type: "line",
+          smooth: true,
+          data: pnlSeries.map((p) => p.close),
+          lineStyle: { color: "#5bb2ff" },
+        },
+        {
+          name: "理想收益率",
+          type: "line",
+          smooth: true,
+          data: pnlSeries.map((p) => p.ideal),
+          lineStyle: { color: "#ffb86b" },
+        },
+        {
+          name: "实际收益率",
+          type: "line",
+          smooth: true,
+          data: pnlSeries.map((p) => p.actual),
+          lineStyle: { color: "#c77dff" },
+        },
+        {
+          name: "总资金(USDT)",
+          type: "line",
+          smooth: true,
+          yAxisIndex: 1,
+          data: positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0)),
+          lineStyle: { color: "#7bdff2" },
+        },
+      ],
+    };
+  }, [pnlSeries, positionSeries, zoom]);
+
   return (
     <main>
       <div className="grid grid-2">
@@ -326,6 +401,13 @@ export default function Dashboard() {
         <div className="panel">
           <h3>总金额趋势（{ranges.find((r) => r.key === range)?.label ?? range}）</h3>
           <Chart option={totalBalanceOption} onEvents={{ datazoom: onZoom }} />
+        </div>
+      </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
+        <div className="panel">
+          <h3>开仓/平仓价差 + 收益率 + 总资金</h3>
+          <Chart option={pnlOption} onEvents={{ datazoom: onZoom }} />
         </div>
       </div>
 

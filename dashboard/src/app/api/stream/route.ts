@@ -64,6 +64,16 @@ export async function GET(request: Request) {
               profitRate: pnl ? Number(pnl.profit) : 0,
             };
           }
+          if (pnl) {
+            payload.pnl = {
+              t: pnl.createdAt.toISOString(),
+              entry: Number(pnl.entrySpread),
+              close: Number(pnl.closeSpread),
+              ideal: Number(pnl.idealRate),
+              actual: Number(pnl.actualRate),
+              cumulative: Number(pnl.cumulative),
+            };
+          }
           if (payload.spread || payload.position) {
             push(payload);
           }

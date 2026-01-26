@@ -56,6 +56,10 @@ model PnlSnapshot {
   id          Int      @id @default(autoincrement())
   symbol      String
   profit      Decimal
+  entrySpread Decimal @default(0)
+  closeSpread Decimal @default(0)
+  idealRate   Decimal @default(0)
+  actualRate  Decimal @default(0)
   cumulative  Decimal
   createdAt   DateTime @default(now())
 

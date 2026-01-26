@@ -70,6 +70,10 @@ export async function POST(req: NextRequest) {
           symbol,
           profit: p.profit,
           cumulative: p.cumulative,
+          entrySpread: p.entry_spread ?? 0,
+          closeSpread: p.close_spread ?? 0,
+          idealRate: p.ideal_rate ?? 0,
+          actualRate: p.actual_rate ?? 0,
         },
       })
     );
