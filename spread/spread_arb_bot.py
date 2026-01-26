@@ -4730,6 +4730,9 @@ class SpreadArbBot:
                         filled_qty = Decimal(str(filled_size))
                     else:
                         filled_qty = Decimal(filled_size) if filled_size else Decimal('0')
+                elif old_order.filled_quantity:
+                    # REST查不到订单时，回退到本地WS记录
+                    filled_qty = old_order.filled_quantity
 
                 print(
                     f"🔄 订单状态查询 | "
