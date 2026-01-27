@@ -444,7 +444,13 @@ class TradeExecutor:
                     logger.warning(f"Extended订单查询失败 ({extended_fail_count}/{max_fail_count}): {e}")
                     extended_status = {"filled": False}
                     if extended_fail_count >= max_fail_count:
-                        raise Exception(f"Extended订单查询连续失败{max_fail_count}次，可能API异常")
+                        logger.warning(f"Extended订单查询连续失败{max_fail_count}次，转入仓位确认")
+                        return {
+                            "both_filled": False,
+                            "extended_filled": extended_filled,
+                            "lighter_filled": lighter_filled,
+                            "timeout": True
+                        }
                 extended_filled = extended_status.get("filled", False)
 
             # Lighter
@@ -460,7 +466,13 @@ class TradeExecutor:
                     logger.warning(f"Lighter订单查询失败 ({lighter_fail_count}/{max_fail_count}): {e}")
                     lighter_status = {"filled": False}
                     if lighter_fail_count >= max_fail_count:
-                        raise Exception(f"Lighter订单查询连续失败{max_fail_count}次，可能API异常")
+                        logger.warning(f"Lighter订单查询连续失败{max_fail_count}次，转入仓位确认")
+                        return {
+                            "both_filled": False,
+                            "extended_filled": extended_filled,
+                            "lighter_filled": lighter_filled,
+                            "timeout": True
+                        }
                 lighter_filled = lighter_status.get("filled", False)
 
             if extended_filled and lighter_filled:

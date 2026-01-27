@@ -608,7 +608,7 @@ class ExtendedClient(BaseExchangeClient):
                         
                         elif response.status == 404:
                             # Order not found
-                            self.logger.log(f"Order {order_id} not found attempt {attempt}", "INFO")
+                            self.logger.log(f"Order {order_id} not found attempt {attempt}", "DEBUG")
                         
                         else:
                             self.logger.log(f"Failed to get order info attempt {attempt} for {order_id}: HTTP {response.status}", "ERROR")
