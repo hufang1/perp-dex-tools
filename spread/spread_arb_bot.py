@@ -171,6 +171,8 @@ class SpreadArbBot:
         self._run_total_volume: Decimal = Decimal("0")  # USDT
         self._run_profit: Decimal = Decimal("0")
         self._run_fees: Decimal = Decimal("0")
+        self._last_trade_funds_delta: Decimal = Decimal("0")
+        self._cum_trade_funds_delta: Decimal = Decimal("0")
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -3948,15 +3950,27 @@ class SpreadArbBot:
             actual_rate -= fee_rate
 
         total_funds_after = Decimal("0")
+        ext_funds_after = Decimal("0")
+        lig_funds_after = Decimal("0")
         try:
             snapshot = await self.position_balance_monitor.get_position_balance()
             if snapshot and snapshot.extended and snapshot.lighter:
-                total_funds_after = snapshot.extended.total_balance + snapshot.lighter.total_balance
+                ext_funds_after = snapshot.extended.total_balance
+                lig_funds_after = snapshot.lighter.total_balance
+                total_funds_after = ext_funds_after + lig_funds_after
         except Exception:
             pass
 
         total_funds_before = ctx.get("funds_before", Decimal("0"))
+        ext_funds_before = ctx.get("ext_funds_before", Decimal("0"))
+        lig_funds_before = ctx.get("lig_funds_before", Decimal("0"))
         funds_delta = total_funds_after - total_funds_before if total_funds_before else profit
+        ext_delta = ext_funds_after - ext_funds_before if ext_funds_before else Decimal("0")
+        lig_delta = lig_funds_after - lig_funds_before if lig_funds_before else Decimal("0")
+
+        if total_funds_before:
+            self._last_trade_funds_delta = funds_delta
+            self._cum_trade_funds_delta += funds_delta
 
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -3970,6 +3984,8 @@ class SpreadArbBot:
             f"Ext平仓价: {ext_bid:.2f}",
             f"Lig平仓价: {lig_ask:.2f}",
             f"两边总资金(平仓后): {total_funds_after:.2f}",
+            f"Ext实际收益: {ext_delta:.2f}",
+            f"Lig实际收益: {lig_delta:.2f}",
             f"收益(资金变化): {funds_delta:.2f}",
         ]
         self._notify("✅ 平仓成功", lines)
@@ -4004,8 +4020,12 @@ class SpreadArbBot:
         try:
             snapshot = await self.position_balance_monitor.get_position_balance()
             if snapshot and snapshot.extended and snapshot.lighter:
-                total_funds = snapshot.extended.total_balance + snapshot.lighter.total_balance
+                ext_before = snapshot.extended.total_balance
+                lig_before = snapshot.lighter.total_balance
+                total_funds = ext_before + lig_before
                 self._last_close_context["funds_before"] = total_funds
+                self._last_close_context["ext_funds_before"] = ext_before
+                self._last_close_context["lig_funds_before"] = lig_before
         except Exception:
             pass
 
@@ -4091,6 +4111,8 @@ class SpreadArbBot:
                     "actual_rate": float(actual_profit),
                     "profit": float(profit_spread),
                     "cumulative": float(stats.total_profit if stats else Decimal("0")),
+                    "funds_delta": float(self._last_trade_funds_delta),
+                    "funds_cumulative": float(self._cum_trade_funds_delta),
                 }
             except Exception as e:
                 logger.debug(f"Dashboard利润计算失败: {e}")

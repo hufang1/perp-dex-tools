@@ -63,6 +63,8 @@ model PnlSnapshot {
   closeSpread Decimal @default(0)
   idealRate   Decimal @default(0)
   actualRate  Decimal @default(0)
+  fundsDelta  Decimal @default(0)
+  fundsCum    Decimal @default(0)
   cumulative  Decimal
   createdAt   DateTime @default(now())
 

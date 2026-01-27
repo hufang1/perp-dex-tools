@@ -77,6 +77,8 @@ export async function POST(req: NextRequest) {
           closeSpread: p.close_spread ?? 0,
           idealRate: p.ideal_rate ?? 0,
           actualRate: p.actual_rate ?? 0,
+          fundsDelta: p.funds_delta ?? 0,
+          fundsCum: p.funds_cumulative ?? 0,
         },
       })
     );

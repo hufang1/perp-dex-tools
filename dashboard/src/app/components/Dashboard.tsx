@@ -357,6 +357,9 @@ export default function Dashboard() {
 
   const pnlOption = useMemo(() => {
     const labels = pnlSeries.map((p) => p.t);
+    const totalFundsSeries = positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0));
+    const tradeFundsDeltaSeries = pnlSeries.map((p) => p.fundsDelta ?? 0);
+    const tradeFundsCumSeries = pnlSeries.map((p) => p.fundsCum ?? 0);
     return {
       tooltip: { trigger: "axis" },
       legend: { textStyle: { color: "#c7d6ce" } },
@@ -417,8 +420,24 @@ export default function Dashboard() {
           type: "line",
           smooth: true,
           yAxisIndex: 1,
-          data: positionSeries.map((p) => (p.extTotal ?? 0) + (p.ligTotal ?? 0)),
+          data: totalFundsSeries,
           lineStyle: { color: "#7bdff2" },
+        },
+        {
+          name: "单笔实际收益(USDT)",
+          type: "line",
+          smooth: true,
+          yAxisIndex: 1,
+          data: tradeFundsDeltaSeries,
+          lineStyle: { color: "#5bb2ff" },
+        },
+        {
+          name: "累计实际收益(USDT)",
+          type: "line",
+          smooth: true,
+          yAxisIndex: 1,
+          data: tradeFundsCumSeries,
+          lineStyle: { color: "#ffb86b" },
         },
       ],
     };

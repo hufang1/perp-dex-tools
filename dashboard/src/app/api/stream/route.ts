@@ -74,6 +74,8 @@ export async function GET(request: Request) {
               close: Number(pnl.closeSpread),
               ideal: Number(pnl.idealRate),
               actual: Number(pnl.actualRate),
+              fundsDelta: Number(pnl.fundsDelta ?? 0),
+              fundsCum: Number(pnl.fundsCum ?? 0),
               cumulative: Number(pnl.cumulative),
             };
           }

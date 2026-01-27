@@ -69,6 +69,8 @@ export async function GET(req: NextRequest) {
       close: Number(p.closeSpread),
       ideal: Number(p.idealRate),
       actual: Number(p.actualRate),
+      fundsDelta: Number(p.fundsDelta ?? 0),
+      fundsCum: Number(p.fundsCum ?? 0),
       cumulative: Number(p.cumulative),
     })),
   };

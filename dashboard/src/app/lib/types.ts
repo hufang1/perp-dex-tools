@@ -32,6 +32,8 @@ export type MetricsResponse = {
     close: number;
     ideal: number;
     actual: number;
+    fundsDelta?: number;
+    fundsCum?: number;
     cumulative: number;
   }[];
   latest?: {
