@@ -173,6 +173,8 @@ class SpreadArbBot:
         self._run_fees: Decimal = Decimal("0")
         self._last_trade_funds_delta: Decimal = Decimal("0")
         self._cum_trade_funds_delta: Decimal = Decimal("0")
+        self._session_start_funds: Optional[Decimal] = None
+        self._floating_base_funds: Optional[Decimal] = None
         self._boll_samples: deque = deque()
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
@@ -1297,13 +1299,26 @@ class SpreadArbBot:
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
                     ext_avg = lig_avg = None
+                    for _ in range(3):
+                        try:
+                            ext_pos = await self.extended_client.get_detailed_position()
+                            lig_pos = await self.lighter_client.get_detailed_position()
+                            ext_avg = ext_pos.get('avg_price') if ext_pos else None
+                            lig_avg = lig_pos.get('avg_price') if lig_pos else None
+                        except Exception as e:
+                            logger.debug(f"获取开仓均价失败，使用成交价: {e}")
+                        if ext_avg and lig_avg:
+                            break
+                        await asyncio.sleep(0.5)
+
                     try:
-                        ext_pos = await self.extended_client.get_detailed_position()
-                        lig_pos = await self.lighter_client.get_detailed_position()
-                        ext_avg = ext_pos.get('avg_price') if ext_pos else None
-                        lig_avg = lig_pos.get('avg_price') if lig_pos else None
-                    except Exception as e:
-                        logger.debug(f"获取开仓均价失败，使用成交价: {e}")
+                        snapshot = await self.position_balance_monitor.get_position_balance()
+                        if snapshot and snapshot.extended and snapshot.lighter:
+                            self._floating_base_funds = (
+                                snapshot.extended.total_balance + snapshot.lighter.total_balance
+                            )
+                    except Exception:
+                        pass
 
                     self._notify_open_success(ext_position, lig_position, ext_avg=ext_avg, lig_avg=lig_avg)
                     self.close_strategy.add_position(self._pending_open_position)
@@ -4092,6 +4107,10 @@ class SpreadArbBot:
                 "ligVolume": float(self._run_lig_volume),
                 "totalVolume": float(self._run_total_volume),
             }
+            total_funds = ext_total + lig_total
+            if total_funds > 0:
+                if self._session_start_funds is None:
+                    self._session_start_funds = total_funds
             # 记录当前利润（价差口径），并带上累计收益（USDT）
             try:
                 entry_spread = self.close_strategy.get_weighted_avg_spread()
@@ -4104,6 +4123,12 @@ class SpreadArbBot:
                 if self.state_manager.get_state() == BotState.CLOSING_TAKER:
                     actual_profit -= fee_rate
                 stats = self.state_manager.get_stats()
+                floating_delta = Decimal("0")
+                floating_cum = Decimal("0")
+                if self._floating_base_funds is not None and total_funds > 0:
+                    floating_delta = total_funds - self._floating_base_funds
+                if self._session_start_funds is not None and total_funds > 0:
+                    floating_cum = total_funds - self._session_start_funds
                 payload["pnl"] = {
                     "entry_spread": float(entry_spread),
                     "close_spread": float(close_spread),
@@ -4111,8 +4136,8 @@ class SpreadArbBot:
                     "actual_rate": float(actual_profit),
                     "profit": float(profit_spread),
                     "cumulative": float(stats.total_profit if stats else Decimal("0")),
-                    "funds_delta": float(self._last_trade_funds_delta),
-                    "funds_cumulative": float(self._cum_trade_funds_delta),
+                    "funds_delta": float(floating_delta),
+                    "funds_cumulative": float(floating_cum),
                 }
             except Exception as e:
                 logger.debug(f"Dashboard利润计算失败: {e}")
