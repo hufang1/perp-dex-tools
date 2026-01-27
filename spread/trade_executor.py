@@ -159,16 +159,16 @@ class TradeExecutor:
             ext_price, lig_price = price_snapshot.calculate_taker_prices()
 
             # Step 5: 验证价格一致性
-            if not price_snapshot.validate_price_consistency():
-                logger.error(
-                    f"价差异常: ext买入={ext_price:.2f} >= lig卖出={lig_price:.2f}, "
-                    f"跳过此次开仓（套利无盈利空间）"
-                )
-                return ExecutionResult(
-                    success=False,
-                    error_message=f"价差异常: ext={ext_price:.2f} >= lig={lig_price:.2f}",
-                    execution_time=time.time() - start_time
-                )
+            # if not price_snapshot.validate_price_consistency():
+            #     logger.error(
+            #         f"价差异常: ext买入={ext_price:.2f} >= lig卖出={lig_price:.2f}, "
+            #         f"跳过此次开仓（套利无盈利空间）"
+            #     )
+            #     return ExecutionResult(
+            #         success=False,
+            #         error_message=f"价差异常: ext={ext_price:.2f} >= lig={lig_price:.2f}",
+            #         execution_time=time.time() - start_time
+            #     )
 
             # Step 6: 记录价格同步日志
             spread_pct = (ext_price / lig_price - 1) * 100 if lig_price > 0 else 0
