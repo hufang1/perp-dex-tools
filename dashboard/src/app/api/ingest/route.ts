@@ -21,6 +21,10 @@ export async function POST(req: NextRequest) {
           midline: s.mid,
           upper: s.upper,
           lower: s.lower,
+          openMakerThreshold: s.openMaker ?? 0,
+          openTakerThreshold: s.openTaker ?? 0,
+          closeMarketThreshold: s.closeMarket ?? 0,
+          closeLimitThreshold: s.closeLimit ?? 0,
           extBid: s.extBid,
           extAsk: s.extAsk,
           ligBid: s.ligBid,
@@ -45,6 +49,10 @@ export async function POST(req: NextRequest) {
           extVolume: p.extVolume ?? 0,
           ligVolume: p.ligVolume ?? 0,
           totalVolume: p.totalVolume ?? 0,
+          extOpenTakerVolume: p.extOpenTakerVolume ?? 0,
+          extOpenMakerVolume: p.extOpenMakerVolume ?? 0,
+          ligOpenTakerVolume: p.ligOpenTakerVolume ?? 0,
+          ligOpenMakerVolume: p.ligOpenMakerVolume ?? 0,
         },
       })
     );

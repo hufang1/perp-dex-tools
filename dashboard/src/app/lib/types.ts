@@ -5,6 +5,10 @@ export type SpreadPoint = {
   mid: number;
   upper: number;
   lower: number;
+  openMaker?: number;
+  openTaker?: number;
+  closeMarket?: number;
+  closeLimit?: number;
 };
 
 export type PositionPoint = {
@@ -18,6 +22,10 @@ export type PositionPoint = {
   extVolume?: number;
   ligVolume?: number;
   totalVolume?: number;
+  extOpenTakerVolume?: number;
+  extOpenMakerVolume?: number;
+  ligOpenTakerVolume?: number;
+  ligOpenMakerVolume?: number;
   profitRate?: number;
 };
 

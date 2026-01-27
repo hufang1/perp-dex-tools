@@ -17,6 +17,10 @@ model SpreadSample {
   midline    Decimal
   upper      Decimal
   lower      Decimal
+  openMakerThreshold Decimal @default(0)
+  openTakerThreshold Decimal @default(0)
+  closeMarketThreshold Decimal @default(0)
+  closeLimitThreshold Decimal @default(0)
   extBid     Decimal
   extAsk     Decimal
   ligBid     Decimal
@@ -38,6 +42,10 @@ model PositionSnapshot {
   extVolume      Decimal @default(0)
   ligVolume      Decimal @default(0)
   totalVolume    Decimal @default(0)
+  extOpenTakerVolume Decimal @default(0)
+  extOpenMakerVolume Decimal @default(0)
+  ligOpenTakerVolume Decimal @default(0)
+  ligOpenMakerVolume Decimal @default(0)
   createdAt      DateTime @default(now())
 
   @@index([symbol, createdAt])

@@ -49,6 +49,10 @@ export async function GET(req: NextRequest) {
       mid: Number(s.midline),
       upper: Number(s.upper),
       lower: Number(s.lower),
+      openMaker: Number(s.openMakerThreshold ?? 0),
+      openTaker: Number(s.openTakerThreshold ?? 0),
+      closeMarket: Number(s.closeMarketThreshold ?? 0),
+      closeLimit: Number(s.closeLimitThreshold ?? 0),
     })),
     positions: positions.map((p, idx) => ({
       t: p.createdAt.toISOString(),
@@ -61,6 +65,10 @@ export async function GET(req: NextRequest) {
       extVolume: Number(p.extVolume ?? 0),
       ligVolume: Number(p.ligVolume ?? 0),
       totalVolume: Number(p.totalVolume ?? 0),
+      extOpenTakerVolume: Number(p.extOpenTakerVolume ?? 0),
+      extOpenMakerVolume: Number(p.extOpenMakerVolume ?? 0),
+      ligOpenTakerVolume: Number(p.ligOpenTakerVolume ?? 0),
+      ligOpenMakerVolume: Number(p.ligOpenMakerVolume ?? 0),
       profitRate: pnls[idx] ? Number(pnls[idx].profit) : 0,
     })),
     pnls: pnls.map((p) => ({

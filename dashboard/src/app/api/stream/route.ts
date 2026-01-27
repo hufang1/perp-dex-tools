@@ -49,6 +49,10 @@ export async function GET(request: Request) {
               mid: Number(spread.midline),
               upper: Number(spread.upper),
               lower: Number(spread.lower),
+              openMaker: Number(spread.openMakerThreshold ?? 0),
+              openTaker: Number(spread.openTakerThreshold ?? 0),
+              closeMarket: Number(spread.closeMarketThreshold ?? 0),
+              closeLimit: Number(spread.closeLimitThreshold ?? 0),
             };
           }
           if (position) {
@@ -64,6 +68,10 @@ export async function GET(request: Request) {
               extVolume: Number(position.extVolume ?? 0),
               ligVolume: Number(position.ligVolume ?? 0),
               totalVolume: Number(position.totalVolume ?? 0),
+              extOpenTakerVolume: Number(position.extOpenTakerVolume ?? 0),
+              extOpenMakerVolume: Number(position.extOpenMakerVolume ?? 0),
+              ligOpenTakerVolume: Number(position.ligOpenTakerVolume ?? 0),
+              ligOpenMakerVolume: Number(position.ligOpenMakerVolume ?? 0),
               profitRate: pnl ? Number(pnl.profit) : 0,
             };
           }

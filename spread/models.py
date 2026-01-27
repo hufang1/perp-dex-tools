@@ -460,17 +460,17 @@ class BotConfig:
         return self.initial_open_spread + (self.successful_opening_count * self.spread_step)
 
     # 双模式平仓配置
-    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.00025"))
+    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.00005"))
     """
     限价平仓阈值A
-    - 默认0.2% = 0.002
+    - 默认0.005% = 0.00005
     - 用于判断是否使用限价平仓
     """
 
-    market_close_spread_b: Decimal = field(default_factory=lambda: Decimal("0.0005"))
+    market_close_spread_b: Decimal = field(default_factory=lambda: Decimal("0.0001"))
     """
     市价平仓阈值B
-    - 默认0.4% = 0.004
+    - 默认0.01% = 0.0001
     - 用于判断是否使用市价平仓
     - 必须大于 limit_close_spread_a
     """
@@ -496,6 +496,15 @@ class BotConfig:
     boll_k: Decimal = field(default_factory=lambda: Decimal("2"))
     """布林带标准差倍数"""
 
+    open_taker_sigma: Decimal = field(default_factory=lambda: Decimal("2.5"))
+    """市价开仓触发Sigma倍数（突破该值触发市价开仓）"""
+
+    open_maker_sigma: Decimal = field(default_factory=lambda: Decimal("1.75"))
+    """挂单开仓触发Sigma倍数（突破该值触发挂单开仓）"""
+
+    open_sigma_penalty: Decimal = field(default_factory=lambda: Decimal("0.5"))
+    """库存倾斜惩罚系数（Sigma上移系数）"""
+
     boll_sample_interval: float = 1.0
     """布林带采样间隔（秒）"""
 
@@ -513,18 +522,12 @@ class BotConfig:
     """是否推送开仓触发（信号）"""
 
 
+    # 已弃用：旧的上轨+gap开仓逻辑，仅保留兼容字段
     open_taker_gap_bps: Decimal = field(default_factory=lambda: Decimal("0.0002"))
-    """
-    开仓市价触发阈值：上轨 + gap
-    - 默认0.02% = 0.0002
-    """
+    """[deprecated] 旧的上轨+gap开仓参数（布林带σ策略不使用）"""
 
     open_taker_on_upper: bool = True
-    """
-    是否在价差超过上轨时使用市价开仓
-    - True: 超过上轨时直接市价开仓
-    - False: 超过上轨先挂单，超过 (上轨 + gap) 才市价开仓
-    """
+    """[deprecated] 旧的上轨市价开仓开关（布林带σ策略不使用）"""
 
     close_market_on_lower: bool = False
     """
@@ -621,6 +624,14 @@ class BotConfig:
         if self.boll_window_minutes <= 0:
             return False
         if self.boll_k <= 0:
+            return False
+        if self.open_taker_sigma <= 0:
+            return False
+        if self.open_maker_sigma <= 0:
+            return False
+        if self.open_taker_sigma <= self.open_maker_sigma:
+            return False
+        if self.open_sigma_penalty < 0:
             return False
         if self.boll_sample_interval <= 0:
             return False
