@@ -3619,7 +3619,8 @@ class SpreadArbBot:
                 max_ext = abs(ext_position) if ext_position is not None else Decimal("0")
                 max_lig = abs(lig_position) if lig_position is not None else Decimal("0")
                 if is_opening:
-                    capped_qty = min(ext_filled_qty, max_ext, max_lig)
+                    # 开仓对冲：仅以Ext实际仓位为上限（Lig尚未对冲时为0）
+                    capped_qty = min(ext_filled_qty, max_ext)
                 else:
                     # 平仓：以lig现有仓位为上限，避免过度对冲
                     capped_qty = min(ext_filled_qty, max_lig)
