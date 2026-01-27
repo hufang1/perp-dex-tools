@@ -508,10 +508,10 @@ class BotConfig:
     open_maker_confirm_seconds: float = 2.0
     """挂单开仓确认窗（秒）"""
 
-    open_maker_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.25"))
+    open_maker_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.3"))
     """挂单开仓撤销滞回（Sigma）"""
 
-    close_limit_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.1"))
+    close_limit_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.5"))
     """挂单平仓触发阈值（Sigma，入场更严格）"""
 
     boll_sample_interval: float = 1.0
