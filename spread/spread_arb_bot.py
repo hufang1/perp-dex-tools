@@ -3430,6 +3430,8 @@ class SpreadArbBot:
                     else:
                         lig_vwap = lig_vwap * (Decimal("1") - slip)
                     logger.info(f"Lighter对冲VWAP(含滑点): {lig_vwap} | slip={slip}")
+                else:
+                    logger.info("Lighter对冲VWAP为空或无效，准备使用BBO")
             except Exception as e:
                 logger.warning(f"计算Lighter VWAP失败，使用BBO: {e}")
 
