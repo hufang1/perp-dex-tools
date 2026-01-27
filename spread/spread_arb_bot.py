@@ -592,7 +592,7 @@ class SpreadArbBot:
                 ext_position = await self.extended_client.get_account_positions()
                 lig_position = await self.lighter_client.get_account_positions()
 
-                tolerance = Decimal("0.001")
+                tolerance = Decimal("0.0001")
                 has_positions = abs(ext_position) > tolerance or abs(lig_position) > tolerance
 
                 if not has_positions:
@@ -4781,6 +4781,8 @@ class SpreadArbBot:
         """OPENING_MAKER_WAIT状态：价差保护"""
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             return False
+        if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
+            return False
 
         order_id = self._maker_wait_state.current_order.order_id
 
@@ -4850,6 +4852,8 @@ class SpreadArbBot:
     async def _handle_opening_maker_wait_spread_close_preempt(self, spread_info, **_) -> bool:
         """OPENING_MAKER_WAIT状态：平仓信号处理"""
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+        if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
             return False
 
         order_id = self._maker_wait_state.current_order.order_id
@@ -4932,6 +4936,8 @@ class SpreadArbBot:
     async def _handle_opening_maker_wait_spread_escalate(self, spread_info, **_) -> bool:
         """OPENING_MAKER_WAIT状态：达到市价阈值则撤单并改为市价开仓"""
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+        if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
             return False
         if not spread_info or not spread_info.is_valid():
             return False
