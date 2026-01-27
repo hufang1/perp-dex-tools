@@ -1116,6 +1116,8 @@ class HedgingState:
         lighter_quantity: Lighter对冲数量
         start_time: 对冲开始时间
         timeout: 对冲超时时间（默认3秒）
+        is_closing: 是否为平仓对冲
+        source: 对冲触发来源（ws_fill / price_check / recover / unknown）
     """
     ext_filled_quantity: Decimal = field(default_factory=lambda: Decimal('0'))
     ext_filled_price: Decimal = field(default_factory=lambda: Decimal('0'))
@@ -1123,6 +1125,8 @@ class HedgingState:
     lighter_quantity: Decimal = field(default_factory=lambda: Decimal('0'))
     start_time: datetime = field(default_factory=datetime.now)
     timeout: float = 3.0
+    is_closing: bool = False
+    source: str = "unknown"
 
     def is_timeout(self) -> bool:
         """是否超时"""
@@ -1136,6 +1140,8 @@ class HedgingState:
         self.lighter_order_id = None
         self.lighter_quantity = Decimal('0')
         self.start_time = datetime.now()
+        self.is_closing = False
+        self.source = "unknown"
 
 
 @dataclass

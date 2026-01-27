@@ -2816,6 +2816,7 @@ class SpreadArbBot:
                 self._hedging_state.ext_filled_quantity = order.filled_quantity
                 self._hedging_state.ext_filled_price = order.avg_fill_price
                 self._hedging_state.start_time = datetime.now()
+                self._hedging_state.source = "ws_fill"
 
                 is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
                 if is_opening:
@@ -2912,6 +2913,7 @@ class SpreadArbBot:
             self._hedging_state.ext_filled_quantity = hedge_qty
             self._hedging_state.ext_filled_price = order.avg_fill_price
             self._hedging_state.start_time = datetime.now()
+            self._hedging_state.source = "recover"
 
             if order.is_opening:
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, "成交晚到，补Lighter开仓对冲")
@@ -3040,6 +3042,7 @@ class SpreadArbBot:
                 self._hedging_state.ext_filled_quantity = order.filled_quantity
                 self._hedging_state.ext_filled_price = order.avg_fill_price
                 self._hedging_state.start_time = datetime.now()
+                self._hedging_state.source = "ws_fill"
 
                 is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
                 if is_opening:
@@ -3609,24 +3612,31 @@ class SpreadArbBot:
             # 额外保护：根据实盘仓位限制对冲数量，避免Ext未成交/延迟导致Lig单边
             try:
                 ext_position = lig_position = None
-                for attempt in range(2):
+                ws_fast_path = bool(is_opening and getattr(self._hedging_state, "source", "unknown") == "ws_fill")
+                attempts = 1 if ws_fast_path else 5
+                for attempt in range(attempts):
                     ext_position = await self.extended_client.get_account_positions()
                     lig_position = await self.lighter_client.get_account_positions()
                     if abs(ext_position) > Decimal("0") or abs(lig_position) > Decimal("0"):
                         break
-                    await asyncio.sleep(0.2)
+                    if attempt < attempts - 1:
+                        await asyncio.sleep(0.2)
+
                 tolerance = Decimal("0.001")
                 max_ext = abs(ext_position) if ext_position is not None else Decimal("0")
                 max_lig = abs(lig_position) if lig_position is not None else Decimal("0")
                 if is_opening:
-                    # 开仓对冲：仅以Ext实际仓位为上限（Lig尚未对冲时为0）
-                    capped_qty = min(ext_filled_qty, max_ext)
+                    if ws_fast_path:
+                        capped_qty = ext_filled_qty
+                    else:
+                        capped_qty = min(ext_filled_qty, max_ext)
                 else:
                     # 平仓：以lig现有仓位为上限，避免过度对冲
                     capped_qty = min(ext_filled_qty, max_lig)
                 if capped_qty < tolerance:
                     logger.warning(
-                        f"对冲跳过 | ext_pos={ext_position} lig_pos={lig_position} ext_filled={ext_filled_qty}"
+                        f"对冲跳过 | ext_pos={ext_position} lig_pos={lig_position} ext_filled={ext_filled_qty} "
+                        f"source={getattr(self._hedging_state, 'source', 'unknown')}"
                     )
                     self._notify_fill_verify_failed(
                         is_opening=is_opening,
@@ -5530,9 +5540,10 @@ class SpreadArbBot:
                     if not hasattr(self, '_hedging_state'):
                         from models import HedgingState
                         self._hedging_state = HedgingState()
-                    self._hedging_state.ext_filled_quantity = old_order.quantity
-                    self._hedging_state.ext_filled_price = old_order.price
-                    self._hedging_state.start_time = datetime.now()
+                self._hedging_state.ext_filled_quantity = old_order.quantity
+                self._hedging_state.ext_filled_price = old_order.price
+                self._hedging_state.start_time = datetime.now()
+                self._hedging_state.source = "price_check"
 
                     is_opening = (self.state_manager.get_state() == BotState.OPENING_MAKER_WAIT)
                     if is_opening:
