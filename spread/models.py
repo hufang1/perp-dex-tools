@@ -460,7 +460,7 @@ class BotConfig:
         return self.initial_open_spread + (self.successful_opening_count * self.spread_step)
 
     # 双模式平仓配置
-    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.00015"))
+    limit_close_spread_a: Decimal = field(default_factory=lambda: Decimal("0.00025"))
     """
     限价平仓阈值A
     - 默认0.2% = 0.002
