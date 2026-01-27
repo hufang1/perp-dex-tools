@@ -520,6 +520,10 @@ class SpreadArbBot:
                 await self.state_manager.save_state()
                 return
 
+            # 开仓阶段：仅在进入OPENING_WAIT时做单边回滚，避免对冲中误判
+            if next_state != BotState.OPENING_WAIT:
+                return
+
             pending_qty = None
             if hasattr(self, "_pending_open_position") and self._pending_open_position:
                 pending_qty = self._pending_open_position.quantity
