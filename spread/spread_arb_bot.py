@@ -178,6 +178,8 @@ class SpreadArbBot:
         self._maker_close_fail_count: int = 0
         self._last_maker_order_id: Optional[str] = None
         self._last_maker_is_opening: Optional[bool] = None
+        self._last_maker_context_id: Optional[str] = None
+        self._last_maker_context_state: Optional[BotState] = None
         self._last_state_seen: Optional[BotState] = None
         self._alignment_check_in_progress: bool = False
         self._last_maker_recovery_check_time: float = 0.0
@@ -775,6 +777,7 @@ class SpreadArbBot:
     async def _process_opening_maker_mode(self, spread_info) -> None:
         """处理Maker模式开仓"""
         try:
+            from uuid import uuid4
             pre_ext_pos = None
             pre_lig_pos = None
             try:
@@ -798,17 +801,22 @@ class SpreadArbBot:
             if not hasattr(self, '_maker_wait_state'):
                 self._maker_wait_state = MakerWaitState()
 
+            context_id = f"maker-{uuid4().hex}"
             self._maker_wait_state.current_order = MakerOrder(
                 order_id=result.extended_order_id,
                 price=result.extended_price,
                 quantity=self.config.target_quantity,
                 side='buy',
-                is_opening=True
+                is_opening=True,
+                context_id=context_id
             )
             self._maker_wait_state.ext_position_before = pre_ext_pos
             self._maker_wait_state.lig_position_before = pre_lig_pos
+            self._maker_wait_state.context_id = context_id
             self._last_maker_order_id = str(result.extended_order_id)
             self._last_maker_is_opening = True
+            self._last_maker_context_id = context_id
+            self._last_maker_context_state = BotState.OPENING_MAKER_WAIT
             self._maker_wait_state.start_time = datetime.now()
 
             # 启动 WebSocket 订单监控
@@ -1128,6 +1136,7 @@ class SpreadArbBot:
         total_quantity = portfolio.total_quantity
 
         try:
+            from uuid import uuid4
             pre_ext_pos = None
             pre_lig_pos = None
             try:
@@ -1161,17 +1170,22 @@ class SpreadArbBot:
             if not hasattr(self, '_maker_wait_state'):
                 self._maker_wait_state = MakerWaitState()
 
+            context_id = f"maker-{uuid4().hex}"
             self._maker_wait_state.current_order = MakerOrder(
                 order_id=result.extended_order_id,
                 price=result.extended_price,
                 quantity=total_quantity,
                 side='sell',  # 平仓卖出
-                is_opening=False  # 标记为平仓订单
+                is_opening=False,  # 标记为平仓订单
+                context_id=context_id
             )
             self._maker_wait_state.ext_position_before = pre_ext_pos
             self._maker_wait_state.lig_position_before = pre_lig_pos
+            self._maker_wait_state.context_id = context_id
             self._last_maker_order_id = str(result.extended_order_id)
             self._last_maker_is_opening = False
+            self._last_maker_context_id = context_id
+            self._last_maker_context_state = BotState.CLOSING_MAKER_WAIT
             self._maker_wait_state.start_time = datetime.now()
 
             # 启动 WebSocket 订单监控
@@ -2748,7 +2762,16 @@ class SpreadArbBot:
 
                 # 确保是当前订单
                 if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
-                    if self._maker_wait_state.current_order.order_id != order.order_id:
+                    if self._maker_wait_state.context_id and order.context_id is None:
+                        order.context_id = self._maker_wait_state.context_id
+                    if (
+                        self._maker_wait_state.current_order.order_id != order.order_id or
+                        (
+                            self._maker_wait_state.context_id and
+                            order.context_id and
+                            self._maker_wait_state.context_id != order.context_id
+                        )
+                    ):
                         logger.info(f"订单成交非当前订单，跳过 | order_id={order.order_id}")
                         return
 
@@ -2808,6 +2831,36 @@ class SpreadArbBot:
     async def _recover_maker_fill_out_of_band(self, order: MakerOrder) -> None:
         """成交晚到：不在Maker等待状态时，尝试检测单边并补对冲"""
         try:
+            current_state = self.state_manager.get_state()
+            if current_state in [BotState.PAUSED, BotState.OPENING_TAKER, BotState.CLOSING_TAKER]:
+                logger.debug(f"补对冲跳过(非Maker状态): {current_state.value}")
+                return
+
+            if self._last_maker_is_opening is None:
+                logger.debug("补对冲跳过: 无Maker上下文")
+                return
+            if not self._last_maker_context_id or not self._last_maker_context_state:
+                logger.debug(
+                    "补对冲跳过: Maker上下文不完整 | "
+                    f"ctx={self._last_maker_context_id} state={self._last_maker_context_state}"
+                )
+                return
+            if self._last_maker_context_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
+                logger.debug(
+                    "补对冲跳过: 非Maker等待上下文 | "
+                    f"state={self._last_maker_context_state.value}"
+                )
+                return
+            if order.context_id is None:
+                logger.debug("补对冲跳过: 订单缺少context_id")
+                return
+            if order.context_id != self._last_maker_context_id:
+                logger.info(
+                    "成交订单context不匹配，忽略 | "
+                    f"order_id={order.order_id} ctx={order.context_id} last_ctx={self._last_maker_context_id}"
+                )
+                return
+
             if self._last_maker_order_id and str(order.order_id) != self._last_maker_order_id:
                 logger.info(
                     f"成交订单非最近Maker订单，忽略 | order_id={order.order_id} last={self._last_maker_order_id}"
@@ -2849,7 +2902,9 @@ class SpreadArbBot:
                 quantity=hedge_qty,
                 side=order.side,
                 is_opening=order.is_opening,
+                context_id=order.context_id,
             )
+            self._maker_wait_state.context_id = order.context_id
 
             if not hasattr(self, '_hedging_state'):
                 from models import HedgingState
@@ -2881,10 +2936,18 @@ class SpreadArbBot:
 
         if not self._last_maker_order_id:
             return
+        if self._last_maker_is_opening is None:
+            return
+        if not self._last_maker_context_id or not self._last_maker_context_state:
+            return
+        if self._last_maker_context_state not in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT]:
+            return
 
         # 若仍在Maker等待状态，交给主流程处理
         current_state = self.state_manager.get_state()
         if current_state in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT, BotState.LIGHTER_HEDGING]:
+            return
+        if current_state in [BotState.PAUSED, BotState.OPENING_TAKER, BotState.CLOSING_TAKER]:
             return
 
         try:
@@ -2916,6 +2979,7 @@ class SpreadArbBot:
                 is_opening=bool(self._last_maker_is_opening),
                 filled_quantity=filled_qty,
                 avg_fill_price=avg_price,
+                context_id=self._last_maker_context_id,
             )
             logger.warning(
                 f"兜底成交检测触发补对冲 | state={current_state.value} "
@@ -2949,7 +3013,16 @@ class SpreadArbBot:
 
                 # 确保是当前订单
                 if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
-                    if self._maker_wait_state.current_order.order_id != order.order_id:
+                    if self._maker_wait_state.context_id and order.context_id is None:
+                        order.context_id = self._maker_wait_state.context_id
+                    if (
+                        self._maker_wait_state.current_order.order_id != order.order_id or
+                        (
+                            self._maker_wait_state.context_id and
+                            order.context_id and
+                            self._maker_wait_state.context_id != order.context_id
+                        )
+                    ):
                         logger.info(f"订单部分成交非当前订单，跳过 | order_id={order.order_id}")
                         return
 
@@ -5488,17 +5561,24 @@ class SpreadArbBot:
 
                 if result.success:
                     # 6. 更新状态
+                    context_id = old_order.context_id or (
+                        self._maker_wait_state.context_id if hasattr(self, '_maker_wait_state') else None
+                    )
                     new_order = MakerOrder(
                         order_id=result.extended_order_id,
                         price=result.extended_price,
                         quantity=remaining_qty,
                         side=old_order.side,
-                        is_opening=is_opening
+                        is_opening=is_opening,
+                        context_id=context_id
                     )
                     self._maker_wait_state.current_order = new_order
                     self._maker_wait_state.reposition_count += 1
                     self._last_maker_order_id = str(result.extended_order_id)
                     self._last_maker_is_opening = is_opening
+                    if context_id:
+                        self._last_maker_context_id = context_id
+                        self._maker_wait_state.context_id = context_id
 
                     # 重新启动 WebSocket 订单监控（监控新订单）
                     self.maker_order_monitor.start_monitoring(new_order)
@@ -5631,6 +5711,7 @@ class SpreadArbBot:
         logger.info(f"执行限价平仓: 数量={total_quantity}")
 
         try:
+            from uuid import uuid4
             # 如果交易所已无仓位，直接回到IDLE
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
@@ -5681,17 +5762,22 @@ class SpreadArbBot:
                 self._maker_wait_state = MakerWaitState()
 
             # 创建MakerOrder对象
+            context_id = f"maker-{uuid4().hex}"
             close_order = MakerOrder(
                 order_id=result.extended_order_id,
                 price=result.extended_price,
                 quantity=effective_qty,
                 side='sell',  # 平仓时卖出
-                is_opening=False  # 标记为平仓订单
+                is_opening=False,  # 标记为平仓订单
+                context_id=context_id
             )
             self._last_maker_order_id = str(result.extended_order_id)
             self._last_maker_is_opening = False
+            self._last_maker_context_id = context_id
+            self._last_maker_context_state = BotState.CLOSING_MAKER_WAIT
 
             self._maker_wait_state.current_order = close_order
+            self._maker_wait_state.context_id = context_id
 
             logger.info(
                 f"✅ Extended Maker平仓订单已挂出 | "

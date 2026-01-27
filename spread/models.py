@@ -963,6 +963,7 @@ class MakerOrder:
         created_at: 创建时间
         updated_at: 最后更新时间
         is_opening: 是否为开仓订单（True=开仓, False=平仓）
+        context_id: 本次Maker上下文ID（用于补对冲校验）
     """
     order_id: str
     price: Decimal
@@ -974,6 +975,7 @@ class MakerOrder:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     is_opening: bool = True  # True for opening, False for closing
+    context_id: Optional[str] = None
 
     def update_from_websocket(self, order_data: dict) -> None:
         """
@@ -1053,6 +1055,7 @@ class MakerWaitState:
         needs_reposition: 是否需要重新挂单
         last_reposition_time: 上次重挂时间戳（用于冷却时间检查）
         is_repositioning: 是否正在重挂中（防止并发调用）
+        context_id: 本次Maker上下文ID（用于补对冲校验）
     """
     current_order: Optional[MakerOrder] = None
     start_time: datetime = field(default_factory=datetime.now)
@@ -1066,6 +1069,7 @@ class MakerWaitState:
     is_repositioning: bool = False  # 防止并发重挂
     ext_position_before: Optional[Decimal] = None  # 下单前Ext仓位
     lig_position_before: Optional[Decimal] = None  # 下单前Lig仓位
+    context_id: Optional[str] = None
 
     def reset(self) -> None:
         """重置状态"""
@@ -1080,6 +1084,7 @@ class MakerWaitState:
         self.is_repositioning = False  # 重置重挂标志
         self.ext_position_before = None
         self.lig_position_before = None
+        self.context_id = None
 
     def add_fill_record(self, order_id: str, filled_qty: Decimal) -> None:
         """添加成交记录"""

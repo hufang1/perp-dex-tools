@@ -319,7 +319,8 @@ def create_maker_order_from_result(
     price: Decimal,
     quantity: Decimal,
     side: str,
-    is_opening: bool = True
+    is_opening: bool = True,
+    context_id: Optional[str] = None
 ) -> 'MakerOrder':
     """
     从订单结果创建MakerOrder对象
@@ -340,5 +341,6 @@ def create_maker_order_from_result(
         price=price,
         quantity=quantity,
         side=side.lower(),
-        is_opening=is_opening
+        is_opening=is_opening,
+        context_id=context_id
     )
