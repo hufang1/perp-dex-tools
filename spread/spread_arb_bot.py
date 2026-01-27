@@ -734,6 +734,14 @@ class SpreadArbBot:
     async def _process_opening_maker_mode(self, spread_info) -> None:
         """处理Maker模式开仓"""
         try:
+            pre_ext_pos = None
+            pre_lig_pos = None
+            try:
+                pre_ext_pos = await self.extended_client.get_account_positions()
+                pre_lig_pos = await self.lighter_client.get_account_positions()
+            except Exception as e:
+                logger.debug(f"获取下单前仓位失败(开仓): {e}")
+
             # 下Extended Maker订单
             result = await self.trade_executor.place_maker_open_order(
                 self.config.target_quantity
@@ -756,6 +764,8 @@ class SpreadArbBot:
                 side='buy',
                 is_opening=True
             )
+            self._maker_wait_state.ext_position_before = pre_ext_pos
+            self._maker_wait_state.lig_position_before = pre_lig_pos
             self._last_maker_order_id = str(result.extended_order_id)
             self._last_maker_is_opening = True
             self._maker_wait_state.start_time = datetime.now()
@@ -1047,6 +1057,14 @@ class SpreadArbBot:
         total_quantity = portfolio.total_quantity
 
         try:
+            pre_ext_pos = None
+            pre_lig_pos = None
+            try:
+                pre_ext_pos = await self.extended_client.get_account_positions()
+                pre_lig_pos = await self.lighter_client.get_account_positions()
+            except Exception as e:
+                logger.debug(f"获取下单前仓位失败(平仓): {e}")
+
             # 下 Extended Maker 平仓订单
             result = await self.trade_executor.place_maker_close_order(total_quantity)
 
@@ -1079,6 +1097,8 @@ class SpreadArbBot:
                 side='sell',  # 平仓卖出
                 is_opening=False  # 标记为平仓订单
             )
+            self._maker_wait_state.ext_position_before = pre_ext_pos
+            self._maker_wait_state.lig_position_before = pre_lig_pos
             self._last_maker_order_id = str(result.extended_order_id)
             self._last_maker_is_opening = False
             self._maker_wait_state.start_time = datetime.now()
@@ -3446,6 +3466,11 @@ class SpreadArbBot:
                     logger.warning(
                         f"对冲跳过 | ext_pos={ext_position} lig_pos={lig_position} ext_filled={ext_filled_qty}"
                     )
+                    self._notify_fill_verify_failed(
+                        is_opening=is_opening,
+                        expected_qty=ext_filled_qty,
+                        source="lighter_hedge_guard"
+                    )
                     self._hedging_state.ext_filled_quantity = Decimal('0')
                     self.state_manager.set_state(
                         BotState.OPENING_WAIT if is_opening else BotState.CLOSING_WAIT,
@@ -4000,6 +4025,17 @@ class SpreadArbBot:
         if ext_pos is not None and lig_pos is not None:
             lines.append(f"仓位: Ext={ext_pos} Lig={lig_pos}")
         self._notify("❌ 开仓失败", lines)
+
+    def _notify_fill_verify_failed(self, is_opening: bool, expected_qty: Decimal, source: str) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"阶段: {'开仓' if is_opening else '平仓'}",
+            f"来源: {source}",
+            f"预期成交量: {expected_qty}",
+            "说明: Ext成交校验未通过，已阻止对冲",
+        ]
+        self._notify("⚠️ 成交校验失败", lines)
 
     def _notify_paused(self, reason: str) -> None:
         lines = [
@@ -4868,6 +4904,14 @@ class SpreadArbBot:
         order.filled_quantity = filled_qty
         order.avg_fill_price = avg_price
 
+        # 进入 LIGHTER_HEDGING 状态前做仓位变化确认
+        try:
+            if not await self._confirm_ext_position_change(is_opening, filled_qty):
+                logger.warning("成交校验失败，跳过对冲进入原状态切换")
+                return False
+        except Exception as e:
+            logger.debug(f"成交校验异常，继续原逻辑: {e}")
+
         # 进入 LIGHTER_HEDGING 状态对冲
         if not hasattr(self, '_hedging_state'):
             from models import HedgingState
@@ -4919,6 +4963,33 @@ class SpreadArbBot:
                 logger.warning(f"状态切换守卫异常: {e}")
         self.state_manager.set_state(next_state, reason)
         return False
+
+    async def _confirm_ext_position_change(self, is_opening: bool, expected_qty: Decimal) -> bool:
+        """
+        通过Ext仓位变化确认成交真实性，避免误判成交触发对冲
+        """
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state is None:
+            return True
+
+        before = self._maker_wait_state.ext_position_before
+        if before is None:
+            return True
+
+        try:
+            current = await self.extended_client.get_account_positions()
+        except Exception as e:
+            logger.debug(f"成交校验读取Ext仓位失败: {e}")
+            return True
+
+        delta = (abs(current) - abs(before)) if is_opening else (abs(before) - abs(current))
+        threshold = max(Decimal("0.001"), expected_qty * Decimal("0.2"))
+
+        logger.info(
+            f"成交校验 | is_opening={is_opening} | before={before} | current={current} | "
+            f"delta={delta} | expected={expected_qty} | threshold={threshold}"
+        )
+
+        return delta >= threshold
 
     async def _reposition_maker_order(self, is_opening: bool) -> None:
         """
@@ -4995,6 +5066,16 @@ class SpreadArbBot:
                 if remaining_qty <= 0:
                     print(f"✅ 订单已完全成交，无需重挂")
                     logger.info(f"订单已完全成交，无需重挂")
+
+                    # 成交校验：确认Ext仓位变化
+                    try:
+                        if not await self._confirm_ext_position_change(is_opening, old_order.quantity):
+                            logger.warning("成交校验失败，取消进入对冲，返回持仓状态")
+                            self.state_manager.set_state(BotState.HOLDING, "成交校验失败，返回持仓")
+                            await self.state_manager.save_state()
+                            return
+                    except Exception as e:
+                        logger.debug(f"成交校验异常，继续原逻辑: {e}")
 
                     # ========== 修复：订单已完全成交，需要切换到 LIGHTER_HEDGING 状态 ==========
                     # 停止监控当前订单

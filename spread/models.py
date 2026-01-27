@@ -1033,6 +1033,8 @@ class MakerWaitState:
     needs_reposition: bool = False
     last_reposition_time: float = 0.0  # 上次重挂时间戳
     is_repositioning: bool = False  # 防止并发重挂
+    ext_position_before: Optional[Decimal] = None  # 下单前Ext仓位
+    lig_position_before: Optional[Decimal] = None  # 下单前Lig仓位
 
     def reset(self) -> None:
         """重置状态"""
@@ -1045,6 +1047,8 @@ class MakerWaitState:
         self.needs_reposition = False
         self.last_reposition_time = 0.0
         self.is_repositioning = False  # 重置重挂标志
+        self.ext_position_before = None
+        self.lig_position_before = None
 
     def add_fill_record(self, order_id: str, filled_qty: Decimal) -> None:
         """添加成交记录"""
