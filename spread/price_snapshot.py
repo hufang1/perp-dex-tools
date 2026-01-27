@@ -86,8 +86,8 @@ class PriceSnapshot:
                 - ext_price: Price to use for Extended taker buy order
                 - lig_price: Price to use for Lighter taker sell order
         """
-        ext_price = self.ext_ask * Decimal('1.0005')
-        lig_price = self.lig_bid * Decimal('0.9995')
+        ext_price = self.ext_ask * Decimal('1.0003')
+        lig_price = self.lig_bid * Decimal('0.9997')
         return ext_price, lig_price
 
     def validate_price_consistency(self) -> bool:
