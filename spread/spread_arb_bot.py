@@ -1510,7 +1510,7 @@ class SpreadArbBot:
                 self._run_profit += profit
                 self._run_fees += fees
 
-                self._notify_close_success(profit)
+                await self._notify_close_success(profit)
 
                 self.state_manager.set_state(BotState.IDLE, f"平仓成功: 利润=${profit:.2f}")
                 await self.state_manager.save_state()
@@ -1541,6 +1541,9 @@ class SpreadArbBot:
                     self._notify_paused(reason)
                     await self.state_manager.save_state()
                     return
+
+                # 强平成功：发送平仓成功消息（以资金变化为准）
+                await self._notify_close_success(Decimal("0"))
 
                 # ========== 新增：强平成功后，根据当前价差决定下一步状态 ==========
                 spread_info = self.spread_monitor.get_current_spread()
@@ -3854,6 +3857,7 @@ class SpreadArbBot:
             "profit_spread": decision.get("profit_spread", Decimal("0")),
             "ext_bid": close_spread_info.ext_bid,
             "lig_ask": close_spread_info.lig_ask,
+            "entry_spread": self.close_strategy.get_weighted_avg_spread(),
         }
 
     def _notify_open_success(self, ext_pos: Decimal, lig_pos: Decimal) -> None:
@@ -3903,28 +3907,33 @@ class SpreadArbBot:
         ]
         self._notify("📈 开仓触发信号", lines)
 
-    def _notify_close_success(self, profit: Decimal) -> None:
+    async def _notify_close_success(self, profit: Decimal) -> None:
         ctx = self._last_close_context or {}
         mode = ctx.get("mode", "未知")
         close_spread = ctx.get("close_spread", Decimal("0"))
-        profit_spread = ctx.get("profit_spread", Decimal("0"))
         ext_bid = ctx.get("ext_bid", Decimal("0"))
         lig_ask = ctx.get("lig_ask", Decimal("0"))
-        entry_spread = self.close_strategy.get_weighted_avg_spread()
+        entry_spread = ctx.get("entry_spread", self.close_strategy.get_weighted_avg_spread())
+
         ideal_rate = entry_spread - close_spread
         fee_rate = Decimal("0.000225")
         actual_rate = ideal_rate
         if self.close_strategy.portfolio.has_open_taker():
             actual_rate -= fee_rate
-        if self.state_manager.get_state() == BotState.CLOSING_TAKER:
+        if mode == "市价":
             actual_rate -= fee_rate
-        total_funds = Decimal("0")
+
+        total_funds_after = Decimal("0")
         try:
-            snapshot = getattr(self.position_balance_monitor, "_cached_snapshot", None)
-            if snapshot and snapshot.is_valid():
-                total_funds = snapshot.extended.total_balance + snapshot.lighter.total_balance
+            snapshot = await self.position_balance_monitor.get_position_balance()
+            if snapshot and snapshot.extended and snapshot.lighter:
+                total_funds_after = snapshot.extended.total_balance + snapshot.lighter.total_balance
         except Exception:
             pass
+
+        total_funds_before = ctx.get("funds_before", Decimal("0"))
+        funds_delta = total_funds_after - total_funds_before if total_funds_before else profit
+
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
@@ -3934,11 +3943,10 @@ class SpreadArbBot:
             f"平均开仓价差: {entry_spread:.3%}",
             f"理想收益率: {ideal_rate:.3%}",
             f"实际收益率: {actual_rate:.3%}",
-            f"利润率: {profit_spread:.3%}",
             f"Ext平仓价: {ext_bid:.2f}",
             f"Lig平仓价: {lig_ask:.2f}",
-            f"两边总资金: {total_funds:.2f}",
-            f"收益: {profit:.2f}",
+            f"两边总资金(平仓后): {total_funds_after:.2f}",
+            f"收益(资金变化): {funds_delta:.2f}",
         ]
         self._notify("✅ 平仓成功", lines)
 
@@ -3963,6 +3971,19 @@ class SpreadArbBot:
         self._run_ext_volume += max(Decimal("0"), ext_notional)
         self._run_lig_volume += max(Decimal("0"), lig_notional)
         self._run_total_volume = self._run_ext_volume + self._run_lig_volume
+
+    async def _capture_close_funds_before(self) -> None:
+        if not self._last_close_context:
+            self._last_close_context = {}
+        if self._last_close_context.get("funds_before"):
+            return
+        try:
+            snapshot = await self.position_balance_monitor.get_position_balance()
+            if snapshot and snapshot.extended and snapshot.lighter:
+                total_funds = snapshot.extended.total_balance + snapshot.lighter.total_balance
+                self._last_close_context["funds_before"] = total_funds
+        except Exception:
+            pass
 
     async def _maybe_send_dashboard_snapshot(self, spread_info) -> None:
         """按采样频率写入Dashboard数据（非阻塞）"""
@@ -4236,6 +4257,7 @@ class SpreadArbBot:
         # 根据利润水平选择平仓模式
         total_quantity = self.close_strategy.get_total_quantity()
         self._set_close_context(decision, close_spread_info)
+        await self._capture_close_funds_before()
 
         if decision["use_market"]:
             # 市价平仓：立即执行
@@ -4296,6 +4318,7 @@ class SpreadArbBot:
 
         # 根据决策执行平仓
         self._set_close_context(decision, close_spread_info)
+        await self._capture_close_funds_before()
         close_mode = "市价" if decision["use_market"] else "限价挂单"
         self._log_spread_rule(
             "info",
@@ -4406,6 +4429,7 @@ class SpreadArbBot:
             if decision["should_close"]:
                 async with self._maker_lock("open_close_preempt"):
                     self._set_close_context(decision, close_spread_info)
+                    await self._capture_close_funds_before()
                     # 需要平仓，取消开仓挂单
                     close_mode = "市价" if decision["use_market"] else "限价"
                     now = time.time()
