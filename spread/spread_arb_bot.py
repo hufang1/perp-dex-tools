@@ -1294,7 +1294,16 @@ class SpreadArbBot:
 
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
-                    self._notify_open_success(ext_position, lig_position)
+                    ext_avg = lig_avg = None
+                    try:
+                        ext_pos = await self.extended_client.get_detailed_position()
+                        lig_pos = await self.lighter_client.get_detailed_position()
+                        ext_avg = ext_pos.get('avg_price') if ext_pos else None
+                        lig_avg = lig_pos.get('avg_price') if lig_pos else None
+                    except Exception as e:
+                        logger.debug(f"获取开仓均价失败，使用成交价: {e}")
+
+                    self._notify_open_success(ext_position, lig_position, ext_avg=ext_avg, lig_avg=lig_avg)
                     self.close_strategy.add_position(self._pending_open_position)
 
                     # 记录本次运行的交易量（USDT名义）
@@ -3865,7 +3874,7 @@ class SpreadArbBot:
             "entry_spread": self.close_strategy.get_weighted_avg_spread(),
         }
 
-    def _notify_open_success(self, ext_pos: Decimal, lig_pos: Decimal) -> None:
+    def _notify_open_success(self, ext_pos: Decimal, lig_pos: Decimal, ext_avg=None, lig_avg=None) -> None:
         if not hasattr(self, "_pending_open_position") or not self._pending_open_position:
             return
         pos = self._pending_open_position
@@ -3876,14 +3885,16 @@ class SpreadArbBot:
             avg_entry_spread = (current_avg * current_qty + pos.open_spread * pos.quantity) / total_qty
         else:
             avg_entry_spread = pos.open_spread
+        ext_price = Decimal(str(ext_avg)) if ext_avg else pos.ext_price
+        lig_price = Decimal(str(lig_avg)) if lig_avg else pos.lig_price
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
             "方向: Ext买 / Lig卖",
             f"开仓价差率: {pos.open_spread:.3%}",
             f"当前仓位平均开仓价差: {avg_entry_spread:.3%}",
-            f"Ext开仓价: {pos.ext_price:.2f}",
-            f"Lig开仓价: {pos.lig_price:.2f}",
+            f"Ext开仓均价: {ext_price:.2f}",
+            f"Lig开仓均价: {lig_price:.2f}",
             f"Ext仓位: {ext_pos}",
             f"Lig仓位: {lig_pos}",
         ]
