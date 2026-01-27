@@ -1001,11 +1001,12 @@ class SpreadArbBot:
             open_taker = self.close_strategy.portfolio.has_open_taker()
             open_mode_label = "taker" if open_taker else "maker"
             if thresholds:
-                midline, maker_th, taker_th, _std = thresholds
+                midline, maker_th, taker_th, std = thresholds
                 open_formula = f">=maker{maker_th:.3%}/taker{taker_th:.3%}"
             else:
                 midline = Decimal("0")
                 maker_th = taker_th = Decimal("0")
+                std = Decimal("0")
                 open_formula = "NA"
 
             # 计算平仓触发阈值（平仓价差口径）
@@ -1024,7 +1025,7 @@ class SpreadArbBot:
                     entry_spread - self.config.limit_close_spread_a - limit_cost
                     + (inventory_ratio * self.config.limit_close_spread_a)
                 )
-                hysteresis = (std if thresholds else Decimal("0")) * self.config.close_limit_hysteresis_sigma
+                hysteresis = std * self.config.close_limit_hysteresis_sigma
                 limit_threshold = limit_base - hysteresis
                 market_threshold = min(
                     midline,
