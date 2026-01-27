@@ -612,23 +612,31 @@ class LighterClient(BaseExchangeClient):
                     else:
                         quantity = abs(Decimal(pos_value))
 
-                    # 获取平均开仓价格
+                    # 获取平均开仓价格（兼容不同字段名）
                     avg_price = Decimal('0')
-                    if hasattr(position, 'avg_price') and position.avg_price:
-                        avg_price = Decimal(str(position.avg_price))
+                    found_attrs = []
+                    for attr in ['avg_price', 'average_price', 'avg_entry_price', 'average_entry_price', 'entry_price']:
+                        if hasattr(position, attr):
+                            found_attrs.append(attr)
+                            price_value = getattr(position, attr)
+                            if price_value is not None and price_value != 0:
+                                avg_price = Decimal(str(price_value))
+                                break
+
+                    if avg_price > 0:
                         self.logger.log(
                             f"[get_detailed_position] 找到仓位 | "
                             f"market_id={position.market_id} | "
                             f"quantity={quantity} | "
-                            f"avg_price={avg_price}",
+                            f"avg_price={avg_price} | fields={found_attrs}",
                             "INFO"
                         )
                     else:
                         self.logger.log(
-                            f"[get_detailed_position] 找到仓位但无avg_price字段 | "
+                            f"[get_detailed_position] 找到仓位但未取到均价 | "
                             f"market_id={position.market_id} | "
                             f"quantity={quantity} | "
-                            f"position attrs={dir(position)}",
+                            f"fields={found_attrs} | attrs={dir(position)}",
                             "WARNING"
                         )
 

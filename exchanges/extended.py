@@ -762,7 +762,7 @@ class ExtendedClient(BaseExchangeClient):
                 # 尝试获取平均开仓价格（可能有多种字段名）
                 avg_price = Decimal('0')
                 found_attrs = []
-                for attr in ['avg_price', 'average_price', 'avg_entry_price', 'average_entry_price']:
+                for attr in ['avg_price', 'average_price', 'avg_entry_price', 'average_entry_price', 'entry_price']:
                     if hasattr(position, attr):
                         found_attrs.append(attr)
                         price_value = getattr(position, attr)

@@ -3895,20 +3895,25 @@ class SpreadArbBot:
         if not hasattr(self, "_pending_open_position") or not self._pending_open_position:
             return
         pos = self._pending_open_position
+        ext_price = Decimal(str(ext_avg)) if ext_avg else pos.ext_price
+        lig_price = Decimal(str(lig_avg)) if lig_avg else pos.lig_price
+        if ext_price > 0:
+            real_open_spread = (lig_price - ext_price) / ext_price
+        else:
+            real_open_spread = pos.open_spread
+
         current_qty = self.close_strategy.get_total_quantity()
         current_avg = self.close_strategy.get_weighted_avg_spread()
         total_qty = current_qty + pos.quantity
         if total_qty > 0:
-            avg_entry_spread = (current_avg * current_qty + pos.open_spread * pos.quantity) / total_qty
+            avg_entry_spread = (current_avg * current_qty + real_open_spread * pos.quantity) / total_qty
         else:
-            avg_entry_spread = pos.open_spread
-        ext_price = Decimal(str(ext_avg)) if ext_avg else pos.ext_price
-        lig_price = Decimal(str(lig_avg)) if lig_avg else pos.lig_price
+            avg_entry_spread = real_open_spread
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
             "方向: Ext买 / Lig卖",
-            f"开仓价差率: {pos.open_spread:.3%}",
+            f"开仓价差率: {real_open_spread:.3%}",
             f"当前仓位平均开仓价差: {avg_entry_spread:.3%}",
             f"Ext开仓均价: {ext_price:.2f}",
             f"Lig开仓均价: {lig_price:.2f}",
