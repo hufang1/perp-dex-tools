@@ -785,6 +785,11 @@ class SpreadArbBot:
             self.config.target_quantity,
             spread_info
         )
+        if result.extended_price or result.lighter_price:
+            logger.info(
+                f"[taker价] Ext={result.extended_price or spread_info.ext_ask:.2f} "
+                f"Lig={result.lighter_price or spread_info.lig_bid:.2f}"
+            )
 
         # 不管订单状态如何，都进入 OPENING_WAIT 状态检查实际仓位
         # 即使订单返回失败，也可能有部分成交（或者订单还在处理中）
