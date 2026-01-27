@@ -3864,11 +3864,19 @@ class SpreadArbBot:
         if not hasattr(self, "_pending_open_position") or not self._pending_open_position:
             return
         pos = self._pending_open_position
+        current_qty = self.close_strategy.get_total_quantity()
+        current_avg = self.close_strategy.get_weighted_avg_spread()
+        total_qty = current_qty + pos.quantity
+        if total_qty > 0:
+            avg_entry_spread = (current_avg * current_qty + pos.open_spread * pos.quantity) / total_qty
+        else:
+            avg_entry_spread = pos.open_spread
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
             "方向: Ext买 / Lig卖",
             f"开仓价差率: {pos.open_spread:.3%}",
+            f"当前仓位平均开仓价差: {avg_entry_spread:.3%}",
             f"Ext开仓价: {pos.ext_price:.2f}",
             f"Lig开仓价: {pos.lig_price:.2f}",
             f"Ext仓位: {ext_pos}",
