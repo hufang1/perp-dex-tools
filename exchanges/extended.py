@@ -731,7 +731,7 @@ class ExtendedClient(BaseExchangeClient):
             if not positions:
                 self.logger.log(
                     f"[get_detailed_position] positions列表为空",
-                    "WARNING"
+                    "DEBUG"
                 )
                 return {
                     'quantity': Decimal('0'),
