@@ -199,6 +199,7 @@ class SpreadArbBot:
         self._boll_last_bands: Optional[tuple] = None
         self._last_boll_log_time: float = 0.0
         self._bandwidth_blocked: bool = False
+        self._open_maker_confirm_start: Optional[float] = None
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -1019,10 +1020,12 @@ class SpreadArbBot:
                 limit_cost = taker_ratio * fee
                 market_cost = (Decimal("1") + taker_ratio) * fee
                 inventory_ratio = await self._get_inventory_ratio()
-                limit_threshold = (
+                limit_base = (
                     entry_spread - self.config.limit_close_spread_a - limit_cost
                     + (inventory_ratio * self.config.limit_close_spread_a)
                 )
+                hysteresis = (std if thresholds else Decimal("0")) * self.config.close_limit_hysteresis_sigma
+                limit_threshold = limit_base - hysteresis
                 market_threshold = min(
                     midline,
                     entry_spread - self.config.market_close_spread_b - market_cost
@@ -1030,7 +1033,8 @@ class SpreadArbBot:
                 )
                 if thresholds:
                     close_formula = (
-                        f"close<=entry-A{self.config.limit_close_spread_a:.3%}-cost{limit_cost:.3%}+skew{(inventory_ratio*self.config.limit_close_spread_a):.3%}/"
+                        f"close<=entry-A{self.config.limit_close_spread_a:.3%}-cost{limit_cost:.3%}+skew{(inventory_ratio*self.config.limit_close_spread_a):.3%}"
+                        f"-hys{hysteresis:.3%}/"
                         f"<=min(mid{midline:.3%},entry-B{self.config.market_close_spread_b:.3%}-cost{market_cost:.3%}+skew{(inventory_ratio*self.config.market_close_spread_b):.3%})"
                     )
                 else:
@@ -3981,6 +3985,8 @@ class SpreadArbBot:
                     return False, f"布林带宽度{bandwidth:.3%} < {self.config.boll_bandwidth_min:.3%}，不开仓", False
         current_spread = spread_info.spread_pct
         if current_spread >= taker_threshold:
+            # 市价开仓不需要确认窗
+            self._open_maker_confirm_start = None
             reason = (
                 f"开仓: 价差{current_spread:.3%} >= 市价阈值{taker_threshold:.3%}"
                 f"（中轴{mean:.3%}, {self.config.open_taker_sigma}σ）"
@@ -3988,12 +3994,23 @@ class SpreadArbBot:
             self._notify_open_trigger(spread_info, mean, taker_threshold, reason)
             return True, reason, True
         if current_spread >= maker_threshold:
+            confirm_secs = self.config.open_maker_confirm_seconds
+            now = time.time()
+            if confirm_secs > 0:
+                if self._open_maker_confirm_start is None:
+                    self._open_maker_confirm_start = now
+                    return False, f"挂单确认中({confirm_secs:.1f}s)", False
+                if now - self._open_maker_confirm_start < confirm_secs:
+                    return False, f"挂单确认中({confirm_secs:.1f}s)", False
+            self._open_maker_confirm_start = None
             reason = (
                 f"开仓: 价差{current_spread:.3%} >= 挂单阈值{maker_threshold:.3%}"
                 f"（中轴{mean:.3%}, {self.config.open_maker_sigma}σ）"
             )
             self._notify_open_trigger(spread_info, mean, maker_threshold, reason)
             return True, reason, False
+        # 未达挂单阈值，重置确认窗口
+        self._open_maker_confirm_start = None
         reason = (
             f"价差{current_spread:.3%}未达挂单阈值{maker_threshold:.3%}"
             f"（中轴{mean:.3%}）"
@@ -4071,6 +4088,7 @@ class SpreadArbBot:
             "lower": Decimal("0"),
             "market_threshold": Decimal("0"),
             "limit_threshold": Decimal("0"),
+            "limit_exit_threshold": Decimal("0"),
             "limit_cost": Decimal("0"),
             "market_cost": Decimal("0"),
             "taker_ratio": Decimal("0"),
@@ -4081,7 +4099,7 @@ class SpreadArbBot:
         bands = self._get_bollinger_bands()
         if not bands:
             return decision
-        mean, _upper, lower, _std = bands
+        mean, _upper, lower, std = bands
         portfolio = self.close_strategy.get_portfolio()
         total_spread = await self.close_strategy.get_total_position_spread()
         if total_spread <= 0 or not portfolio:
@@ -4095,12 +4113,15 @@ class SpreadArbBot:
         fee = Decimal("0.00025")
         limit_cost = taker_ratio * fee
         market_cost = (Decimal("1") + taker_ratio) * fee
-        limit_threshold = (
+        base_limit_threshold = (
             total_spread
             - self.config.limit_close_spread_a
             - limit_cost
             + (inventory_ratio * self.config.limit_close_spread_a)
         )
+        hysteresis = std * self.config.close_limit_hysteresis_sigma
+        limit_threshold = base_limit_threshold - hysteresis
+        limit_exit_threshold = base_limit_threshold
         market_raw = (
             total_spread
             - self.config.market_close_spread_b
@@ -4117,6 +4138,7 @@ class SpreadArbBot:
                 "midline": mean,
                 "lower": lower,
                 "limit_threshold": limit_threshold,
+                "limit_exit_threshold": limit_exit_threshold,
                 "market_threshold": market_threshold,
                 "limit_cost": limit_cost,
                 "market_cost": market_cost,
@@ -4381,21 +4403,25 @@ class SpreadArbBot:
 
         open_thresholds = await self._get_open_sigma_thresholds()
         if open_thresholds:
-            _mid, maker_th, taker_th, _std = open_thresholds
+            _mid, maker_th, taker_th, std = open_thresholds
+            open_maker_exit = maker_th - (self.config.open_maker_hysteresis_sigma * std)
         else:
-            maker_th = taker_th = Decimal("0")
+            maker_th = taker_th = open_maker_exit = Decimal("0")
 
         close_spread_info = self._build_close_spread_info(spread_info)
         close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
         market_threshold = Decimal("0")
         limit_threshold = Decimal("0")
+        limit_exit_threshold = Decimal("0")
         try:
             decision = await self._evaluate_close_decision(spread_info, close_spread_info)
             market_threshold = decision.get("market_threshold", Decimal("0")) or Decimal("0")
             limit_threshold = decision.get("limit_threshold", Decimal("0")) or Decimal("0")
+            limit_exit_threshold = decision.get("limit_exit_threshold", Decimal("0")) or Decimal("0")
         except Exception:
             market_threshold = Decimal("0")
             limit_threshold = Decimal("0")
+            limit_exit_threshold = Decimal("0")
 
         ext_qty = lig_qty = ext_avail = lig_avail = Decimal("0")
         ext_total = lig_total = Decimal("0")
@@ -4424,8 +4450,10 @@ class SpreadArbBot:
                 "lower": float(lower),
                 "openMaker": float(maker_th),
                 "openTaker": float(taker_th),
+                "openMakerExit": float(open_maker_exit),
                 "closeMarket": float(market_threshold),
                 "closeLimit": float(limit_threshold),
+                "closeLimitExit": float(limit_exit_threshold),
                 "extBid": float(spread_info.ext_bid),
                 "extAsk": float(spread_info.ext_ask),
                 "ligBid": float(spread_info.lig_bid),
@@ -4761,8 +4789,9 @@ class SpreadArbBot:
             thresholds = await self._get_open_sigma_thresholds()
             if not thresholds:
                 return False
-            midline, maker_threshold, _taker_threshold, _std = thresholds
-            if spread_info.spread_pct < maker_threshold:
+            midline, maker_threshold, _taker_threshold, std = thresholds
+            cancel_threshold = maker_threshold - (self.config.open_maker_hysteresis_sigma * std)
+            if spread_info.spread_pct < cancel_threshold:
                 async with self._maker_lock("open_protect"):
                     # 价差不满足条件，取消订单
                     spread_value = spread_info.spread_pct
@@ -4770,7 +4799,7 @@ class SpreadArbBot:
                         "warning",
                         BotState.OPENING_MAKER_WAIT,
                         "open_protect",
-                        f"实时价差{spread_value:.3%} < 挂单阈值{maker_threshold:.3%}(中轴{midline:.3%})",
+                        f"实时价差{spread_value:.3%} < 撤销阈值{cancel_threshold:.3%}(中轴{midline:.3%})",
                     )
 
                     # 先检查是否已成交/部分成交
@@ -4808,7 +4837,7 @@ class SpreadArbBot:
                         )
                     else:
                         # 无仓位，进入 IDLE 状态
-                        reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 挂单阈值{maker_threshold:.3%}）"
+                        reason = f"价差保护触发，取消挂单（实时价差{spread_value:.3%} < 撤销阈值{cancel_threshold:.3%}）"
                         if await self._safe_exit_maker_wait(BotState.IDLE, reason, is_opening=True):
                             return True
 
@@ -4968,12 +4997,13 @@ class SpreadArbBot:
                 self._last_close_cancel_log_time = 0.0
             order_id = self._maker_wait_state.current_order.order_id
             if now - self._last_close_cancel_log_time >= 5.0:
+                exit_threshold = decision.get("limit_exit_threshold", decision["limit_threshold"])
                 self._log_spread_rule(
                     "warning",
                     BotState.CLOSING_MAKER_WAIT,
                     "close_cancel",
                     f"平仓价差{decision['close_spread']:.3%} > "
-                    f"限价阈值{decision['limit_threshold']:.3%} 且 > 市价阈值{decision['market_threshold']:.3%}",
+                    f"限价离场阈值{exit_threshold:.3%} 且 > 市价阈值{decision['market_threshold']:.3%}",
                 )
                 self._last_close_cancel_log_time = now
 
@@ -5011,9 +5041,10 @@ class SpreadArbBot:
             except Exception as e:
                 logger.warning(f"撤单后检查仓位失败: {e}")
 
+            exit_threshold = decision.get("limit_exit_threshold", decision["limit_threshold"])
             reason = (
                 f"平仓条件失效，取消挂单（平仓价差{decision['close_spread']:.3%} > "
-                f"限价阈值{decision['limit_threshold']:.3%}）"
+                f"限价离场阈值{exit_threshold:.3%}）"
             )
             if await self._safe_exit_maker_wait(BotState.HOLDING, reason, is_opening=False):
                 return True
@@ -5836,6 +5867,13 @@ def parse_arguments() -> BotConfig:
         help="库存倾斜惩罚系数（默认: 0.5）"
     )
     parser.add_argument(
+        "--close-limit-hysteresis-sigma",
+        type=Decimal,
+        default=env_default("CLOSE_LIMIT_HYSTERESIS_SIGMA", Decimal, None),
+        dest="close_limit_hysteresis_sigma",
+        help="挂单平仓触发阈值Sigma（默认: 0.1）"
+    )
+    parser.add_argument(
         "--limit-close-a",
         type=Decimal,
         default=env_default("LIMIT_CLOSE_A", Decimal, None),
@@ -5979,6 +6017,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['open_maker_sigma'] = args.open_maker_sigma
     if args.open_sigma_penalty is not None:
         config_kwargs['open_sigma_penalty'] = args.open_sigma_penalty
+    if args.close_limit_hysteresis_sigma is not None:
+        config_kwargs['close_limit_hysteresis_sigma'] = args.close_limit_hysteresis_sigma
     if args.boll_sample_interval is not None:
         config_kwargs['boll_sample_interval'] = args.boll_sample_interval
     if args.boll_min_samples is not None:

@@ -505,6 +505,15 @@ class BotConfig:
     open_sigma_penalty: Decimal = field(default_factory=lambda: Decimal("0.5"))
     """库存倾斜惩罚系数（Sigma上移系数）"""
 
+    open_maker_confirm_seconds: float = 2.0
+    """挂单开仓确认窗（秒）"""
+
+    open_maker_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.25"))
+    """挂单开仓撤销滞回（Sigma）"""
+
+    close_limit_hysteresis_sigma: Decimal = field(default_factory=lambda: Decimal("0.1"))
+    """挂单平仓触发阈值（Sigma，入场更严格）"""
+
     boll_sample_interval: float = 1.0
     """布林带采样间隔（秒）"""
 
@@ -635,6 +644,12 @@ class BotConfig:
         if self.open_taker_sigma <= self.open_maker_sigma:
             return False
         if self.open_sigma_penalty < 0:
+            return False
+        if self.open_maker_confirm_seconds < 0:
+            return False
+        if self.open_maker_hysteresis_sigma < 0:
+            return False
+        if self.close_limit_hysteresis_sigma < 0:
             return False
         if self.boll_sample_interval <= 0:
             return False

@@ -7,8 +7,10 @@ export type SpreadPoint = {
   lower: number;
   openMaker?: number;
   openTaker?: number;
+  openMakerExit?: number;
   closeMarket?: number;
   closeLimit?: number;
+  closeLimitExit?: number;
 };
 
 export type PositionPoint = {

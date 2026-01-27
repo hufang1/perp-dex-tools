@@ -51,8 +51,10 @@ export async function GET(req: NextRequest) {
       lower: Number(s.lower),
       openMaker: Number(s.openMakerThreshold ?? 0),
       openTaker: Number(s.openTakerThreshold ?? 0),
+      openMakerExit: Number(s.openMakerExitThreshold ?? 0),
       closeMarket: Number(s.closeMarketThreshold ?? 0),
       closeLimit: Number(s.closeLimitThreshold ?? 0),
+      closeLimitExit: Number(s.closeLimitExitThreshold ?? 0),
     })),
     positions: positions.map((p, idx) => ({
       t: p.createdAt.toISOString(),

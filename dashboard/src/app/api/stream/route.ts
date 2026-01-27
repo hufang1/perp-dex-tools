@@ -51,8 +51,10 @@ export async function GET(request: Request) {
               lower: Number(spread.lower),
               openMaker: Number(spread.openMakerThreshold ?? 0),
               openTaker: Number(spread.openTakerThreshold ?? 0),
+              openMakerExit: Number(spread.openMakerExitThreshold ?? 0),
               closeMarket: Number(spread.closeMarketThreshold ?? 0),
               closeLimit: Number(spread.closeLimitThreshold ?? 0),
+              closeLimitExit: Number(spread.closeLimitExitThreshold ?? 0),
             };
           }
           if (position) {

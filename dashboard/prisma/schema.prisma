@@ -19,8 +19,10 @@ model SpreadSample {
   lower      Decimal
   openMakerThreshold Decimal @default(0)
   openTakerThreshold Decimal @default(0)
+  openMakerExitThreshold Decimal @default(0)
   closeMarketThreshold Decimal @default(0)
   closeLimitThreshold Decimal @default(0)
+  closeLimitExitThreshold Decimal @default(0)
   extBid     Decimal
   extAsk     Decimal
   ligBid     Decimal
