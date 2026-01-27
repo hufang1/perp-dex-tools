@@ -511,6 +511,9 @@ class BotConfig:
     boll_min_samples: int = 60
     """布林带最小样本数"""
 
+    boll_bandwidth_min: Decimal = field(default_factory=lambda: Decimal("0.001"))
+    """布林带宽度阈值（(upper-lower)/midline），低于则不开仓"""
+
     # ========== 新增字段：腾笼换鸟 ==========
     switch_cost_bps: Decimal = field(default_factory=lambda: Decimal("0.000225"))
     """腾笼换鸟换仓成本（固定）"""
@@ -636,6 +639,8 @@ class BotConfig:
         if self.boll_sample_interval <= 0:
             return False
         if self.boll_min_samples <= 0:
+            return False
+        if self.boll_bandwidth_min < 0:
             return False
         if self.switch_cost_bps < 0:
             return False

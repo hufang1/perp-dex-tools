@@ -198,6 +198,7 @@ class SpreadArbBot:
         self._boll_last_sample_time: float = 0.0
         self._boll_last_bands: Optional[tuple] = None
         self._last_boll_log_time: float = 0.0
+        self._bandwidth_blocked: bool = False
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -680,7 +681,10 @@ class SpreadArbBot:
         await self._maybe_send_dashboard_snapshot(spread_info)
 
         self._update_bollinger(spread_info.spread_pct)
-        should_open, reason, use_taker = await self._should_open_bollinger(spread_info)
+        if not await self._check_bandwidth_gate():
+            should_open, reason, use_taker = False, "带宽过窄，停止开仓", False
+        else:
+            should_open, reason, use_taker = await self._should_open_bollinger(spread_info)
         thresholds = await self._get_open_sigma_thresholds()
         if thresholds:
             midline, maker_th, taker_th, _std = thresholds
@@ -695,7 +699,13 @@ class SpreadArbBot:
         if current_time - self._last_idle_log_time >= 5.0:
             current_spread = spread_info.spread_pct
             status_text = "开仓" if should_open else "不开仓"
-            print(f"📊 空闲 s={current_spread:.3%} thr={threshold_info} {status_text}")
+            bandwidth_text = ""
+            bands = self._get_bollinger_bands()
+            if bands:
+                mid, upper, lower, _ = bands
+                if mid > 0:
+                    bandwidth_text = f" bw={(upper - lower) / mid:.3%}"
+            print(f"📊 空闲 s={current_spread:.3%}{bandwidth_text} thr={threshold_info} {status_text}")
             self._last_idle_log_time = current_time
 
         # 记录实时价差到CSV（每10秒一次）
@@ -958,8 +968,11 @@ class SpreadArbBot:
 
         await self._maybe_send_dashboard_snapshot(spread_info)
 
-        # 检查是否可以继续开仓（布林带策略）
-        should_open, reason, use_taker = await self._should_open_bollinger(spread_info)
+        # 检查是否可以继续开仓（布林带策略 + 带宽过滤）
+        if not await self._check_bandwidth_gate():
+            should_open, reason, use_taker = False, "带宽过窄，停止开仓", False
+        else:
+            should_open, reason, use_taker = await self._should_open_bollinger(spread_info)
 
         await self._apply_spread_rules(
             BotState.HOLDING,
@@ -1039,8 +1052,14 @@ class SpreadArbBot:
             position_spread_text = f"{entry_spread:.3%}" if entry_spread > 0 else "-"
             close_spread_text = f"{close_spread:.3%}" if entry_spread > 0 else "-"
             profit_text = f"{profit_spread:.3%}" if entry_spread > 0 else "-"
+            bandwidth_text = ""
+            bands = self._get_bollinger_bands()
+            if bands:
+                mid, upper, lower, _ = bands
+                if mid > 0:
+                    bandwidth_text = f" bw={(upper - lower) / mid:.3%}"
             print(
-                f"📊 持仓 s={current_spread:.3%} "
+                f"📊 持仓 s={current_spread:.3%}{bandwidth_text} "
                 f"open={open_formula}({open_mode_label}) "
                 f"entry={position_spread_text} close={close_spread_text} pnl={profit_text} "
                 f"rule:{close_formula} -> {result}"
@@ -3916,6 +3935,27 @@ class SpreadArbBot:
         taker_threshold = mean + (taker_sigma * std)
         return mean, maker_threshold, taker_threshold, std
 
+    async def _check_bandwidth_gate(self) -> bool:
+        """
+        布林带带宽过滤：带宽过窄则暂停开仓
+        """
+        bands = self._get_bollinger_bands()
+        if not bands:
+            return True
+        mid, upper, lower, _ = bands
+        if mid <= 0:
+            return True
+        bandwidth = (upper - lower) / mid
+        if bandwidth < self.config.boll_bandwidth_min:
+            if not self._bandwidth_blocked:
+                self._bandwidth_blocked = True
+                self._notify_bandwidth_blocked(bandwidth)
+            return False
+        if self._bandwidth_blocked:
+            self._bandwidth_blocked = False
+            self._notify_bandwidth_recovered(bandwidth)
+        return True
+
     async def _should_open_bollinger(self, spread_info) -> tuple[bool, str, bool]:
         if not self.config.use_bollinger:
             should_open, reason = self.open_strategy.should_open(spread_info)
@@ -3924,6 +3964,13 @@ class SpreadArbBot:
         if not thresholds:
             return False, "布林带样本不足", False
         mean, maker_threshold, taker_threshold, _std = thresholds
+        bands = self._get_bollinger_bands()
+        if bands:
+            mid, upper, lower, _ = bands
+            if mid > 0:
+                bandwidth = (upper - lower) / mid
+                if bandwidth < self.config.boll_bandwidth_min:
+                    return False, f"布林带宽度{bandwidth:.3%} < {self.config.boll_bandwidth_min:.3%}，不开仓", False
         current_spread = spread_info.spread_pct
         if current_spread >= taker_threshold:
             reason = (
@@ -4256,6 +4303,26 @@ class SpreadArbBot:
             "动作: 撤单并切换市价平仓",
         ]
         self._notify("⚠️ 平仓挂单升级市价", lines)
+
+    def _notify_bandwidth_blocked(self, bandwidth: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"带宽: {bandwidth:.3%}",
+            f"阈值: {self.config.boll_bandwidth_min:.3%}",
+            "动作: 停止开仓，仅允许平仓",
+        ]
+        self._notify("🛑 窄幅震荡，停止开仓", lines)
+
+    def _notify_bandwidth_recovered(self, bandwidth: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"带宽: {bandwidth:.3%}",
+            f"阈值: {self.config.boll_bandwidth_min:.3%}",
+            "动作: 恢复开仓",
+        ]
+        self._notify("✅ 带宽恢复，允许开仓", lines)
 
     def _get_open_order_notional(self, spread_info) -> Decimal:
         """获取开仓名义金额（USDT）"""
@@ -5789,6 +5856,13 @@ def parse_arguments() -> BotConfig:
         help="布林带最小样本数"
     )
     parser.add_argument(
+        "--boll-bandwidth-min",
+        type=Decimal,
+        default=env_default("BOLL_BANDWIDTH_MIN", Decimal, None),
+        dest="boll_bandwidth_min",
+        help="布林带宽度阈值（(upper-lower)/midline，默认: 0.001 = 0.1%）"
+    )
+    parser.add_argument(
         "--switch-cost-bps",
         type=Decimal,
         default=env_default("SWITCH_COST_BPS", Decimal, None),
@@ -5901,6 +5975,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['boll_sample_interval'] = args.boll_sample_interval
     if args.boll_min_samples is not None:
         config_kwargs['boll_min_samples'] = args.boll_min_samples
+    if args.boll_bandwidth_min is not None:
+        config_kwargs['boll_bandwidth_min'] = args.boll_bandwidth_min
     if args.limit_close_spread_a is not None:
         config_kwargs['limit_close_spread_a'] = args.limit_close_spread_a
     if args.market_close_spread_b is not None:
