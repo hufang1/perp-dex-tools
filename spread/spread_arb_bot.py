@@ -61,6 +61,17 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+
+class _DropNoisyLogs(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "positions列表为空" in msg:
+            return False
+        return True
+
+
+logging.getLogger().addFilter(_DropNoisyLogs())
 logger = logging.getLogger(__name__)
 
 

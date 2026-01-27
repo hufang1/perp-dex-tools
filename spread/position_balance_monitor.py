@@ -201,7 +201,7 @@ class PositionBalanceMonitor:
                 allocated_details.append(f"estimated:{margin_used}")
 
             # 打印调试信息
-            print(f"[DEBUG] Lig余额 | total={total_balance} | margin_used={margin_used} | details={allocated_details}")
+            # debug日志已移除，避免刷屏
 
             # 可用保证金 = 总资产价值 - 已分配保证金
             available_balance = total_balance - margin_used
