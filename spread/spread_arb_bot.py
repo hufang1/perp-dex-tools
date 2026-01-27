@@ -5540,17 +5540,23 @@ class SpreadArbBot:
                     if not hasattr(self, '_hedging_state'):
                         from models import HedgingState
                         self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = old_order.quantity
-                self._hedging_state.ext_filled_price = old_order.price
-                self._hedging_state.start_time = datetime.now()
-                self._hedging_state.source = "price_check"
+                    self._hedging_state.ext_filled_quantity = old_order.quantity
+                    self._hedging_state.ext_filled_price = old_order.price
+                    self._hedging_state.start_time = datetime.now()
+                    self._hedging_state.source = "price_check"
 
                     is_opening = (self.state_manager.get_state() == BotState.OPENING_MAKER_WAIT)
                     if is_opening:
-                        self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended完全成交（价格偏离检测），开始Lighter对冲")
+                        self.state_manager.set_state(
+                            BotState.LIGHTER_HEDGING,
+                            "Extended完全成交（价格偏离检测），开始Lighter对冲",
+                        )
                     else:
                         self._hedging_state.is_closing = True
-                        self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓完全成交（价格偏离检测），开始Lighter对冲")
+                        self.state_manager.set_state(
+                            BotState.LIGHTER_HEDGING,
+                            "Extended平仓完全成交（价格偏离检测），开始Lighter对冲",
+                        )
                     await self.state_manager.save_state()
 
                     logger.info(f"✅ 已切换到 LIGHTER_HEDGING 状态进行对冲")
