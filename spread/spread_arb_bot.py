@@ -71,7 +71,11 @@ class _DropNoisyLogs(logging.Filter):
         return True
 
 
-logging.getLogger().addFilter(_DropNoisyLogs())
+_noise_filter = _DropNoisyLogs()
+logging.getLogger().addFilter(_noise_filter)
+logging.getLogger("EXTENDED_ETH").addFilter(_noise_filter)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_noise_filter)
 logger = logging.getLogger(__name__)
 
 
