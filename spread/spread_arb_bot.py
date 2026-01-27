@@ -3345,7 +3345,7 @@ class SpreadArbBot:
             if await self._apply_spread_rules(
                 BotState.OPENING_MAKER_WAIT,
                 spread_info,
-                rule_ids=["protect", "close_preempt"],
+                rule_ids=["protect", "close_preempt", "open_escalate"],
             ):
                 return
 
@@ -3431,7 +3431,7 @@ class SpreadArbBot:
             if await self._apply_spread_rules(
                 BotState.CLOSING_MAKER_WAIT,
                 spread_info,
-                rule_ids=["close_cancel"],
+                rule_ids=["close_cancel", "close_escalate"],
             ):
                 return
 
@@ -3822,8 +3822,12 @@ class SpreadArbBot:
                 BotState.OPENING_MAKER_WAIT: [
                     ("protect", self._handle_opening_maker_wait_spread_protect),
                     ("close_preempt", self._handle_opening_maker_wait_spread_close_preempt),
+                    ("open_escalate", self._handle_opening_maker_wait_spread_escalate),
                 ],
-                BotState.CLOSING_MAKER_WAIT: [("close_cancel", self._handle_closing_maker_wait_spread_transition)],
+                BotState.CLOSING_MAKER_WAIT: [
+                    ("close_cancel", self._handle_closing_maker_wait_spread_transition),
+                    ("close_escalate", self._handle_closing_maker_wait_spread_escalate),
+                ],
             }
         return self._spread_rule_table
 
@@ -4135,6 +4139,16 @@ class SpreadArbBot:
             lines.append(f"仓位: Ext={ext_pos} Lig={lig_pos}")
         self._notify("❌ 开仓失败", lines)
 
+    def _notify_open_escalate(self, spread: Decimal, threshold: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"触发价差: {spread:.3%}",
+            f"市价阈值: {threshold:.3%}",
+            "动作: 撤单并切换市价开仓",
+        ]
+        self._notify("⚠️ 开仓挂单升级市价", lines)
+
     def _notify_fill_verify_failed(self, is_opening: bool, expected_qty: Decimal, source: str) -> None:
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -4232,6 +4246,16 @@ class SpreadArbBot:
             f"原因: {reason}",
         ]
         self._notify("❌ 平仓失败", lines)
+
+    def _notify_close_escalate(self, spread: Decimal, threshold: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"平仓价差: {spread:.3%}",
+            f"市价阈值: {threshold:.3%}",
+            "动作: 撤单并切换市价平仓",
+        ]
+        self._notify("⚠️ 平仓挂单升级市价", lines)
 
     def _get_open_order_notional(self, spread_info) -> Decimal:
         """获取开仓名义金额（USDT）"""
@@ -4801,6 +4825,52 @@ class SpreadArbBot:
 
         return False
 
+    async def _handle_opening_maker_wait_spread_escalate(self, spread_info, **_) -> bool:
+        """OPENING_MAKER_WAIT状态：达到市价阈值则撤单并改为市价开仓"""
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+        if not spread_info or not spread_info.is_valid():
+            return False
+
+        thresholds = await self._get_open_sigma_thresholds()
+        if not thresholds:
+            return False
+        _mid, _maker_th, taker_th, _std = thresholds
+        if spread_info.spread_pct < taker_th:
+            return False
+
+        order_id = self._maker_wait_state.current_order.order_id
+        async with self._maker_lock("open_escalate"):
+            self._log_spread_rule(
+                "warning",
+                BotState.OPENING_MAKER_WAIT,
+                "open_escalate",
+                f"价差{spread_info.spread_pct:.3%} >= 市价阈值{taker_th:.3%}，撤单改市价开仓",
+            )
+            self._notify_open_escalate(spread_info.spread_pct, taker_th)
+
+            # 先检查是否已成交/部分成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=True,
+                reason="市价阈值触发前检测到成交，进入对冲",
+            ):
+                return True
+
+            await self.trade_executor.cancel_extended_maker_order(order_id)
+
+            # 撤单后再次检查是否成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=True,
+                reason="撤单后检测到成交，进入对冲",
+            ):
+                return True
+
+            if await self._safe_exit_maker_wait(BotState.OPENING_TAKER, "市价阈值触发，切市价开仓", is_opening=True):
+                return True
+            self._maker_wait_state.reset()
+            await self.state_manager.save_state()
+            return True
+
     async def _handle_closing_maker_wait_spread_transition(self, spread_info, **_) -> bool:
         """CLOSING_MAKER_WAIT状态：价差不满足则撤单回HOLDING"""
         time_module = __import__('time')
@@ -5055,6 +5125,57 @@ class SpreadArbBot:
 
         await self.state_manager.save_state()
         return True
+
+    async def _handle_closing_maker_wait_spread_escalate(self, spread_info, **_) -> bool:
+        """CLOSING_MAKER_WAIT状态：达到市价阈值则撤单并改市价平仓"""
+        if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+        if not spread_info or not spread_info.is_valid():
+            return False
+
+        close_spread_info = self._build_close_spread_info(spread_info)
+        decision = await self._evaluate_close_decision(spread_info, close_spread_info)
+        if not decision["should_close"] or not decision["use_market"]:
+            return False
+
+        order_id = self._maker_wait_state.current_order.order_id
+        async with self._maker_lock("close_escalate"):
+            self._log_spread_rule(
+                "warning",
+                BotState.CLOSING_MAKER_WAIT,
+                "close_escalate",
+                f"平仓价差{decision['close_spread']:.3%} <= 市价阈值{decision['market_threshold']:.3%}，撤单改市价平仓",
+            )
+            self._notify_close_escalate(decision["close_spread"], decision["market_threshold"])
+
+            # 先检查是否已成交/部分成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=False,
+                reason="市价平仓阈值触发前检测到成交，进入对冲",
+            ):
+                return True
+
+            await self.trade_executor.cancel_extended_maker_order(order_id)
+
+            # 撤单后再次检查是否成交
+            if await self._handle_maker_fill_before_state_change(
+                is_opening=False,
+                reason="撤单后检测到成交，进入对冲",
+            ):
+                return True
+
+            total_quantity = self.close_strategy.get_total_quantity()
+            await self._execute_market_close(total_quantity)
+            self._log_spread_rule(
+                "info",
+                BotState.CLOSING_MAKER_WAIT,
+                "close_escalate_market",
+                f"挂单已取消，执行市价平仓 | 数量={total_quantity}",
+            )
+
+            self._maker_wait_state.reset()
+            await self.state_manager.save_state()
+            return True
 
     async def _safe_exit_maker_wait(self, next_state: BotState, reason: str, is_opening: bool) -> bool:
         """
