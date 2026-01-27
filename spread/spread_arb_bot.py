@@ -497,6 +497,9 @@ class SpreadArbBot:
                 return
 
             if mode == "closing":
+                # 仅在进入CLOSING_WAIT时做强一致性检查，避免对冲中误判
+                if next_state != BotState.CLOSING_WAIT:
+                    return
                 logger.error(
                     f"⚠️ 平仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，触发强平"
                 )
@@ -3523,11 +3526,16 @@ class SpreadArbBot:
 
             # 额外保护：根据实盘仓位限制对冲数量，避免Ext未成交/延迟导致Lig单边
             try:
-                ext_position = await self.extended_client.get_account_positions()
-                lig_position = await self.lighter_client.get_account_positions()
+                ext_position = lig_position = None
+                for attempt in range(2):
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    if abs(ext_position) > Decimal("0") or abs(lig_position) > Decimal("0"):
+                        break
+                    await asyncio.sleep(0.2)
                 tolerance = Decimal("0.001")
-                max_ext = abs(ext_position)
-                max_lig = abs(lig_position)
+                max_ext = abs(ext_position) if ext_position is not None else Decimal("0")
+                max_lig = abs(lig_position) if lig_position is not None else Decimal("0")
                 if is_opening:
                     capped_qty = min(ext_filled_qty, max_ext, max_lig)
                 else:
