@@ -2658,6 +2658,30 @@ class SpreadArbBot:
                 # 停止监控
                 self.maker_order_monitor.stop_monitoring()
 
+                # 额外保护：根据开/平仓场景判断是否需要对冲
+                try:
+                    ext_position = await self.extended_client.get_account_positions()
+                    lig_position = await self.lighter_client.get_account_positions()
+                    tolerance = Decimal("0.001")
+                    is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
+                    if is_opening and abs(ext_position) < tolerance:
+                        logger.warning(
+                            f"Maker成交但Ext仓位≈0，跳过对冲 | order_id={order.order_id} ext_pos={ext_position}"
+                        )
+                        self.state_manager.set_state(BotState.OPENING_WAIT, "成交但Ext仓位为空，转入仓位确认")
+                        await self.state_manager.save_state()
+                        return
+                    if (not is_opening) and abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                        logger.warning(
+                            f"平仓成交但两边仓位≈0，跳过对冲 | order_id={order.order_id} "
+                            f"ext_pos={ext_position} lig_pos={lig_position}"
+                        )
+                        self.state_manager.set_state(BotState.CLOSING_WAIT, "成交但两边仓位为空，转入仓位确认")
+                        await self.state_manager.save_state()
+                        return
+                except Exception as e:
+                    logger.debug(f"Maker成交后Ext仓位校验失败，继续对冲: {e}")
+
                 # 更新 MakerWaitState 中的订单状态
                 if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
                     if self._maker_wait_state.current_order.order_id == order.order_id:
@@ -2696,6 +2720,18 @@ class SpreadArbBot:
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
             tolerance = Decimal("0.001")
+
+            if order.is_opening and abs(ext_position) < tolerance:
+                logger.warning(
+                    f"成交晚到(开仓)但Ext仓位≈0，跳过补对冲 | order_id={order.order_id} ext_pos={ext_position}"
+                )
+                return
+            if (not order.is_opening) and abs(ext_position) < tolerance and abs(lig_position) < tolerance:
+                logger.warning(
+                    f"成交晚到(平仓)但两边仓位≈0，跳过补对冲 | order_id={order.order_id} "
+                    f"ext_pos={ext_position} lig_pos={lig_position}"
+                )
+                return
 
             imbalance = ext_position + lig_position  # lig为负时应接近0
             if abs(imbalance) < tolerance:
@@ -3393,6 +3429,39 @@ class SpreadArbBot:
                 is_opening = self._maker_wait_state.current_order.is_opening
 
             hedge_side = 'sell' if is_opening else 'buy'
+
+            # 额外保护：根据实盘仓位限制对冲数量，避免Ext未成交/延迟导致Lig单边
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                lig_position = await self.lighter_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                max_ext = abs(ext_position)
+                max_lig = abs(lig_position)
+                if is_opening:
+                    capped_qty = min(ext_filled_qty, max_ext, max_lig)
+                else:
+                    # 平仓：以lig现有仓位为上限，避免过度对冲
+                    capped_qty = min(ext_filled_qty, max_lig)
+                if capped_qty < tolerance:
+                    logger.warning(
+                        f"对冲跳过 | ext_pos={ext_position} lig_pos={lig_position} ext_filled={ext_filled_qty}"
+                    )
+                    self._hedging_state.ext_filled_quantity = Decimal('0')
+                    self.state_manager.set_state(
+                        BotState.OPENING_WAIT if is_opening else BotState.CLOSING_WAIT,
+                        "对冲数量不足，进入仓位确认"
+                    )
+                    await self.state_manager.save_state()
+                    return
+                if capped_qty != ext_filled_qty:
+                    logger.info(
+                        f"对冲数量调整 | ext_filled={ext_filled_qty} -> capped={capped_qty} "
+                        f"(ext_pos={ext_position}, lig_pos={lig_position})"
+                    )
+                    ext_filled_qty = capped_qty
+                    self._hedging_state.ext_filled_quantity = capped_qty
+            except Exception as e:
+                logger.debug(f"对冲仓位校验失败，继续原数量: {e}")
 
             logger.info(
                 f"🔄 执行Lighter对冲 | "
