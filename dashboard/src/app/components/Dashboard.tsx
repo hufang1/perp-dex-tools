@@ -3,7 +3,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import Chart from "./Chart";
 import type { MetricsResponse, SpreadPoint, PositionPoint } from "../lib/types";
-import { DateTimePicker } from "./DateTimePicker";
 
 const ranges = [
   { key: "5m", label: "5分钟" },
@@ -36,14 +35,20 @@ export default function Dashboard() {
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [connected, setConnected] = useState(false);
   const [zoom, setZoom] = useState<{ start?: number; end?: number }>({});
-  const [startAt, setStartAt] = useState<Date | undefined>(undefined);
-  const [endAt, setEndAt] = useState<Date | undefined>(undefined);
+  const rangeToMs = (key: string) => {
+    if (key === "5m") return 5 * 60 * 1000;
+    if (key === "15m") return 15 * 60 * 1000;
+    if (key === "60m") return 60 * 60 * 1000;
+    if (key === "4h") return 4 * 60 * 60 * 1000;
+    if (key === "8h") return 8 * 60 * 60 * 1000;
+    if (key === "1d") return 24 * 60 * 60 * 1000;
+    if (key === "7d") return 7 * 24 * 60 * 60 * 1000;
+    return 60 * 60 * 1000;
+  };
 
   useEffect(() => {
     let aborted = false;
     const params = new URLSearchParams({ range, symbol });
-    if (startAt) params.set("start", startAt.toISOString());
-    if (endAt) params.set("end", endAt.toISOString());
     fetch(`/api/metrics?${params.toString()}`)
       .then((res) => res.json())
       .then((json: MetricsResponse) => {
@@ -53,7 +58,7 @@ export default function Dashboard() {
     return () => {
       aborted = true;
     };
-  }, [range, symbol, startAt, endAt]);
+  }, [range, symbol]);
 
   useEffect(() => {
     const es = new EventSource(`/api/stream?symbol=${symbol}`);
@@ -68,9 +73,17 @@ export default function Dashboard() {
         };
         setData((prev) => {
           if (!prev) return prev;
-          const spreads = payload.spread ? [...prev.spreads, payload.spread] : prev.spreads;
-          const positions = payload.position ? [...prev.positions, payload.position] : prev.positions;
-          const pnls = payload.pnl ? [...(prev.pnls ?? []), payload.pnl] : prev.pnls;
+          const windowStart = Date.now() - rangeToMs(range);
+          const withinWindow = (t: string) => new Date(t).getTime() >= windowStart;
+          const spreads = (payload.spread ? [...prev.spreads, payload.spread] : prev.spreads).filter((p) =>
+            withinWindow(p.t)
+          );
+          const positions = (payload.position ? [...prev.positions, payload.position] : prev.positions).filter((p) =>
+            withinWindow(p.t)
+          );
+          const pnls = (payload.pnl ? [...(prev.pnls ?? []), payload.pnl] : prev.pnls)?.filter((p) =>
+            withinWindow(p.t)
+          );
           return { ...prev, spreads, positions, pnls, latest: payload };
         });
       } catch {
@@ -78,7 +91,11 @@ export default function Dashboard() {
       }
     };
     return () => es.close();
-  }, [symbol]);
+  }, [symbol, range]);
+
+  useEffect(() => {
+    setZoom({});
+  }, [range, symbol]);
 
   const spreadSeries = useMemo(() => data?.spreads ?? [], [data]);
   const positionSeries = useMemo(() => data?.positions ?? [], [data]);
@@ -532,8 +549,6 @@ export default function Dashboard() {
               </button>
             ))}
             <button className={connected ? "active" : ""}>{connected ? "实时连接" : "断开"}</button>
-            <DateTimePicker value={startAt} onChange={setStartAt} placeholder="开始时间" />
-            <DateTimePicker value={endAt} onChange={setEndAt} placeholder="结束时间" />
           </div>
         </div>
       </div>
