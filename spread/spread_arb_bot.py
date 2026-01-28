@@ -532,12 +532,21 @@ class SpreadArbBot:
             if pending_qty is None:
                 pending_qty = self.config.target_quantity
 
+            # 推断当前开仓方向：默认 LONG（Ext买 / Lig卖）
+            position_state = PositionState.LONG
+            try:
+                if self.state_manager.position and self.state_manager.position.state != PositionState.NONE:
+                    position_state = self.state_manager.position.state
+            except Exception:
+                pass
+
             reduce_qty = min(diff, pending_qty)
             if reduce_qty < tolerance:
                 return
 
             if ext_abs > lig_abs:
-                side = "sell" if ext_position > 0 else "buy"
+                # Ext 回滚：LONG -> 卖出，SHORT -> 买入
+                side = "sell" if position_state == PositionState.LONG else "buy"
                 logger.warning(
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
@@ -556,7 +565,8 @@ class SpreadArbBot:
                 )
                 await self.trade_executor.rollback_position("extended", reduce_qty, side)
             else:
-                side = "sell" if lig_position > 0 else "buy"
+                # Lig 回滚：LONG -> 买入（回补空头），SHORT -> 卖出（平多）
+                side = "buy" if position_state == PositionState.LONG else "sell"
                 logger.warning(
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
@@ -2809,11 +2819,19 @@ class SpreadArbBot:
                         self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                         self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
+                delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+                if delta_qty <= Decimal("0.0001"):
+                    logger.info(
+                        "Maker成交已对冲，跳过 | "
+                        f"order_id={order.order_id} filled={order.filled_quantity} delta={delta_qty}"
+                    )
+                    return
+
                 # 进入 LIGHTER_HEDGING 状态对冲
                 if not hasattr(self, '_hedging_state'):
                     from models import HedgingState
                     self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_quantity = delta_qty
                 self._hedging_state.ext_filled_price = order.avg_fill_price
                 self._hedging_state.start_time = datetime.now()
                 self._hedging_state.source = "ws_fill"
@@ -2889,9 +2907,14 @@ class SpreadArbBot:
                 logger.info("成交晚到但仓位已平衡，跳过补对冲")
                 return
 
-            hedge_qty = abs(imbalance)
-            if hedge_qty <= 0:
-                return
+        delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+        if delta_qty <= Decimal("0.0001"):
+            logger.info("成交晚到已对冲，跳过补对冲")
+            return
+
+        hedge_qty = min(abs(imbalance), delta_qty)
+        if hedge_qty <= 0:
+            return
 
             # 创建MakerWaitState以携带is_opening给对冲逻辑
             from models import MakerWaitState
@@ -2960,6 +2983,10 @@ class SpreadArbBot:
             raw_filled = order_info.get("filled_size", "0")
             filled_qty = Decimal(str(raw_filled)) if raw_filled is not None else Decimal("0")
             if status not in ["FILLED", "PARTIALLY_FILLED"] or filled_qty <= 0:
+                return
+
+            delta_qty = self._calc_maker_fill_delta(filled_qty)
+            if delta_qty <= Decimal("0.0001"):
                 return
 
             # 额外保险：仅在仓位不平衡时才触发对冲，避免误判
@@ -3035,11 +3062,19 @@ class SpreadArbBot:
                         self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                         self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
+                delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+                if delta_qty <= Decimal("0.0001"):
+                    logger.info(
+                        "Maker部分成交已对冲，跳过 | "
+                        f"order_id={order.order_id} filled={order.filled_quantity} delta={delta_qty}"
+                    )
+                    return
+
                 # 进入 LIGHTER_HEDGING 状态对冲已成交部分
                 if not hasattr(self, '_hedging_state'):
                     from models import HedgingState
                     self._hedging_state = HedgingState()
-                self._hedging_state.ext_filled_quantity = order.filled_quantity
+                self._hedging_state.ext_filled_quantity = delta_qty
                 self._hedging_state.ext_filled_price = order.avg_fill_price
                 self._hedging_state.start_time = datetime.now()
                 self._hedging_state.source = "ws_fill"
@@ -3116,6 +3151,18 @@ class SpreadArbBot:
             f"胜率{stats.win_rate:.1%} | "
             f"净利润${stats.net_profit:.2f}"
         )
+
+    def _calc_maker_fill_delta(self, filled_qty: Decimal) -> Decimal:
+        """计算本次需要对冲的新增成交量"""
+        try:
+            if hasattr(self, "_maker_wait_state") and self._maker_wait_state:
+                hedged = self._maker_wait_state.cumulative_filled
+                if filled_qty <= hedged:
+                    return Decimal("0")
+                return filled_qty - hedged
+        except Exception:
+            pass
+        return filled_qty
 
     @asynccontextmanager
     async def _maker_lock(self, label: str):
@@ -5302,9 +5349,13 @@ class SpreadArbBot:
         order.filled_quantity = filled_qty
         order.avg_fill_price = avg_price
 
+        delta_qty = self._calc_maker_fill_delta(filled_qty)
+        if delta_qty <= Decimal("0.0001"):
+            return False
+
         # 进入 LIGHTER_HEDGING 状态前做仓位变化确认
         try:
-            if not await self._confirm_ext_position_change(is_opening, filled_qty):
+            if not await self._confirm_ext_position_change(is_opening, delta_qty):
                 logger.warning("成交校验失败，跳过对冲进入原状态切换")
                 return False
         except Exception as e:
@@ -5314,7 +5365,7 @@ class SpreadArbBot:
         if not hasattr(self, '_hedging_state'):
             from models import HedgingState
             self._hedging_state = HedgingState()
-        self._hedging_state.ext_filled_quantity = filled_qty
+        self._hedging_state.ext_filled_quantity = delta_qty
         self._hedging_state.ext_filled_price = avg_price
         self._hedging_state.start_time = datetime.now()
 
@@ -5516,9 +5567,18 @@ class SpreadArbBot:
                     print(f"✅ 订单已完全成交，无需重挂")
                     logger.info(f"订单已完全成交，无需重挂")
 
+                    delta_qty = self._calc_maker_fill_delta(filled_qty)
+                    if delta_qty <= Decimal("0.0001"):
+                        self.state_manager.set_state(
+                            BotState.OPENING_WAIT if is_opening else BotState.CLOSING_WAIT,
+                            "成交已对冲，无需重复",
+                        )
+                        await self.state_manager.save_state()
+                        return
+
                     # 成交校验：确认Ext仓位变化
                     try:
-                        if not await self._confirm_ext_position_change(is_opening, old_order.quantity):
+                        if not await self._confirm_ext_position_change(is_opening, delta_qty):
                             logger.warning("成交校验失败，取消进入对冲，返回持仓状态")
                             self.state_manager.set_state(BotState.HOLDING, "成交校验失败，返回持仓")
                             await self.state_manager.save_state()
@@ -5540,7 +5600,7 @@ class SpreadArbBot:
                     if not hasattr(self, '_hedging_state'):
                         from models import HedgingState
                         self._hedging_state = HedgingState()
-                    self._hedging_state.ext_filled_quantity = old_order.quantity
+                    self._hedging_state.ext_filled_quantity = delta_qty
                     self._hedging_state.ext_filled_price = old_order.price
                     self._hedging_state.start_time = datetime.now()
                     self._hedging_state.source = "price_check"
