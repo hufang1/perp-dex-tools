@@ -1059,7 +1059,7 @@ class TradeExecutor:
                     lighter_filled=True
                 )
             else:
-                logger.error(f"❌ Lighter对冲失败: 未完全成交或超时")
+                logger.warning("⚠️ Lighter对冲未完全成交或超时")
                 return ExecutionResult(
                     success=False,
                     lighter_order_id=lighter_result["order_id"],

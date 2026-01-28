@@ -79,6 +79,23 @@ for _handler in logging.getLogger().handlers:
 logger = logging.getLogger(__name__)
 
 
+class RecentLogHandler(logging.Handler):
+    """收集最近日志用于异常状态推送"""
+
+    def __init__(self, buffer: deque, level: int = logging.INFO) -> None:
+        super().__init__(level)
+        self.buffer = buffer
+        self.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.buffer.append(self.format(record))
+        except Exception:
+            pass
+
+
 class SpreadArbBot:
     """
     套利机器人主控制器
@@ -203,6 +220,9 @@ class SpreadArbBot:
         self._bandwidth_blocked: bool = False
         self._open_maker_confirm_start: Optional[float] = None
         self._suppress_open_failure_notify: bool = False
+        self._recent_log_lines: deque = deque(maxlen=200)
+        self._recent_log_handler: Optional[RecentLogHandler] = None
+        self._init_recent_log_handler()
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -402,6 +422,9 @@ class SpreadArbBot:
                 state = self.state_manager.get_state()
                 if self._last_state_seen is not None and state != self._last_state_seen:
                     await self._handle_state_transition_alignment(self._last_state_seen, state)
+                    reason = self._get_state_anomaly_reason(self._last_state_seen, state)
+                    if reason:
+                        self._notify_state_anomaly(self._last_state_seen, state, reason)
                 self._last_state_seen = state
                 # 兜底：定期检查最近Maker订单是否已成交但未触发对冲
                 await self._maybe_recover_maker_fill_out_of_band()
@@ -2890,6 +2913,9 @@ class SpreadArbBot:
         """成交晚到：不在Maker等待状态时，尝试检测单边并补对冲"""
         try:
             current_state = self.state_manager.get_state()
+            if current_state in [BotState.LIGHTER_HEDGING, BotState.OPENING_WAIT, BotState.CLOSING_WAIT, BotState.IDLE]:
+                logger.debug(f"补对冲跳过(已在后续流程): {current_state.value}")
+                return
             if current_state in [BotState.PAUSED, BotState.OPENING_TAKER, BotState.CLOSING_TAKER]:
                 logger.debug(f"补对冲跳过(非Maker状态): {current_state.value}")
                 return
@@ -3009,6 +3035,8 @@ class SpreadArbBot:
         # 若仍在Maker等待状态，交给主流程处理
         current_state = self.state_manager.get_state()
         if current_state in [BotState.OPENING_MAKER_WAIT, BotState.CLOSING_MAKER_WAIT, BotState.LIGHTER_HEDGING]:
+            return
+        if current_state in [BotState.OPENING_WAIT, BotState.CLOSING_WAIT, BotState.IDLE]:
             return
         if current_state in [BotState.PAUSED, BotState.OPENING_TAKER, BotState.CLOSING_TAKER]:
             return
@@ -3189,6 +3217,55 @@ class SpreadArbBot:
             f"胜率{stats.win_rate:.1%} | "
             f"净利润${stats.net_profit:.2f}"
         )
+
+    def _init_recent_log_handler(self) -> None:
+        """初始化最近日志缓冲（用于异常推送）"""
+        root = logging.getLogger()
+        for handler in root.handlers:
+            if isinstance(handler, RecentLogHandler):
+                self._recent_log_handler = handler
+                self._recent_log_lines = handler.buffer
+                return
+        handler = RecentLogHandler(self._recent_log_lines)
+        root.addHandler(handler)
+        self._recent_log_handler = handler
+
+    def _get_recent_log_tail(self, limit: int = 20) -> List[str]:
+        if not self._recent_log_lines:
+            return []
+        return list(self._recent_log_lines)[-limit:]
+
+    def _get_state_anomaly_reason(self, prev_state: BotState, next_state: BotState) -> Optional[str]:
+        rollback_pairs = {
+            (BotState.LIGHTER_HEDGING, BotState.OPENING_MAKER_WAIT),
+            (BotState.LIGHTER_HEDGING, BotState.CLOSING_MAKER_WAIT),
+            (BotState.OPENING_WAIT, BotState.OPENING_MAKER_WAIT),
+            (BotState.OPENING_WAIT, BotState.OPENING_TAKER),
+            (BotState.CLOSING_WAIT, BotState.CLOSING_MAKER_WAIT),
+            (BotState.CLOSING_WAIT, BotState.CLOSING_TAKER),
+        }
+        skip_pairs = {
+            (BotState.OPENING_MAKER_WAIT, BotState.HOLDING),
+            (BotState.OPENING_TAKER, BotState.HOLDING),
+            (BotState.CLOSING_MAKER_WAIT, BotState.IDLE),
+            (BotState.CLOSING_TAKER, BotState.IDLE),
+        }
+        if (prev_state, next_state) in rollback_pairs:
+            return "状态回退"
+        if (prev_state, next_state) in skip_pairs:
+            return "关键流程跳过"
+        return None
+
+    def _notify_state_anomaly(self, prev_state: BotState, next_state: BotState, reason: str) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"状态: {prev_state.value} -> {next_state.value}",
+            f"原因: {reason}",
+            "上下文(最近20条):",
+        ]
+        lines.extend(self._get_recent_log_tail(20))
+        self._notify("⚠️ 状态异常", lines)
 
     def _calc_maker_fill_delta(self, filled_qty: Decimal) -> Decimal:
         """计算本次需要对冲的新增成交量"""
@@ -4000,8 +4077,8 @@ class SpreadArbBot:
 
             else:
                 # 对冲失败
-                logger.error(
-                    f"❌ Lighter对冲失败 | "
+                logger.warning(
+                    f"⚠️ Lighter对冲未完全成交或超时 | "
                     f"error={result.error_message} | "
                     f"ext_filled_qty={ext_filled_qty}"
                 )
@@ -4398,7 +4475,7 @@ class SpreadArbBot:
             f"市价阈值: {threshold:.3%}",
             "动作: 撤单并切换市价开仓",
         ]
-        self._notify("⚠️ 开仓挂单升级市价", lines)
+        self._notify("🦶 开仓挂单升级市价", lines)
 
     def _notify_fill_verify_failed(self, is_opening: bool, expected_qty: Decimal, source: str) -> None:
         lines = [
@@ -4957,6 +5034,8 @@ class SpreadArbBot:
             return False
         if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
             return False
+        if self._maker_wait_state.current_order.status == 'FILLED':
+            return False
 
         order_id = self._maker_wait_state.current_order.order_id
 
@@ -5028,6 +5107,8 @@ class SpreadArbBot:
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
             return False
         if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
+            return False
+        if self._maker_wait_state.current_order.status == 'FILLED':
             return False
 
         order_id = self._maker_wait_state.current_order.order_id
@@ -5113,6 +5194,8 @@ class SpreadArbBot:
             return False
         if self.state_manager.get_state() != BotState.OPENING_MAKER_WAIT:
             return False
+        if self._maker_wait_state.current_order.status == 'FILLED':
+            return False
         if not spread_info or not spread_info.is_valid():
             return False
 
@@ -5175,6 +5258,10 @@ class SpreadArbBot:
         """CLOSING_MAKER_WAIT状态：价差不满足则撤单回HOLDING"""
         time_module = __import__('time')
         if not hasattr(self, '_maker_wait_state') or self._maker_wait_state.current_order is None:
+            return False
+        if self.state_manager.get_state() != BotState.CLOSING_MAKER_WAIT:
+            return False
+        if self._maker_wait_state.current_order.status == 'FILLED':
             return False
 
         if not spread_info:
