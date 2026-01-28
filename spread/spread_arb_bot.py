@@ -777,6 +777,11 @@ class SpreadArbBot:
         logger.info("执行市价开仓...")
         import time
         self._last_open_time = time.time()
+        # 清理 Maker 上下文，避免误触发补对冲
+        self._last_maker_order_id = None
+        self._last_maker_is_opening = None
+        self._last_maker_context_id = None
+        self._last_maker_context_state = None
         spread_info = self.spread_monitor.get_current_spread()
         if spread_info is None or not spread_info.is_valid():
             logger.warning("无法获取价差信息，取消市价开仓")
@@ -5704,6 +5709,11 @@ class SpreadArbBot:
         logger.info(f"执行市价平仓: 数量={total_quantity}")
 
         try:
+            # 清理 Maker 上下文，避免误触发补对冲
+            self._last_maker_order_id = None
+            self._last_maker_is_opening = None
+            self._last_maker_context_id = None
+            self._last_maker_context_state = None
             # 如果交易所已无仓位，直接回到IDLE
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
