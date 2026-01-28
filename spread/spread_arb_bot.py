@@ -2906,15 +2906,14 @@ class SpreadArbBot:
             if abs(imbalance) < tolerance:
                 logger.info("成交晚到但仓位已平衡，跳过补对冲")
                 return
+            delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+            if delta_qty <= Decimal("0.0001"):
+                logger.info("成交晚到已对冲，跳过补对冲")
+                return
 
-        delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
-        if delta_qty <= Decimal("0.0001"):
-            logger.info("成交晚到已对冲，跳过补对冲")
-            return
-
-        hedge_qty = min(abs(imbalance), delta_qty)
-        if hedge_qty <= 0:
-            return
+            hedge_qty = min(abs(imbalance), delta_qty)
+            if hedge_qty <= 0:
+                return
 
             # 创建MakerWaitState以携带is_opening给对冲逻辑
             from models import MakerWaitState
