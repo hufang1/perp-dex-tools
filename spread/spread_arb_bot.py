@@ -5126,6 +5126,22 @@ class SpreadArbBot:
             ):
                 return True
 
+            # 撤单后额外检查实盘仓位，避免已成交但状态未同步时误切市价
+            try:
+                ext_position = await self.extended_client.get_account_positions()
+                tolerance = Decimal("0.001")
+                if abs(ext_position) >= tolerance:
+                    import time
+                    self._opening_wait_start_time = time.time()
+                    self.state_manager.set_state(
+                        BotState.OPENING_WAIT,
+                        "撤单后检测到Ext仓位，进入仓位确认",
+                    )
+                    await self.state_manager.save_state()
+                    return True
+            except Exception as e:
+                logger.debug(f"撤单后检查Ext仓位失败: {e}")
+
             if await self._safe_exit_maker_wait(BotState.OPENING_TAKER, "市价阈值触发，切市价开仓", is_opening=True):
                 return True
             self._maker_wait_state.reset()
