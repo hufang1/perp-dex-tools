@@ -2310,7 +2310,7 @@ class SpreadArbBot:
         )
         self.price_monitor = PriceMonitor(config=price_config)
         # 设置tick size（用于价格偏离检测）
-        self.price_monitor.set_tick_size(Decimal('0.1'))  # ETH的tick size通常是1
+        self.price_monitor.set_tick_size(Decimal('0.5'))  # ETH的tick size通常是1
 
         # 等差数列开仓策略 (016-spread-optimize)
         self.open_strategy = ArithmeticOpenStrategy(self.config)
