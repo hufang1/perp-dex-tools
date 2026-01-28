@@ -202,6 +202,7 @@ class SpreadArbBot:
         self._last_boll_log_time: float = 0.0
         self._bandwidth_blocked: bool = False
         self._open_maker_confirm_start: Optional[float] = None
+        self._suppress_open_failure_notify: bool = False
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -552,7 +553,7 @@ class SpreadArbBot:
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
                 self._notify(
-                    "⚠️ 仓位不一致(开仓阶段)",
+                    "⚠️ 开仓仓位不一致",
                     [
                         f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         f"交易对: {self.config.symbol}",
@@ -560,7 +561,7 @@ class SpreadArbBot:
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
-                        "动作: 回滚单边(本次开仓量)",
+                        "动作: 单边开仓，准备执行本次开仓仓位回滚",
                     ],
                 )
                 await self.trade_executor.rollback_position("extended", reduce_qty, side)
@@ -572,7 +573,7 @@ class SpreadArbBot:
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
                 self._notify(
-                    "⚠️ 仓位不一致(开仓阶段)",
+                    "⚠️ 开仓仓位不一致",
                     [
                         f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         f"交易对: {self.config.symbol}",
@@ -580,7 +581,7 @@ class SpreadArbBot:
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
-                        "动作: 回滚单边(本次开仓量)",
+                        "动作: 单边开仓，准备执行本次开仓仓位回滚",
                     ],
                 )
                 await self.trade_executor.rollback_position("lighter", reduce_qty, side)
@@ -1384,7 +1385,8 @@ class SpreadArbBot:
                 if both_zero:
                     # 两边都没有开仓
                     logger.warning(f"开仓失败：两边都没有仓位")
-                    self._notify_open_failure("两边都没有仓位", ext_position, lig_position)
+                    if not self._suppress_open_failure_notify:
+                        self._notify_open_failure("两边都没有仓位", ext_position, lig_position)
 
                     # CSV埋点：开仓失败（两边都没开）
                     if hasattr(self, '_pending_open_position') and self._pending_open_position:
@@ -1405,6 +1407,7 @@ class SpreadArbBot:
                     logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
                     self.state_manager.set_state(BotState.IDLE, f"开仓失败：两边都没有仓位")
                     self._opening_wait_start_time = None
+                    self._suppress_open_failure_notify = False
 
                     # 清除待确认的仓位
                     if hasattr(self, '_pending_open_position'):
@@ -1489,6 +1492,7 @@ class SpreadArbBot:
             elif elapsed >= 2.0 and not positions_match:
                 # 等待2秒后，如果仓位仍不一致，只平掉本次开仓的数量（不平全仓）
                 logger.warning(f"仓位验证失败 (elapsed={elapsed:.1f}s >= 2.0s): Ext={ext_position} Lig={lig_position} diff={ext_lig_diff}")
+                self._suppress_open_failure_notify = True
 
                 # 判断哪边多了仓位，只平掉多出来的部分（本次开仓数量）
                 portfolio = self.close_strategy.get_portfolio()
@@ -1533,13 +1537,31 @@ class SpreadArbBot:
                     # 两边都平了，进入 IDLE
                     logger.info(f"回滚后无仓位 Ext={ext_position_after} Lig={lig_position_after}，进入空闲状态")
                     logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
+                    self._notify(
+                        "✅ 开仓回滚完成",
+                        [
+                            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            f"交易对: {self.config.symbol}",
+                            "结果: 回滚成功，两边已无仓位",
+                        ],
+                    )
                     self.state_manager.set_state(BotState.IDLE, "仓位回滚完成，无持仓")
                     self._opening_wait_start_time = None
+                    self._suppress_open_failure_notify = False
                 elif both_match:
                     # 两边都有持仓且相等，进入 HOLDING
                     logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
+                    self._notify(
+                        "✅ 开仓回滚完成",
+                        [
+                            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            f"交易对: {self.config.symbol}",
+                            f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
+                        ],
+                    )
                     self.state_manager.set_state(BotState.HOLDING, f"回滚后恢复持仓状态")
                     self._opening_wait_start_time = None
+                    self._suppress_open_failure_notify = False
                 else:
                     # 仓位仍不一致，强制全平
                     logger.error(f"回滚后仓位仍不一致 Ext={ext_position_after} Lig={lig_position_after}，强制全平")
@@ -1565,6 +1587,7 @@ class SpreadArbBot:
                         self._notify_paused(reason)
 
                     self._opening_wait_start_time = None
+                    self._suppress_open_failure_notify = False
 
                 await self.state_manager.save_state()
             else:
