@@ -501,7 +501,7 @@ class SpreadArbBot:
 
             if mode == "closing":
                 # 仅在进入CLOSING_WAIT时做强一致性检查，避免对冲中误判
-                if next_state != BotState.CLOSING_WAIT:
+                if prev_state == BotState.CLOSING_WAIT or next_state != BotState.CLOSING_WAIT:
                     return
                 logger.error(
                     f"⚠️ 平仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，触发强平"
@@ -523,7 +523,7 @@ class SpreadArbBot:
                 return
 
             # 开仓阶段：仅在进入OPENING_WAIT时做单边回滚，避免对冲中误判
-            if next_state != BotState.OPENING_WAIT:
+            if prev_state == BotState.OPENING_WAIT or next_state != BotState.OPENING_WAIT:
                 return
 
             pending_qty = None
@@ -1474,6 +1474,17 @@ class SpreadArbBot:
 
                     self._pending_open_position = None
 
+                # 开仓确认成功，清理开仓上下文，避免误触发开仓对齐回滚
+                self._last_maker_order_id = None
+                self._last_maker_is_opening = None
+                self._last_maker_context_id = None
+                self._last_maker_context_state = None
+                if hasattr(self, "_hedging_state") and self._hedging_state:
+                    try:
+                        self._hedging_state.reset()
+                    except Exception:
+                        self._hedging_state = None
+
                 await self.state_manager.save_state()
             elif elapsed >= 2.0 and not positions_match:
                 # 等待2秒后，如果仓位仍不一致，只平掉本次开仓的数量（不平全仓）
@@ -2315,7 +2326,7 @@ class SpreadArbBot:
         )
         self.price_monitor = PriceMonitor(config=price_config)
         # 设置tick size（用于价格偏离检测）
-        self.price_monitor.set_tick_size(Decimal('0.5'))  # ETH的tick size通常是1
+        self.price_monitor.set_tick_size(Decimal('1'))  # ETH的tick size通常是1
 
         # 等差数列开仓策略 (016-spread-optimize)
         self.open_strategy = ArithmeticOpenStrategy(self.config)
