@@ -4020,13 +4020,21 @@ class SpreadArbBot:
                                 actual_lig_price = result.lighter_price or ext_filled_price
                                 actual_spread = Decimal('0')
 
+                            fill_ext_price = ext_filled_price
+                            fill_lig_price = result.lighter_price or lig_vwap or actual_lig_price or ext_filled_price
+                            tranche_spread = (
+                                (fill_lig_price - fill_ext_price) / fill_ext_price
+                                if fill_ext_price > 0
+                                else Decimal("0")
+                            )
+
                             # 创建 _pending_open_position（用于后续添加到 Portfolio）
                             self._pending_open_position = OpenPosition(
                                 position_id=str(uuid.uuid4()),
                                 open_time=datetime.now().timestamp(),
-                                ext_price=actual_ext_price,
-                                lig_price=actual_lig_price,
-                                open_spread=actual_spread,
+                                ext_price=fill_ext_price,
+                                lig_price=fill_lig_price,
+                                open_spread=tranche_spread,
                                 quantity=ext_filled_qty,
                                 ext_order_id=self._maker_wait_state.current_order.order_id,
                                 lig_order_id=result.lighter_order_id,
@@ -4035,9 +4043,9 @@ class SpreadArbBot:
                             )
                             logger.info(
                                 f"[_create_pending_position] 创建待确认仓位 | Maker模式 | "
-                                f"ext_price={actual_ext_price:.2f} | "
-                                f"lig_price={actual_lig_price:.2f} | "
-                                f"open_spread={actual_spread:.3%} | "
+                                f"ext_price={fill_ext_price:.2f} | "
+                                f"lig_price={fill_lig_price:.2f} | "
+                                f"open_spread={tranche_spread:.3%} | "
                                 f"quantity={ext_filled_qty}"
                             )
 
@@ -4449,7 +4457,7 @@ class SpreadArbBot:
             f"交易对: {self.config.symbol}",
             "方向: Ext买 / Lig卖",
             f"开仓价差率: {real_open_spread:.3%}",
-            f"当前仓位平均开仓价差: {avg_entry_spread:.3%}",
+            f"平均entry(全仓价差): {avg_entry_spread:.3%}",
             f"Ext开仓均价: {ext_price:.2f}",
             f"Lig开仓均价: {lig_price:.2f}",
             f"Ext仓位: {ext_pos}",
