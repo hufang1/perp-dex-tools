@@ -11,9 +11,10 @@
 import asyncio
 import time
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
+import re
 
 from models import SpreadInfo, Position, Trade, PositionState, CancelOrderResult
 from exceptions import (
@@ -45,6 +46,12 @@ class ExecutionResult:
         extended_order_time: Optional[float] = None,
         lighter_order_time: Optional[float] = None,
         orders_parallel: Optional[bool] = None,
+        extended_attempts: Optional[int] = None,
+        lighter_attempts: Optional[int] = None,
+        extended_error_code: Optional[str] = None,
+        lighter_error_code: Optional[str] = None,
+        extended_http_status: Optional[int] = None,
+        lighter_http_status: Optional[int] = None,
     ):
         self.success = success
         self.extended_order_id = extended_order_id
@@ -58,6 +65,12 @@ class ExecutionResult:
         self.extended_order_time = extended_order_time
         self.lighter_order_time = lighter_order_time
         self.orders_parallel = orders_parallel
+        self.extended_attempts = extended_attempts
+        self.lighter_attempts = lighter_attempts
+        self.extended_error_code = extended_error_code
+        self.lighter_error_code = lighter_error_code
+        self.extended_http_status = extended_http_status
+        self.lighter_http_status = lighter_http_status
 
 
 class TradeExecutor:
@@ -89,6 +102,43 @@ class TradeExecutor:
         self.timeout = timeout
 
         # logger.info(f"交易执行器初始化: 超时={timeout}秒")
+
+    def _extract_error_info(self, error: Exception) -> Tuple[Optional[str], Optional[int]]:
+        """从异常文本中提取错误码与HTTP状态码（尽力而为）。"""
+        text = str(error)
+        error_code = None
+        http_status = None
+
+        match_code = re.search(r"code=([0-9]{4,6})", text)
+        if not match_code:
+            match_code = re.search(r"\"code\"\\s*:\\s*([0-9]{3,6})", text)
+        if match_code:
+            error_code = match_code.group(1)
+
+        match_http = None
+        if "HTTP" in text:
+            match_http = re.search(r"HTTP[^0-9]*(\\d{3})", text)
+        if not match_http:
+            match_http = re.search(r"status\\s*[:=]\\s*(\\d{3})", text)
+        if not match_http:
+            match_http = re.search(r"code\\s*(\\d{3})\\s*-", text)
+        if match_http:
+            try:
+                http_status = int(match_http.group(1))
+            except Exception:
+                http_status = None
+
+        return error_code, http_status
+
+    def _extract_attempts(self, error: Exception) -> Optional[int]:
+        """尝试从异常对象中读取重试/尝试次数。"""
+        for attr in ("attempts", "retry_count", "retries"):
+            if hasattr(error, attr):
+                try:
+                    return int(getattr(error, attr))
+                except Exception:
+                    pass
+        return None
 
     async def execute_open_position(
         self,
@@ -158,7 +208,9 @@ class TradeExecutor:
                 return ExecutionResult(
                     success=False,
                     error_message=f"价格快照无效: time_delta={time_delta*1000:.1f}ms",
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_attempts=0,
+                    lighter_attempts=0,
                 )
 
             # Step 4: 计算taker价格（0.2%滑点）
@@ -209,21 +261,33 @@ class TradeExecutor:
 
             # 检查是否有错误
             if isinstance(extended_result, Exception):
+                ext_code, ext_http = self._extract_error_info(extended_result)
+                ext_attempts = self._extract_attempts(extended_result) or 1
                 return ExecutionResult(
                     error_message=f"Extended 订单失败: {extended_result}",
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=True,
+                    extended_attempts=ext_attempts,
+                    lighter_attempts=1,
+                    extended_error_code=ext_code,
+                    extended_http_status=ext_http,
                 )
 
             if isinstance(lighter_result, Exception):
+                lig_code, lig_http = self._extract_error_info(lighter_result)
+                lig_attempts = self._extract_attempts(lighter_result) or 1
                 return ExecutionResult(
                     error_message=f"Lighter 订单失败: {lighter_result}",
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=True,
+                    extended_attempts=1,
+                    lighter_attempts=lig_attempts,
+                    lighter_error_code=lig_code,
+                    lighter_http_status=lig_http,
                 )
 
             # 等待订单成交
@@ -257,6 +321,8 @@ class TradeExecutor:
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=True,
+                    extended_attempts=1,
+                    lighter_attempts=1,
                 )
             elif execution_status["timeout"]:
                 logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
@@ -273,6 +339,8 @@ class TradeExecutor:
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=True,
+                    extended_attempts=1,
+                    lighter_attempts=1,
                 )
             else:
                 logger.error(
@@ -292,14 +360,20 @@ class TradeExecutor:
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=True,
+                    extended_attempts=1,
+                    lighter_attempts=1,
                 )
 
         except Exception as e:
             logger.error(f"执行开仓失败: {e}")
+            ext_code, ext_http = self._extract_error_info(e)
             return ExecutionResult(
                 error_message=str(e),
                 execution_time=time.time() - start_time,
                 orders_parallel=True,
+                extended_attempts=self._extract_attempts(e) or 1,
+                extended_error_code=ext_code,
+                extended_http_status=ext_http,
             )
 
     async def execute_close_position(
@@ -337,7 +411,9 @@ class TradeExecutor:
                     success=True,
                     execution_time=time.time() - start_time,
                     extended_filled=True,
-                    lighter_filled=True
+                    lighter_filled=True,
+                    extended_attempts=0,
+                    lighter_attempts=0,
                 )
 
             async def _timed(coro):
@@ -372,21 +448,33 @@ class TradeExecutor:
 
             # 检查是否有错误
             if isinstance(extended_result, Exception):
+                ext_code, ext_http = self._extract_error_info(extended_result)
+                ext_attempts = self._extract_attempts(extended_result) or 1
                 return ExecutionResult(
                     error_message=f"Extended 订单失败: {extended_result}",
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=(tasks[0] is not None and tasks[1] is not None),
+                    extended_attempts=ext_attempts,
+                    lighter_attempts=1 if tasks[1] is not None else 0,
+                    extended_error_code=ext_code,
+                    extended_http_status=ext_http,
                 )
 
             if isinstance(lighter_result, Exception):
+                lig_code, lig_http = self._extract_error_info(lighter_result)
+                lig_attempts = self._extract_attempts(lighter_result) or 1
                 return ExecutionResult(
                     error_message=f"Lighter 订单失败: {lighter_result}",
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=(tasks[0] is not None and tasks[1] is not None),
+                    extended_attempts=1 if tasks[0] is not None else 0,
+                    lighter_attempts=lig_attempts,
+                    lighter_error_code=lig_code,
+                    lighter_http_status=lig_http,
                 )
 
             # 等待订单成交
@@ -417,6 +505,8 @@ class TradeExecutor:
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=(tasks[0] is not None and tasks[1] is not None),
+                    extended_attempts=1 if tasks[0] is not None else 0,
+                    lighter_attempts=1 if tasks[1] is not None else 0,
                 )
             else:
                 logger.error(f"平仓失败或超时")
@@ -428,14 +518,20 @@ class TradeExecutor:
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
                     orders_parallel=(tasks[0] is not None and tasks[1] is not None),
+                    extended_attempts=1 if tasks[0] is not None else 0,
+                    lighter_attempts=1 if tasks[1] is not None else 0,
                 )
 
         except Exception as e:
             logger.error(f"执行平仓失败: {e}")
+            ext_code, ext_http = self._extract_error_info(e)
             return ExecutionResult(
                 error_message=str(e),
                 execution_time=time.time() - start_time,
                 orders_parallel=(tasks[0] is not None and tasks[1] is not None),
+                extended_attempts=self._extract_attempts(e) or 1,
+                extended_error_code=ext_code,
+                extended_http_status=ext_http,
             )
 
     async def wait_for_execution(
@@ -953,7 +1049,8 @@ class TradeExecutor:
                 return ExecutionResult(
                     success=False,
                     error_message=order_result.error_message,
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_attempts=1,
                 )
 
             logger.info(
@@ -972,15 +1069,20 @@ class TradeExecutor:
                 extended_filled=False,  # Maker订单需要等待成交
                 extended_order_time=time.time() - start_time,
                 orders_parallel=False,
+                extended_attempts=1,
             )
 
         except Exception as e:
             logger.error(f"Extended Maker开仓订单失败: {e}")
+            ext_code, ext_http = self._extract_error_info(e)
             return ExecutionResult(
                 success=False,
                 error_message=str(e),
                 execution_time=time.time() - start_time,
                 orders_parallel=False,
+                extended_attempts=self._extract_attempts(e) or 1,
+                extended_error_code=ext_code,
+                extended_http_status=ext_http,
             )
 
     async def place_maker_close_order(
@@ -1015,7 +1117,8 @@ class TradeExecutor:
                 return ExecutionResult(
                     success=False,
                     error_message=order_result.error_message,
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_attempts=1,
                 )
 
             logger.info(
@@ -1034,15 +1137,20 @@ class TradeExecutor:
                 extended_filled=False,  # Maker订单需要等待成交
                 extended_order_time=time.time() - start_time,
                 orders_parallel=False,
+                extended_attempts=1,
             )
 
         except Exception as e:
             logger.error(f"Extended Maker平仓订单失败: {e}")
+            ext_code, ext_http = self._extract_error_info(e)
             return ExecutionResult(
                 success=False,
                 error_message=str(e),
                 execution_time=time.time() - start_time,
                 orders_parallel=False,
+                extended_attempts=self._extract_attempts(e) or 1,
+                extended_error_code=ext_code,
+                extended_http_status=ext_http,
             )
 
     async def execute_lighter_hedge(
@@ -1113,7 +1221,9 @@ class TradeExecutor:
                     lighter_order_id=lighter_result["order_id"],
                     lighter_price=lighter_result.get("price"),
                     execution_time=execution_time,
-                    lighter_filled=True
+                    lighter_filled=True,
+                    lighter_order_time=execution_time,
+                    lighter_attempts=1,
                 )
             else:
                 logger.warning("⚠️ Lighter对冲未完全成交或超时")
@@ -1123,15 +1233,21 @@ class TradeExecutor:
                     lighter_price=lighter_result.get("price"),
                     error_message="Lighter对冲订单未完全成交或超时",
                     execution_time=execution_time,
-                    lighter_filled=False
+                    lighter_filled=False,
+                    lighter_order_time=execution_time,
+                    lighter_attempts=1,
                 )
 
         except Exception as e:
             logger.error(f"Lighter对冲异常: {e}")
+            lig_code, lig_http = self._extract_error_info(e)
             return ExecutionResult(
                 success=False,
                 error_message=str(e),
-                execution_time=time.time() - start_time
+                execution_time=time.time() - start_time,
+                lighter_attempts=self._extract_attempts(e) or 1,
+                lighter_error_code=lig_code,
+                lighter_http_status=lig_http,
             )
 
     async def _wait_for_lighter_order(self, lighter_order_id: str, timeout: float = 6.0) -> bool:

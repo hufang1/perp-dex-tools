@@ -850,6 +850,12 @@ class SpreadArbBot:
                 "ext_time": result.execution_time,
                 "lig_time": None,
                 "parallel": False,
+                "ext_attempts": result.extended_attempts,
+                "lig_attempts": None,
+                "ext_error_code": result.extended_error_code,
+                "lig_error_code": None,
+                "ext_http_status": result.extended_http_status,
+                "lig_http_status": None,
             }
 
             # 初始化Maker等待状态
@@ -909,6 +915,12 @@ class SpreadArbBot:
             "ext_time": result.extended_order_time,
             "lig_time": result.lighter_order_time,
             "parallel": result.orders_parallel,
+            "ext_attempts": result.extended_attempts,
+            "lig_attempts": result.lighter_attempts,
+            "ext_error_code": result.extended_error_code,
+            "lig_error_code": result.lighter_error_code,
+            "ext_http_status": result.extended_http_status,
+            "lig_http_status": result.lighter_http_status,
         }
         if result.extended_price or result.lighter_price:
             logger.info(
@@ -1228,6 +1240,12 @@ class SpreadArbBot:
                 "ext_time": result.execution_time,
                 "lig_time": None,
                 "parallel": False,
+                "ext_attempts": result.extended_attempts,
+                "lig_attempts": None,
+                "ext_error_code": result.extended_error_code,
+                "lig_error_code": None,
+                "ext_http_status": result.extended_http_status,
+                "lig_http_status": None,
             }
 
             # 成功挂单则清零失败计数
@@ -1326,6 +1344,12 @@ class SpreadArbBot:
                 "ext_time": result.extended_order_time,
                 "lig_time": result.lighter_order_time,
                 "parallel": result.orders_parallel,
+                "ext_attempts": result.extended_attempts,
+                "lig_attempts": result.lighter_attempts,
+                "ext_error_code": result.extended_error_code,
+                "lig_error_code": result.lighter_error_code,
+                "ext_http_status": result.extended_http_status,
+                "lig_http_status": result.lighter_http_status,
             }
 
             if result.success:
@@ -3430,12 +3454,40 @@ class SpreadArbBot:
         lig_time = metrics.get("lig_time")
         parallel = metrics.get("parallel")
         mode = metrics.get("mode")
+        ext_attempts = metrics.get("ext_attempts")
+        lig_attempts = metrics.get("lig_attempts")
+        ext_error_code = metrics.get("ext_error_code")
+        lig_error_code = metrics.get("lig_error_code")
+        ext_http_status = metrics.get("ext_http_status")
+        lig_http_status = metrics.get("lig_http_status")
         lines = [
             f"{label}方式: {mode}" if mode else f"{label}方式: -",
             f"Ext耗时: {ext_time:.3f}s" if isinstance(ext_time, (int, float)) else "Ext耗时: -",
             f"Lig耗时: {lig_time:.3f}s" if isinstance(lig_time, (int, float)) else "Lig耗时: -",
             f"并行下单: {'是' if parallel else '否'}" if parallel is not None else "并行下单: -",
         ]
+        if ext_attempts is not None:
+            lines.append(f"Ext尝试: {ext_attempts}")
+            if isinstance(ext_attempts, int) and ext_attempts >= 1:
+                lines.append(f"Ext重试: {max(0, ext_attempts - 1)}")
+        if lig_attempts is not None:
+            lines.append(f"Lig尝试: {lig_attempts}")
+            if isinstance(lig_attempts, int) and lig_attempts >= 1:
+                lines.append(f"Lig重试: {max(0, lig_attempts - 1)}")
+        if ext_error_code or ext_http_status:
+            parts = []
+            if ext_error_code:
+                parts.append(f"code={ext_error_code}")
+            if ext_http_status:
+                parts.append(f"http={ext_http_status}")
+            lines.append(f"Ext错误: {', '.join(parts)}")
+        if lig_error_code or lig_http_status:
+            parts = []
+            if lig_error_code:
+                parts.append(f"code={lig_error_code}")
+            if lig_http_status:
+                parts.append(f"http={lig_http_status}")
+            lines.append(f"Lig错误: {', '.join(parts)}")
         return lines
 
     def _calc_maker_fill_delta(self, filled_qty: Decimal) -> Decimal:
@@ -4130,10 +4182,16 @@ class SpreadArbBot:
                     if not self._last_open_exec:
                         self._last_open_exec = {"mode": "挂单", "ext_time": None, "lig_time": None, "parallel": False}
                     self._last_open_exec["lig_time"] = result.execution_time
+                    self._last_open_exec["lig_attempts"] = result.lighter_attempts
+                    self._last_open_exec["lig_error_code"] = result.lighter_error_code
+                    self._last_open_exec["lig_http_status"] = result.lighter_http_status
                 else:
                     if not self._last_close_exec:
                         self._last_close_exec = {"mode": "挂单", "ext_time": None, "lig_time": None, "parallel": False}
                     self._last_close_exec["lig_time"] = result.execution_time
+                    self._last_close_exec["lig_attempts"] = result.lighter_attempts
+                    self._last_close_exec["lig_error_code"] = result.lighter_error_code
+                    self._last_close_exec["lig_http_status"] = result.lighter_http_status
 
                 # 记录本次成交
                 if hasattr(self, '_maker_wait_state'):
