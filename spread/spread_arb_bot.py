@@ -224,6 +224,13 @@ class SpreadArbBot:
         self._recent_log_handler: Optional[RecentLogHandler] = None
         self._init_recent_log_handler()
         self._open_attempt_id: Optional[str] = None
+        self._state_enter_ts: float = time.time()
+        self._open_flow_durations: Dict[str, float] = {}
+        self._close_flow_durations: Dict[str, float] = {}
+        self._last_open_flow_durations: Dict[str, float] = {}
+        self._last_close_flow_durations: Dict[str, float] = {}
+        self._last_open_exec: Dict[str, object] = {}
+        self._last_close_exec: Dict[str, object] = {}
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -422,6 +429,7 @@ class SpreadArbBot:
                 # 获取当前状态
                 state = self.state_manager.get_state()
                 if self._last_state_seen is not None and state != self._last_state_seen:
+                    self._record_state_transition_duration(self._last_state_seen, state)
                     await self._handle_state_transition_alignment(self._last_state_seen, state)
                     reason = self._get_state_anomaly_reason(self._last_state_seen, state)
                     if reason:
@@ -837,6 +845,12 @@ class SpreadArbBot:
                 logger.error(f"Extended Maker开仓订单失败: {result.error_message}")
                 await self._enter_idle_or_holding_after_open_failure("Maker订单失败")
                 return
+            self._last_open_exec = {
+                "mode": "挂单",
+                "ext_time": result.execution_time,
+                "lig_time": None,
+                "parallel": False,
+            }
 
             # 初始化Maker等待状态
             from models import MakerWaitState
@@ -890,6 +904,12 @@ class SpreadArbBot:
             self.config.target_quantity,
             spread_info
         )
+        self._last_open_exec = {
+            "mode": "市价",
+            "ext_time": result.extended_order_time,
+            "lig_time": result.lighter_order_time,
+            "parallel": result.orders_parallel,
+        }
         if result.extended_price or result.lighter_price:
             logger.info(
                 f"[taker价] Ext={result.extended_price or spread_info.ext_ask:.2f} "
@@ -1203,6 +1223,12 @@ class SpreadArbBot:
                     self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
                     await self.state_manager.save_state()
                 return
+            self._last_close_exec = {
+                "mode": "挂单",
+                "ext_time": result.execution_time,
+                "lig_time": None,
+                "parallel": False,
+            }
 
             # 成功挂单则清零失败计数
             self._maker_close_fail_count = 0
@@ -1295,6 +1321,12 @@ class SpreadArbBot:
                 temp_position,
                 total_quantity
             )
+            self._last_close_exec = {
+                "mode": "市价",
+                "ext_time": result.extended_order_time,
+                "lig_time": result.lighter_order_time,
+                "parallel": result.orders_parallel,
+            }
 
             if result.success:
                 logger.info(
@@ -1570,6 +1602,8 @@ class SpreadArbBot:
                             f"交易对: {self.config.symbol}",
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             "结果: 回滚成功，两边已无仓位",
+                            *self._format_exec_metrics(self._last_open_exec, "开仓"),
+                            f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
                     )
                     self.state_manager.set_state(BotState.IDLE, "仓位回滚完成，无持仓")
@@ -1585,6 +1619,8 @@ class SpreadArbBot:
                             f"交易对: {self.config.symbol}",
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
+                            *self._format_exec_metrics(self._last_open_exec, "开仓"),
+                            f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
                     )
                     self.state_manager.set_state(BotState.HOLDING, f"回滚后恢复持仓状态")
@@ -3298,6 +3334,110 @@ class SpreadArbBot:
         lines.extend(self._get_recent_log_tail(20))
         self._notify(title, lines)
 
+    def _record_state_transition_duration(self, prev_state: BotState, next_state: BotState) -> None:
+        now = time.time()
+        duration = max(0.0, now - self._state_enter_ts)
+
+        opening_states = {
+            BotState.OPENING,
+            BotState.OPENING_TAKER,
+            BotState.OPENING_MAKER_WAIT,
+            BotState.OPENING_WAIT,
+        }
+        closing_states = {
+            BotState.CLOSING,
+            BotState.CLOSING_TAKER,
+            BotState.CLOSING_MAKER_WAIT,
+            BotState.CLOSING_WAIT,
+        }
+
+        def _is_opening_flow(state: BotState, other_state: Optional[BotState] = None) -> bool:
+            if state in opening_states:
+                return True
+            if state == BotState.LIGHTER_HEDGING:
+                if bool(getattr(self, "_hedging_state", None)):
+                    return not self._hedging_state.is_closing
+                if other_state in opening_states:
+                    return True
+            return False
+
+        def _is_closing_flow(state: BotState, other_state: Optional[BotState] = None) -> bool:
+            if state in closing_states:
+                return True
+            if state == BotState.LIGHTER_HEDGING:
+                if bool(getattr(self, "_hedging_state", None)):
+                    return self._hedging_state.is_closing
+                if other_state in closing_states:
+                    return True
+            return False
+
+        prev_flow_hint = getattr(self, "_last_non_hedge_state", None)
+        if _is_opening_flow(prev_state, prev_flow_hint) or _is_opening_flow(prev_state, next_state):
+            self._open_flow_durations[prev_state.value] = self._open_flow_durations.get(prev_state.value, 0.0) + duration
+        if _is_closing_flow(prev_state, prev_flow_hint) or _is_closing_flow(prev_state, next_state):
+            self._close_flow_durations[prev_state.value] = self._close_flow_durations.get(prev_state.value, 0.0) + duration
+
+        if _is_opening_flow(next_state, prev_state) and not _is_opening_flow(prev_state, next_state):
+            self._open_flow_durations = {}
+            self._last_open_exec = {}
+        if _is_closing_flow(next_state, prev_state) and not _is_closing_flow(prev_state, next_state):
+            self._close_flow_durations = {}
+            self._last_close_exec = {}
+
+        if prev_state == BotState.OPENING_WAIT and next_state in [BotState.HOLDING, BotState.IDLE]:
+            self._last_open_flow_durations = dict(self._open_flow_durations)
+        if prev_state == BotState.CLOSING_WAIT and next_state in [BotState.HOLDING, BotState.IDLE]:
+            self._last_close_flow_durations = dict(self._close_flow_durations)
+
+        if next_state != BotState.LIGHTER_HEDGING:
+            self._last_non_hedge_state = next_state
+
+        self._state_enter_ts = now
+        logger.info(
+            f"[状态耗时] {prev_state.value} -> {next_state.value} = {duration:.2f}s | "
+            f"open_flow={self._format_flow_durations(self._open_flow_durations)} | "
+            f"close_flow={self._format_flow_durations(self._close_flow_durations)}"
+        )
+
+    def _format_flow_durations(self, durations: Dict[str, float]) -> str:
+        if not durations:
+            return "-"
+        parts = [f"{k}={v:.2f}s" for k, v in durations.items()]
+        return ", ".join(parts)
+
+    def _get_open_flow_snapshot(self) -> Dict[str, float]:
+        snapshot = dict(self._open_flow_durations)
+        current = self.state_manager.get_state()
+        if current == BotState.OPENING_WAIT or self._last_state_seen == BotState.OPENING_WAIT:
+            snapshot[BotState.OPENING_WAIT.value] = snapshot.get(BotState.OPENING_WAIT.value, 0.0) + max(
+                0.0, time.time() - self._state_enter_ts
+            )
+        return snapshot
+
+    def _get_close_flow_snapshot(self) -> Dict[str, float]:
+        snapshot = dict(self._close_flow_durations)
+        current = self.state_manager.get_state()
+        if current == BotState.CLOSING_WAIT or self._last_state_seen == BotState.CLOSING_WAIT:
+            snapshot[BotState.CLOSING_WAIT.value] = snapshot.get(BotState.CLOSING_WAIT.value, 0.0) + max(
+                0.0, time.time() - self._state_enter_ts
+            )
+        return snapshot
+
+    def _format_exec_metrics(self, metrics: Dict[str, object], label: str) -> List[str]:
+        if not metrics:
+            return []
+        ext_time = metrics.get("ext_time")
+        lig_time = metrics.get("lig_time")
+        parallel = metrics.get("parallel")
+        mode = metrics.get("mode")
+        lines = [
+            f"{label}方式: {mode}" if mode else f"{label}方式: -",
+            f"Ext耗时: {ext_time:.3f}s" if isinstance(ext_time, (int, float)) else "Ext耗时: -",
+            f"Lig耗时: {lig_time:.3f}s" if isinstance(lig_time, (int, float)) else "Lig耗时: -",
+            f"并行下单: {'是' if parallel else '否'}" if parallel is not None else "并行下单: -",
+        ]
+        return lines
+
     def _calc_maker_fill_delta(self, filled_qty: Decimal) -> Decimal:
         """计算本次需要对冲的新增成交量"""
         try:
@@ -3986,6 +4126,14 @@ class SpreadArbBot:
                     f"order_id={result.lighter_order_id} | "
                     f"quantity={ext_filled_qty}"
                 )
+                if is_opening:
+                    if not self._last_open_exec:
+                        self._last_open_exec = {"mode": "挂单", "ext_time": None, "lig_time": None, "parallel": False}
+                    self._last_open_exec["lig_time"] = result.execution_time
+                else:
+                    if not self._last_close_exec:
+                        self._last_close_exec = {"mode": "挂单", "ext_time": None, "lig_time": None, "parallel": False}
+                    self._last_close_exec["lig_time"] = result.execution_time
 
                 # 记录本次成交
                 if hasattr(self, '_maker_wait_state'):
@@ -4523,6 +4671,8 @@ class SpreadArbBot:
             f"Ext仓位: {ext_pos}",
             f"Lig仓位: {lig_pos}",
         ]
+        lines.extend(self._format_exec_metrics(self._last_open_exec, "开仓"))
+        lines.append(f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}")
         self._notify(f"✅ 开仓成功（{mode}）", lines)
 
     def _notify_open_failure(self, reason: str, ext_pos: Optional[Decimal] = None, lig_pos: Optional[Decimal] = None) -> None:
@@ -4531,6 +4681,8 @@ class SpreadArbBot:
             f"交易对: {self.config.symbol}",
             f"原因: {reason}",
         ]
+        lines.extend(self._format_exec_metrics(self._last_open_exec, "开仓"))
+        lines.append(f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}")
         if ext_pos is not None and lig_pos is not None:
             lines.append(f"仓位: Ext={ext_pos} Lig={lig_pos}")
         self._notify("❌ 开仓失败", lines)
@@ -4632,6 +4784,8 @@ class SpreadArbBot:
             f"Lig实际收益: {lig_delta:.2f}",
             f"收益(资金变化): {funds_delta:.2f}",
         ]
+        lines.extend(self._format_exec_metrics(self._last_close_exec, "平仓"))
+        lines.append(f"状态耗时: {self._format_flow_durations(self._get_close_flow_snapshot())}")
         self._notify("✅ 平仓成功", lines)
 
 
@@ -6046,6 +6200,12 @@ class SpreadArbBot:
                     self.state_manager.set_state(BotState.HOLDING, "Maker平仓订单失败")
                     await self.state_manager.save_state()
                 return
+            self._last_close_exec = {
+                "mode": "挂单",
+                "ext_time": result.execution_time,
+                "lig_time": None,
+                "parallel": False,
+            }
 
             # 成功挂单则清零失败计数
             self._maker_close_fail_count = 0

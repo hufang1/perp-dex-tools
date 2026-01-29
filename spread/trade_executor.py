@@ -41,7 +41,10 @@ class ExecutionResult:
         error_message: Optional[str] = None,
         execution_time: float = 0.0,
         extended_filled: bool = False,
-        lighter_filled: bool = False
+        lighter_filled: bool = False,
+        extended_order_time: Optional[float] = None,
+        lighter_order_time: Optional[float] = None,
+        orders_parallel: Optional[bool] = None,
     ):
         self.success = success
         self.extended_order_id = extended_order_id
@@ -52,6 +55,9 @@ class ExecutionResult:
         self.execution_time = execution_time
         self.extended_filled = extended_filled
         self.lighter_filled = lighter_filled
+        self.extended_order_time = extended_order_time
+        self.lighter_order_time = lighter_order_time
+        self.orders_parallel = orders_parallel
 
 
 class TradeExecutor:
@@ -182,26 +188,42 @@ class TradeExecutor:
             )
 
             # Step 7: 并发发送订单（使用计算好的价格）
+            async def _timed(coro):
+                start = time.time()
+                res = await coro
+                return res, time.time() - start
+
             results = await asyncio.gather(
-                self._place_extended_order_taker("buy", quantity, ext_price),
-                self._place_lighter_order_taker("sell", quantity, lig_price),
+                _timed(self._place_extended_order_taker("buy", quantity, ext_price)),
+                _timed(self._place_lighter_order_taker("sell", quantity, lig_price)),
                 return_exceptions=True
             )
 
+            ext_time = lig_time = None
             extended_result = results[0]
             lighter_result = results[1]
+            if isinstance(extended_result, tuple):
+                extended_result, ext_time = extended_result
+            if isinstance(lighter_result, tuple):
+                lighter_result, lig_time = lighter_result
 
             # 检查是否有错误
             if isinstance(extended_result, Exception):
                 return ExecutionResult(
                     error_message=f"Extended 订单失败: {extended_result}",
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=True,
                 )
 
             if isinstance(lighter_result, Exception):
                 return ExecutionResult(
                     error_message=f"Lighter 订单失败: {lighter_result}",
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=True,
                 )
 
             # 等待订单成交
@@ -231,7 +253,10 @@ class TradeExecutor:
                     lighter_price=lighter_result.get("price"),
                     execution_time=execution_time,
                     extended_filled=True,
-                    lighter_filled=True
+                    lighter_filled=True,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=True,
                 )
             elif execution_status["timeout"]:
                 logger.warning("订单状态查询超时（不取消订单，通过实际仓位确认）")
@@ -244,7 +269,10 @@ class TradeExecutor:
                     error_message="订单状态查询超时",
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
-                    lighter_filled=execution_status["lighter_filled"]
+                    lighter_filled=execution_status["lighter_filled"],
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=True,
                 )
             else:
                 logger.error(
@@ -260,14 +288,18 @@ class TradeExecutor:
                     error_message="单边成交",
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
-                    lighter_filled=execution_status["lighter_filled"]
+                    lighter_filled=execution_status["lighter_filled"],
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=True,
                 )
 
         except Exception as e:
             logger.error(f"执行开仓失败: {e}")
             return ExecutionResult(
                 error_message=str(e),
-                execution_time=time.time() - start_time
+                execution_time=time.time() - start_time,
+                orders_parallel=True,
             )
 
     async def execute_close_position(
@@ -308,13 +340,18 @@ class TradeExecutor:
                     lighter_filled=True
                 )
 
+            async def _timed(coro):
+                start = time.time()
+                res = await coro
+                return res, time.time() - start
+
             tasks = []
             if ext_qty >= tolerance:
-                tasks.append(self._place_extended_order_taker("sell", ext_qty, None, reduce_only=True))
+                tasks.append(_timed(self._place_extended_order_taker("sell", ext_qty, None, reduce_only=True)))
             else:
                 tasks.append(None)
             if lig_qty >= tolerance:
-                tasks.append(self._place_lighter_order_taker("buy", lig_qty, None, reduce_only=True))
+                tasks.append(_timed(self._place_lighter_order_taker("buy", lig_qty, None, reduce_only=True)))
             else:
                 tasks.append(None)
 
@@ -325,24 +362,31 @@ class TradeExecutor:
 
             extended_result = None
             lighter_result = None
+            ext_time = lig_time = None
             idx = 0
             if tasks[0] is not None:
-                extended_result = results[idx]
+                extended_result, ext_time = results[idx]
                 idx += 1
             if tasks[1] is not None:
-                lighter_result = results[idx]
+                lighter_result, lig_time = results[idx]
 
             # 检查是否有错误
             if isinstance(extended_result, Exception):
                 return ExecutionResult(
                     error_message=f"Extended 订单失败: {extended_result}",
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=(tasks[0] is not None and tasks[1] is not None),
                 )
 
             if isinstance(lighter_result, Exception):
                 return ExecutionResult(
                     error_message=f"Lighter 订单失败: {lighter_result}",
-                    execution_time=time.time() - start_time
+                    execution_time=time.time() - start_time,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=(tasks[0] is not None and tasks[1] is not None),
                 )
 
             # 等待订单成交
@@ -369,7 +413,10 @@ class TradeExecutor:
                     lighter_price=lighter_result.get("price") if isinstance(lighter_result, dict) else None,
                     execution_time=execution_time,
                     extended_filled=True,
-                    lighter_filled=True
+                    lighter_filled=True,
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=(tasks[0] is not None and tasks[1] is not None),
                 )
             else:
                 logger.error(f"平仓失败或超时")
@@ -377,14 +424,18 @@ class TradeExecutor:
                     error_message="平仓失败或超时",
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
-                    lighter_filled=execution_status["lighter_filled"]
+                    lighter_filled=execution_status["lighter_filled"],
+                    extended_order_time=ext_time,
+                    lighter_order_time=lig_time,
+                    orders_parallel=(tasks[0] is not None and tasks[1] is not None),
                 )
 
         except Exception as e:
             logger.error(f"执行平仓失败: {e}")
             return ExecutionResult(
                 error_message=str(e),
-                execution_time=time.time() - start_time
+                execution_time=time.time() - start_time,
+                orders_parallel=(tasks[0] is not None and tasks[1] is not None),
             )
 
     async def wait_for_execution(
@@ -918,7 +969,9 @@ class TradeExecutor:
                 extended_order_id=order_result.order_id,
                 extended_price=order_result.price,
                 execution_time=time.time() - start_time,
-                extended_filled=False  # Maker订单需要等待成交
+                extended_filled=False,  # Maker订单需要等待成交
+                extended_order_time=time.time() - start_time,
+                orders_parallel=False,
             )
 
         except Exception as e:
@@ -926,7 +979,8 @@ class TradeExecutor:
             return ExecutionResult(
                 success=False,
                 error_message=str(e),
-                execution_time=time.time() - start_time
+                execution_time=time.time() - start_time,
+                orders_parallel=False,
             )
 
     async def place_maker_close_order(
@@ -977,7 +1031,9 @@ class TradeExecutor:
                 extended_order_id=order_result.order_id,
                 extended_price=order_result.price,
                 execution_time=time.time() - start_time,
-                extended_filled=False  # Maker订单需要等待成交
+                extended_filled=False,  # Maker订单需要等待成交
+                extended_order_time=time.time() - start_time,
+                orders_parallel=False,
             )
 
         except Exception as e:
@@ -985,7 +1041,8 @@ class TradeExecutor:
             return ExecutionResult(
                 success=False,
                 error_message=str(e),
-                execution_time=time.time() - start_time
+                execution_time=time.time() - start_time,
+                orders_parallel=False,
             )
 
     async def execute_lighter_hedge(
