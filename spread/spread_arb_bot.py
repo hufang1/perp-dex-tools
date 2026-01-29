@@ -3879,6 +3879,8 @@ class SpreadArbBot:
             # 执行Lighter对冲
             # 使用订单簿计算VWAP作为对冲价格（A方案）
             lig_vwap = None
+            bbo_bid = None
+            bbo_ask = None
             try:
                 lig_vwap = await self.order_book_manager.calculate_vwap(
                     "lighter",
@@ -3886,12 +3888,37 @@ class SpreadArbBot:
                     "buy" if hedge_side == "buy" else "sell"
                 )
                 if lig_vwap and lig_vwap > 0:
-                    slip = self.config.lighter_hedge_slippage_bps
-                    if hedge_side == "buy":
-                        lig_vwap = lig_vwap * (Decimal("1") + slip)
+                    try:
+                        bbo_bid, bbo_ask = await self.lighter_client.fetch_bbo_prices(
+                            self.lighter_client.config.contract_id
+                        )
+                    except Exception as e:
+                        logger.debug(f"获取Lighter BBO用于偏离检查失败: {e}")
+
+                    ref_price = bbo_ask if hedge_side == "buy" else bbo_bid
+                    if ref_price and ref_price > 0:
+                        deviation = (abs(lig_vwap - ref_price) / ref_price)
+                        if deviation > self.config.lighter_hedge_price_deviation_bps:
+                            logger.warning(
+                                "Lighter对冲VWAP偏离BBO过大，回退BBO | "
+                                f"vwap={lig_vwap} bbo={ref_price} deviation={deviation:.3%} "
+                                f"threshold={self.config.lighter_hedge_price_deviation_bps:.3%}"
+                            )
+                            lig_vwap = None
+                        else:
+                            slip = self.config.lighter_hedge_slippage_bps
+                            if hedge_side == "buy":
+                                lig_vwap = lig_vwap * (Decimal("1") + slip)
+                            else:
+                                lig_vwap = lig_vwap * (Decimal("1") - slip)
+                            logger.info(f"Lighter对冲VWAP(含滑点): {lig_vwap} | slip={slip}")
                     else:
-                        lig_vwap = lig_vwap * (Decimal("1") - slip)
-                    logger.info(f"Lighter对冲VWAP(含滑点): {lig_vwap} | slip={slip}")
+                        slip = self.config.lighter_hedge_slippage_bps
+                        if hedge_side == "buy":
+                            lig_vwap = lig_vwap * (Decimal("1") + slip)
+                        else:
+                            lig_vwap = lig_vwap * (Decimal("1") - slip)
+                        logger.info(f"Lighter对冲VWAP(含滑点): {lig_vwap} | slip={slip}")
                 else:
                     logger.info("Lighter对冲VWAP为空或无效，准备使用BBO")
             except Exception as e:
@@ -3899,14 +3926,15 @@ class SpreadArbBot:
 
             if not lig_vwap or lig_vwap <= 0:
                 try:
-                    lig_bid, lig_ask = await self.lighter_client.fetch_bbo_prices(
-                        self.lighter_client.config.contract_id
-                    )
+                    if bbo_bid is None or bbo_ask is None:
+                        bbo_bid, bbo_ask = await self.lighter_client.fetch_bbo_prices(
+                            self.lighter_client.config.contract_id
+                        )
                     slip = self.config.lighter_hedge_slippage_bps
                     if hedge_side == "buy":
-                        lig_vwap = lig_ask * (Decimal("1") + slip)
+                        lig_vwap = bbo_ask * (Decimal("1") + slip)
                     else:
-                        lig_vwap = lig_bid * (Decimal("1") - slip)
+                        lig_vwap = bbo_bid * (Decimal("1") - slip)
                     logger.info(f"Lighter对冲BBO(含滑点): {lig_vwap} | slip={slip}")
                 except Exception as e:
                     logger.warning(f"获取Lighter BBO失败，使用默认价格: {e}")
@@ -6155,6 +6183,13 @@ def parse_arguments() -> BotConfig:
         help="Lighter对冲VWAP滑点缓冲 (默认: 0.0002 = 0.02%)"
     )
     parser.add_argument(
+        "--lighter-hedge-price-deviation",
+        type=Decimal,
+        default=env_default("LIGHTER_HEDGE_PRICE_DEVIATION_BPS", Decimal, None),
+        dest="lighter_hedge_price_deviation_bps",
+        help="Lighter对冲VWAP偏离BBO阈值 (默认: 0.005 = 0.5%)"
+    )
+    parser.add_argument(
         "--use-bollinger",
         action="store_true",
         dest="use_bollinger",
@@ -6334,6 +6369,8 @@ def parse_arguments() -> BotConfig:
         config_kwargs['initial_open_spread'] = args.initial_open_spread
     if args.lighter_hedge_slippage_bps is not None:
         config_kwargs['lighter_hedge_slippage_bps'] = args.lighter_hedge_slippage_bps
+    if args.lighter_hedge_price_deviation_bps is not None:
+        config_kwargs['lighter_hedge_price_deviation_bps'] = args.lighter_hedge_price_deviation_bps
     if args.use_bollinger or env_bool("USE_BOLLINGER", False):
         config_kwargs['use_bollinger'] = True
     if args.boll_window_minutes is not None:

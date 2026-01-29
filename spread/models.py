@@ -482,6 +482,13 @@ class BotConfig:
     - 买入时在VWAP基础上上浮，卖出时在VWAP基础上下调
     """
 
+    lighter_hedge_price_deviation_bps: Decimal = field(default_factory=lambda: Decimal("0.005"))
+    """
+    Lighter对冲价格偏离BBO阈值
+    - 默认0.5% = 0.005
+    - 若VWAP偏离BBO超过该阈值，则回退到BBO
+    """
+
     # ========== 新增字段：布林带动态阈值 ==========
     use_bollinger: bool = True
     """
@@ -662,6 +669,8 @@ class BotConfig:
         if self.switch_min_hold_minutes < 0:
             return False
         if self.open_taker_gap_bps < 0:
+            return False
+        if self.lighter_hedge_price_deviation_bps < 0:
             return False
         if self.dashboard_sample_interval <= 0:
             return False
