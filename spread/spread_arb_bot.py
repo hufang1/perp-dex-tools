@@ -223,6 +223,7 @@ class SpreadArbBot:
         self._recent_log_lines: deque = deque(maxlen=200)
         self._recent_log_handler: Optional[RecentLogHandler] = None
         self._init_recent_log_handler()
+        self._open_attempt_id: Optional[str] = None
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -580,6 +581,7 @@ class SpreadArbBot:
                     [
                         f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         f"交易对: {self.config.symbol}",
+                        f"开仓ID: {self._open_attempt_id or '-'}",
                         f"阶段: 开仓",
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
@@ -600,6 +602,7 @@ class SpreadArbBot:
                     [
                         f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         f"交易对: {self.config.symbol}",
+                        f"开仓ID: {self._open_attempt_id or '-'}",
                         f"阶段: 开仓",
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
@@ -1561,10 +1564,11 @@ class SpreadArbBot:
                     logger.info(f"回滚后无仓位 Ext={ext_position_after} Lig={lig_position_after}，进入空闲状态")
                     logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
                     self._notify(
-                        "✅ 开仓回滚完成",
+                        "⚠️ 回滚成功",
                         [
                             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                             f"交易对: {self.config.symbol}",
+                            f"开仓ID: {self._open_attempt_id or '-'}",
                             "结果: 回滚成功，两边已无仓位",
                         ],
                     )
@@ -1575,10 +1579,11 @@ class SpreadArbBot:
                     # 两边都有持仓且相等，进入 HOLDING
                     logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
                     self._notify(
-                        "✅ 开仓回滚完成",
+                        "⚠️ 回滚成功",
                         [
                             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                             f"交易对: {self.config.symbol}",
+                            f"开仓ID: {self._open_attempt_id or '-'}",
                             f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
                         ],
                     )
@@ -4483,6 +4488,7 @@ class SpreadArbBot:
         lines = [
             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"交易对: {self.config.symbol}",
+            f"开仓ID: {self._open_attempt_id or '-'}",
             "方向: Ext买 / Lig卖",
             f"开仓价差率: {real_open_spread:.3%}",
             f"平均entry(全仓价差): {avg_entry_spread:.3%}",
@@ -4826,6 +4832,7 @@ class SpreadArbBot:
         """IDLE状态：处理价差触发的开仓转换"""
         if not should_open:
             return False
+        self._open_attempt_id = uuid.uuid4().hex[:8]
 
         # 风控验证
         self._log_spread_rule("info", BotState.IDLE, "open_check", "开始风控验证", also_print=True)
@@ -4880,6 +4887,7 @@ class SpreadArbBot:
         """HOLDING状态：处理价差触发的继续开仓转换"""
         if not should_open:
             return False
+        self._open_attempt_id = uuid.uuid4().hex[:8]
 
         # 可以继续开仓！切换到开仓状态
         # 风控验证
