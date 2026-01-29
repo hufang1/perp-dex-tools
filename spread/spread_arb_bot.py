@@ -1877,13 +1877,28 @@ class SpreadArbBot:
         Args:
             error_message: 错误信息
         """
-        # 检测是否是API错误（HTTP 400, 500, 超时等）
-        api_error_keywords = ["HTTP 400", "HTTP 500", "timeout", "connection", "500", "502", "503", "504"]
-        is_api_error = any(keyword in error_message.lower() for keyword in api_error_keywords)
+        error_lower = error_message.lower()
+        immediate_markers = ["503", "service unavailable", "http 503", "status 503"]
+        if any(marker in error_lower for marker in immediate_markers):
+            import time
+            self._paused_start_time = time.time()
+            self._last_api_check_time = time.time()
+            self._api_error_count = 0
+            reason = f"API异常(503): {error_message}"
+            print("🛡️ API 503，进入风控暂停模式")
+            self.state_manager.set_state(BotState.PAUSED, reason)
+            self._notify_paused(reason)
+            self._notify_api_issue(error_message, immediate=True)
+            return
+
+        # 检测是否是API错误（HTTP 4xx/5xx、超时等）
+        api_error_keywords = ["http 400", "http 500", "500", "502", "504"]
+        is_api_error = any(keyword in error_lower for keyword in api_error_keywords)
 
         if is_api_error:
             self._api_error_count += 1
             logger.warning(f"API错误计数: {self._api_error_count}/{self._api_error_threshold} - {error_message}")
+            self._notify_api_issue(error_message, immediate=False)
 
             # 达到阈值，进入风控模式
             if self._api_error_count >= self._api_error_threshold:
@@ -3271,6 +3286,17 @@ class SpreadArbBot:
         ]
         lines.extend(self._get_recent_log_tail(20))
         self._notify("⚠️ 状态异常", lines)
+
+    def _notify_api_issue(self, error_message: str, immediate: bool = False) -> None:
+        title = "🛡️ API异常" if immediate else "⚠️ API异常(累计)"
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"错误: {error_message}",
+            "上下文(最近20条):",
+        ]
+        lines.extend(self._get_recent_log_tail(20))
+        self._notify(title, lines)
 
     def _calc_maker_fill_delta(self, filled_qty: Decimal) -> Decimal:
         """计算本次需要对冲的新增成交量"""
