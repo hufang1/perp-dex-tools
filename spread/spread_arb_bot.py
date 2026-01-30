@@ -197,6 +197,10 @@ class SpreadArbBot:
         self._open_rollback_attempt_id: Optional[str] = None
         self._last_maker_recovery_check_time: float = 0.0
         self._maker_hedged_qty_by_order_id: Dict[str, Decimal] = {}
+        self._maker_max_filled_by_order_id: Dict[str, Decimal] = {}
+        self._maker_hedge_in_progress: bool = False
+        self._maker_hedge_last_order_key: Optional[str] = None
+        self._maker_hedge_last_start: float = 0.0
         self._run_ext_volume: Decimal = Decimal("0")  # USDT
         self._run_lig_volume: Decimal = Decimal("0")  # USDT
         self._run_total_volume: Decimal = Decimal("0")  # USDT
@@ -3020,7 +3024,11 @@ class SpreadArbBot:
                         self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                         self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
-                delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+                delta_qty = self._calc_maker_fill_delta_for_order(
+                    order.order_id,
+                    order.context_id,
+                    order.filled_quantity,
+                )
                 if delta_qty <= Decimal("0.0001"):
                     logger.info(
                         "Maker成交已对冲，跳过 | "
@@ -3039,9 +3047,11 @@ class SpreadArbBot:
 
                 is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
                 if is_opening:
+                    self._mark_hedge_start(order.order_id, order.context_id)
                     self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended完全成交（WebSocket），开始Lighter对冲")
                 else:
                     self._hedging_state.is_closing = True
+                    self._mark_hedge_start(order.order_id, order.context_id)
                     self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓完全成交（WebSocket），开始Lighter对冲")
                 await self.state_manager.save_state()
 
@@ -3051,6 +3061,9 @@ class SpreadArbBot:
     async def _recover_maker_fill_out_of_band(self, order: MakerOrder) -> None:
         """成交晚到：不在Maker等待状态时，尝试检测单边并补对冲"""
         try:
+            if self._maker_hedge_in_progress:
+                logger.debug("补对冲跳过(对冲进行中)")
+                return
             current_state = self.state_manager.get_state()
             if current_state in [BotState.LIGHTER_HEDGING, BotState.OPENING_WAIT, BotState.CLOSING_WAIT, BotState.IDLE]:
                 logger.debug(f"补对冲跳过(已在后续流程): {current_state.value}")
@@ -3112,7 +3125,11 @@ class SpreadArbBot:
             if diff < tolerance:
                 logger.info("成交晚到但仓位已平衡，跳过补对冲")
                 return
-            delta_qty = self._calc_maker_fill_delta_for_order(order.order_id, order.filled_quantity)
+            delta_qty = self._calc_maker_fill_delta_for_order(
+                order.order_id,
+                order.context_id,
+                order.filled_quantity,
+            )
             if delta_qty <= Decimal("0.0001"):
                 logger.info("成交晚到已对冲，跳过补对冲")
                 return
@@ -3144,9 +3161,11 @@ class SpreadArbBot:
             self._hedging_state.source = "recover"
 
             if order.is_opening:
+                self._mark_hedge_start(order.order_id, order.context_id)
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, "成交晚到，补Lighter开仓对冲")
             else:
                 self._hedging_state.is_closing = True
+                self._mark_hedge_start(order.order_id, order.context_id)
                 self.state_manager.set_state(BotState.LIGHTER_HEDGING, "成交晚到，补Lighter平仓对冲")
             await self.state_manager.save_state()
 
@@ -3164,6 +3183,8 @@ class SpreadArbBot:
             return
         self._last_maker_recovery_check_time = now
 
+        if self._maker_hedge_in_progress:
+            return
         if not self._last_maker_order_id:
             return
         if self._last_maker_is_opening is None:
@@ -3192,7 +3213,11 @@ class SpreadArbBot:
             if status not in ["FILLED", "PARTIALLY_FILLED"] or filled_qty <= 0:
                 return
 
-            delta_qty = self._calc_maker_fill_delta_for_order(self._last_maker_order_id, filled_qty)
+            delta_qty = self._calc_maker_fill_delta_for_order(
+                self._last_maker_order_id,
+                self._last_maker_context_id,
+                filled_qty,
+            )
             if delta_qty <= Decimal("0.0001"):
                 return
 
@@ -3271,7 +3296,11 @@ class SpreadArbBot:
                         self._maker_wait_state.current_order.filled_quantity = order.filled_quantity
                         self._maker_wait_state.current_order.avg_fill_price = order.avg_fill_price
 
-                delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+                delta_qty = self._calc_maker_fill_delta_for_order(
+                    order.order_id,
+                    order.context_id,
+                    order.filled_quantity,
+                )
                 if delta_qty <= Decimal("0.0001"):
                     logger.info(
                         "Maker部分成交已对冲，跳过 | "
@@ -3290,9 +3319,11 @@ class SpreadArbBot:
 
                 is_opening = (current_state == BotState.OPENING_MAKER_WAIT)
                 if is_opening:
+                    self._mark_hedge_start(order.order_id, order.context_id)
                     self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
                 else:
                     self._hedging_state.is_closing = True
+                    self._mark_hedge_start(order.order_id, order.context_id)
                     self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"Extended平仓部分成交{order.filled_quantity}（WebSocket），开始Lighter对冲")
                 await self.state_manager.save_state()
 
@@ -3561,7 +3592,8 @@ class SpreadArbBot:
                 try:
                     if self._maker_wait_state.current_order:
                         order_id = str(self._maker_wait_state.current_order.order_id)
-                        hedged = max(hedged, self._maker_hedged_qty_by_order_id.get(order_id, Decimal("0")))
+                        order_key = self._maker_order_key(order_id, self._maker_wait_state.context_id)
+                        hedged = max(hedged, self._maker_hedged_qty_by_order_id.get(order_key, Decimal("0")))
                 except Exception:
                     pass
                 if filled_qty <= hedged:
@@ -3571,21 +3603,49 @@ class SpreadArbBot:
             pass
         return filled_qty
 
-    def _calc_maker_fill_delta_for_order(self, order_id: str, filled_qty: Decimal) -> Decimal:
+    def _maker_order_key(self, order_id: Optional[str], context_id: Optional[str]) -> str:
+        return f"{context_id or 'none'}:{order_id or 'none'}"
+
+    def _calc_maker_fill_delta_for_order(self, order_id: str, context_id: Optional[str], filled_qty: Decimal) -> Decimal:
         """按订单维度计算本次需要对冲的新增成交量（避免跨状态重复补对冲）"""
         if not order_id:
             return self._calc_maker_fill_delta(filled_qty)
-        hedged = self._maker_hedged_qty_by_order_id.get(str(order_id), Decimal("0"))
-        if filled_qty <= hedged:
+        order_key = self._maker_order_key(order_id, context_id)
+        max_seen = self._maker_max_filled_by_order_id.get(order_key, Decimal("0"))
+        if filled_qty > max_seen:
+            self._maker_max_filled_by_order_id[order_key] = filled_qty
+            max_seen = filled_qty
+        effective_filled = max_seen
+        hedged = self._maker_hedged_qty_by_order_id.get(order_key, Decimal("0"))
+        logger.info(
+            f"[hedge_delta] key={order_key} filled={filled_qty} "
+            f"max_seen={max_seen} hedged={hedged}"
+        )
+        if effective_filled <= hedged:
             return Decimal("0")
-        return filled_qty - hedged
+        return effective_filled - hedged
 
-    def _record_maker_hedged_qty(self, order_id: str, hedged_qty: Decimal) -> None:
+    def _record_maker_hedged_qty(self, order_id: str, context_id: Optional[str], hedged_qty: Decimal) -> None:
         """记录订单已对冲数量"""
         if not order_id or hedged_qty <= 0:
             return
-        key = str(order_id)
+        key = self._maker_order_key(order_id, context_id)
         self._maker_hedged_qty_by_order_id[key] = self._maker_hedged_qty_by_order_id.get(key, Decimal("0")) + hedged_qty
+        logger.info(
+            f"[hedge_record] key={key} add={hedged_qty} "
+            f"total={self._maker_hedged_qty_by_order_id.get(key)}"
+        )
+
+    def _mark_hedge_start(self, order_id: Optional[str], context_id: Optional[str]) -> None:
+        self._maker_hedge_in_progress = True
+        self._maker_hedge_last_order_key = self._maker_order_key(order_id, context_id)
+        self._maker_hedge_last_start = time.time()
+        logger.info(f"[hedge_start] key={self._maker_hedge_last_order_key}")
+
+    def _clear_hedge_start(self) -> None:
+        self._maker_hedge_in_progress = False
+        self._maker_hedge_last_order_key = None
+        logger.info("[hedge_end] cleared")
 
     @asynccontextmanager
     async def _maker_lock(self, label: str):
@@ -4287,6 +4347,7 @@ class SpreadArbBot:
                     if self._maker_wait_state.current_order:
                         self._record_maker_hedged_qty(
                             self._maker_wait_state.current_order.order_id,
+                            self._maker_wait_state.current_order.context_id,
                             ext_filled_qty
                         )
 
@@ -4454,6 +4515,9 @@ class SpreadArbBot:
             logger.error(f"LIGHTER_HEDGING状态处理异常: {e}")
             # 异常时也触发失败处理
             await self._handle_hedging_failure(True, 0)
+        finally:
+            if self._maker_hedge_in_progress:
+                self._clear_hedge_start()
 
     def _get_spread_rule_table(self) -> Dict[BotState, list]:
         if not hasattr(self, "_spread_rule_table"):
@@ -5881,7 +5945,11 @@ class SpreadArbBot:
         order.filled_quantity = filled_qty
         order.avg_fill_price = avg_price
 
-        delta_qty = self._calc_maker_fill_delta(filled_qty)
+        delta_qty = self._calc_maker_fill_delta_for_order(
+            order.order_id,
+            order.context_id,
+            filled_qty,
+        )
         if delta_qty <= Decimal("0.0001"):
             return False
 
@@ -5902,9 +5970,11 @@ class SpreadArbBot:
         self._hedging_state.start_time = datetime.now()
 
         if is_opening:
+            self._mark_hedge_start(order.order_id, order.context_id)
             self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"{reason}（Ext成交{filled_qty}）")
         else:
             self._hedging_state.is_closing = True
+            self._mark_hedge_start(order.order_id, order.context_id)
             self.state_manager.set_state(BotState.LIGHTER_HEDGING, f"{reason}（Ext成交{filled_qty}）")
 
         await self.state_manager.save_state()
@@ -6099,7 +6169,11 @@ class SpreadArbBot:
                     print(f"✅ 订单已完全成交，无需重挂")
                     logger.info(f"订单已完全成交，无需重挂")
 
-                    delta_qty = self._calc_maker_fill_delta(filled_qty)
+                    delta_qty = self._calc_maker_fill_delta_for_order(
+                        old_order.order_id,
+                        old_order.context_id,
+                        filled_qty,
+                    )
                     if delta_qty <= Decimal("0.0001"):
                         self.state_manager.set_state(
                             BotState.OPENING_WAIT if is_opening else BotState.CLOSING_WAIT,
@@ -6139,12 +6213,14 @@ class SpreadArbBot:
 
                     is_opening = (self.state_manager.get_state() == BotState.OPENING_MAKER_WAIT)
                     if is_opening:
+                        self._mark_hedge_start(old_order.order_id, old_order.context_id)
                         self.state_manager.set_state(
                             BotState.LIGHTER_HEDGING,
                             "Extended完全成交（价格偏离检测），开始Lighter对冲",
                         )
                     else:
                         self._hedging_state.is_closing = True
+                        self._mark_hedge_start(old_order.order_id, old_order.context_id)
                         self.state_manager.set_state(
                             BotState.LIGHTER_HEDGING,
                             "Extended平仓完全成交（价格偏离检测），开始Lighter对冲",
