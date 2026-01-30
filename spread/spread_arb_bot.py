@@ -229,6 +229,9 @@ class SpreadArbBot:
         self._open_pre_attempt_id: Optional[str] = None
         self._open_pre_ext_pos: Optional[Decimal] = None
         self._open_pre_lig_pos: Optional[Decimal] = None
+        self._open_rollback_counts: Dict[str, int] = {"extended": 0, "lighter": 0}
+        self._open_rollback_reason: Optional[str] = None
+        self._open_rollback_error_by_exchange: Dict[str, str] = {}
         self._state_enter_ts: float = time.time()
         self._open_flow_durations: Dict[str, float] = {}
         self._close_flow_durations: Dict[str, float] = {}
@@ -612,6 +615,7 @@ class SpreadArbBot:
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
+                self._open_rollback_reason = "开仓仓位不一致(Ext多)"
                 if opening_attempt_id is not None:
                     self._open_rollback_attempt_id = opening_attempt_id
                 recent_logs = self._get_recent_log_tail(20)
@@ -631,8 +635,14 @@ class SpreadArbBot:
                         *context_lines,
                     ],
                 )
+                self._open_rollback_counts["extended"] = self._open_rollback_counts.get("extended", 0) + 1
                 self._notify_rollback_in_progress(ext_position, lig_position, reduce_qty)
-                await self.trade_executor.rollback_position("extended", reduce_qty, side, log_as_warning=True)
+                try:
+                    result = await self.trade_executor.rollback_position("extended", reduce_qty, side, log_as_warning=True)
+                    if not result:
+                        self._open_rollback_error_by_exchange["extended"] = "rollback_failed"
+                except Exception as e:
+                    self._open_rollback_error_by_exchange["extended"] = str(e)
             else:
                 # Lig 回滚：LONG -> 买入（回补空头），SHORT -> 卖出（平多）
                 side = "buy" if position_state == PositionState.LONG else "sell"
@@ -640,6 +650,7 @@ class SpreadArbBot:
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
+                self._open_rollback_reason = "开仓仓位不一致(Lig多)"
                 if opening_attempt_id is not None:
                     self._open_rollback_attempt_id = opening_attempt_id
                 recent_logs = self._get_recent_log_tail(20)
@@ -659,8 +670,14 @@ class SpreadArbBot:
                         *context_lines,
                     ],
                 )
+                self._open_rollback_counts["lighter"] = self._open_rollback_counts.get("lighter", 0) + 1
                 self._notify_rollback_in_progress(ext_position, lig_position, reduce_qty)
-                await self.trade_executor.rollback_position("lighter", reduce_qty, side, log_as_warning=True)
+                try:
+                    result = await self.trade_executor.rollback_position("lighter", reduce_qty, side, log_as_warning=True)
+                    if not result:
+                        self._open_rollback_error_by_exchange["lighter"] = "rollback_failed"
+                except Exception as e:
+                    self._open_rollback_error_by_exchange["lighter"] = str(e)
         except Exception as e:
             logger.warning(f"仓位对齐检查异常: {e}")
         finally:
@@ -1551,6 +1568,9 @@ class SpreadArbBot:
                     self._open_pre_attempt_id = None
                     self._open_pre_ext_pos = None
                     self._open_pre_lig_pos = None
+                    self._open_rollback_counts = {"extended": 0, "lighter": 0}
+                    self._open_rollback_reason = None
+                    self._open_rollback_error_by_exchange = {}
 
                     await self.state_manager.save_state()
                     return
@@ -1591,6 +1611,9 @@ class SpreadArbBot:
                                 f"开仓ID: {self._open_attempt_id or '-'}",
                                 f"结果: 回滚成功，已恢复持仓 Ext={ext_position} Lig={lig_position}",
                                 "回滚方式: 市价",
+                                f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                                f"回滚原因: {self._open_rollback_reason or 'unknown'}",
+                                f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
                                 *self._format_exec_metrics(self._last_open_exec, "开仓"),
                                 f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                             ],
@@ -1634,6 +1657,9 @@ class SpreadArbBot:
                 self._open_pre_ext_pos = None
                 self._open_pre_lig_pos = None
                 self._open_rollback_attempt_id = None
+                self._open_rollback_counts = {"extended": 0, "lighter": 0}
+                self._open_rollback_reason = None
+                self._open_rollback_error_by_exchange = {}
 
                 # 开仓确认成功，清理开仓上下文，避免误触发开仓对齐回滚
                 self._last_maker_order_id = None
@@ -1678,6 +1704,7 @@ class SpreadArbBot:
                 # 只平掉两边比之前持仓多的部分
                 if opening_attempt_id is not None:
                     self._open_rollback_attempt_id = opening_attempt_id
+                self._open_rollback_reason = "开仓仓位不一致(确认阶段)"
                 pre_ext = pre_lig = None
                 if self._open_pre_attempt_id == opening_attempt_id:
                     pre_ext = self._open_pre_ext_pos
@@ -1721,6 +1748,9 @@ class SpreadArbBot:
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             "结果: 回滚成功，两边已无仓位",
                             "回滚方式: 市价",
+                            f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                            f"回滚原因: {self._open_rollback_reason or 'unknown'}",
+                            f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
                             *self._format_exec_metrics(self._last_open_exec, "开仓"),
                             f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
@@ -1732,6 +1762,9 @@ class SpreadArbBot:
                     self._open_pre_attempt_id = None
                     self._open_pre_ext_pos = None
                     self._open_pre_lig_pos = None
+                    self._open_rollback_counts = {"extended": 0, "lighter": 0}
+                    self._open_rollback_reason = None
+                    self._open_rollback_error_by_exchange = {}
                 elif both_match:
                     # 两边都有持仓且相等，进入 HOLDING
                     logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
@@ -1743,6 +1776,9 @@ class SpreadArbBot:
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
                             "回滚方式: 市价",
+                            f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                            f"回滚原因: {self._open_rollback_reason or 'unknown'}",
+                            f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
                             *self._format_exec_metrics(self._last_open_exec, "开仓"),
                             f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
@@ -1754,6 +1790,9 @@ class SpreadArbBot:
                     self._open_pre_attempt_id = None
                     self._open_pre_ext_pos = None
                     self._open_pre_lig_pos = None
+                    self._open_rollback_counts = {"extended": 0, "lighter": 0}
+                    self._open_rollback_reason = None
+                    self._open_rollback_error_by_exchange = {}
                 else:
                     # 仓位仍不一致，强制全平
                     logger.error(f"回滚后仓位仍不一致 Ext={ext_position_after} Lig={lig_position_after}，强制全平")
@@ -2232,6 +2271,9 @@ class SpreadArbBot:
                     logger.info("回滚完成")
                     return
 
+                for exchange, _qty, _side in close_tasks:
+                    self._open_rollback_counts[exchange] = self._open_rollback_counts.get(exchange, 0) + 1
+
                 # 并发执行回滚
                 rollback_results = await asyncio.gather(
                     *[self.trade_executor.rollback_position(exchange, qty, side, log_as_warning=log_as_warning)
@@ -2245,10 +2287,12 @@ class SpreadArbBot:
                         logger.warning(f"{exchange.capitalize()}回滚异常: {result}") if log_as_warning else logger.error(
                             f"{exchange.capitalize()}回滚异常: {result}"
                         )
+                        self._open_rollback_error_by_exchange[exchange] = str(result)
                     elif not result:
                         logger.warning(f"{exchange.capitalize()}回滚失败") if log_as_warning else logger.error(
                             f"{exchange.capitalize()}回滚失败"
                         )
+                        self._open_rollback_error_by_exchange[exchange] = "rollback_failed"
 
                 # 等待订单生效
                 await asyncio.sleep(1.0)
@@ -5107,7 +5151,13 @@ class SpreadArbBot:
             f"Lig仓位: {lig_position}",
             f"回滚数量: {reduce_qty}",
             "回滚方式: 市价",
+            f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
         ]
+        if self._open_rollback_reason:
+            lines.append(f"回滚原因: {self._open_rollback_reason}")
+        if self._open_rollback_error_by_exchange:
+            err_parts = [f"{k}={v}" for k, v in self._open_rollback_error_by_exchange.items()]
+            lines.append(f"回滚错误: {', '.join(err_parts)}")
         recent_logs = self._get_recent_log_tail(20)
         if recent_logs:
             lines.append("终端上下文(最近20行):")
@@ -5328,6 +5378,9 @@ class SpreadArbBot:
         self._open_pre_attempt_id = None
         self._open_pre_ext_pos = None
         self._open_pre_lig_pos = None
+        self._open_rollback_counts = {"extended": 0, "lighter": 0}
+        self._open_rollback_reason = None
+        self._open_rollback_error_by_exchange = {}
         await self.state_manager.save_state()
 
     async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", use_taker: bool = False, **_) -> bool:
@@ -5336,6 +5389,9 @@ class SpreadArbBot:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
         self._opening_wait_attempt_id = self._open_attempt_id
+        self._open_rollback_counts = {"extended": 0, "lighter": 0}
+        self._open_rollback_reason = None
+        self._open_rollback_error_by_exchange = {}
         try:
             self._open_pre_ext_pos = await self.extended_client.get_account_positions()
             self._open_pre_lig_pos = await self.lighter_client.get_account_positions()
@@ -5398,6 +5454,9 @@ class SpreadArbBot:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
         self._opening_wait_attempt_id = self._open_attempt_id
+        self._open_rollback_counts = {"extended": 0, "lighter": 0}
+        self._open_rollback_reason = None
+        self._open_rollback_error_by_exchange = {}
         try:
             self._open_pre_ext_pos = await self.extended_client.get_account_positions()
             self._open_pre_lig_pos = await self.lighter_client.get_account_positions()
