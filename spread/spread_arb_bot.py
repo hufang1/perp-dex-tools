@@ -4909,6 +4909,10 @@ class SpreadArbBot:
         ]
         lines.extend(self._format_exec_metrics(self._last_close_exec, "平仓"))
         lines.append(f"状态耗时: {self._format_flow_durations(self._get_close_flow_snapshot())}")
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
         self._notify("✅ 平仓成功", lines)
 
 
@@ -4918,6 +4922,10 @@ class SpreadArbBot:
             f"交易对: {self.config.symbol}",
             f"原因: {reason}",
         ]
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
         self._notify("❌ 平仓失败", lines)
 
     def _notify_close_escalate(self, spread: Decimal, threshold: Decimal) -> None:
