@@ -5238,6 +5238,22 @@ class SpreadArbBot:
             f"回滚事件 | attempt={attempt_id or '-'} phase={phase} exch={exchange} "
             f"qty={qty} ext={ext_pos} lig={lig_pos} reason={reason or '-'}"
         )
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"开仓ID: {attempt_id or '-'}",
+            f"阶段: {phase}",
+            f"交易所: {exchange}",
+            f"数量: {qty}",
+            f"Ext仓位: {ext_pos}",
+            f"Lig仓位: {lig_pos}",
+            f"原因: {reason or '-'}",
+        ]
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
+        self._notify("🧾 回滚事件明细", lines)
 
     def _set_open_rollback_reason(self, attempt_id: Optional[str], reason: str) -> None:
         self._ensure_open_rollback_context(attempt_id)
