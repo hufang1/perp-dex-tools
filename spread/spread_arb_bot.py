@@ -226,6 +226,9 @@ class SpreadArbBot:
         self._init_recent_log_handler()
         self._open_attempt_id: Optional[str] = None
         self._opening_wait_attempt_id: Optional[str] = None
+        self._open_pre_attempt_id: Optional[str] = None
+        self._open_pre_ext_pos: Optional[Decimal] = None
+        self._open_pre_lig_pos: Optional[Decimal] = None
         self._state_enter_ts: float = time.time()
         self._open_flow_durations: Dict[str, float] = {}
         self._close_flow_durations: Dict[str, float] = {}
@@ -582,6 +585,23 @@ class SpreadArbBot:
                 pass
 
             reduce_qty = min(diff, pending_qty)
+            if (
+                self._open_pre_attempt_id == opening_attempt_id
+                and self._open_pre_ext_pos is not None
+                and self._open_pre_lig_pos is not None
+            ):
+                ext_inc = max(Decimal("0"), abs(ext_position) - abs(self._open_pre_ext_pos))
+                lig_inc = max(Decimal("0"), abs(lig_position) - abs(self._open_pre_lig_pos))
+                if ext_abs > lig_abs:
+                    reduce_qty = min(ext_inc, pending_qty)
+                else:
+                    reduce_qty = min(lig_inc, pending_qty)
+                logger.info(
+                    f"开仓回滚基准 | attempt={opening_attempt_id} "
+                    f"pre_ext={self._open_pre_ext_pos} pre_lig={self._open_pre_lig_pos} "
+                    f"ext={ext_position} lig={lig_position} "
+                    f"ext_inc={ext_inc} lig_inc={lig_inc} reduce={reduce_qty}"
+                )
             if reduce_qty < tolerance:
                 return
 
@@ -1524,6 +1544,9 @@ class SpreadArbBot:
                     # 清除待确认的仓位
                     if hasattr(self, '_pending_open_position'):
                         self._pending_open_position = None
+                    self._open_pre_attempt_id = None
+                    self._open_pre_ext_pos = None
+                    self._open_pre_lig_pos = None
 
                     await self.state_manager.save_state()
                     return
@@ -1603,6 +1626,9 @@ class SpreadArbBot:
                     )
 
                     self._pending_open_position = None
+                self._open_pre_attempt_id = None
+                self._open_pre_ext_pos = None
+                self._open_pre_lig_pos = None
                 self._open_rollback_attempt_id = None
 
                 # 开仓确认成功，清理开仓上下文，避免误触发开仓对齐回滚
@@ -1648,7 +1674,18 @@ class SpreadArbBot:
                 # 只平掉两边比之前持仓多的部分
                 if opening_attempt_id is not None:
                     self._open_rollback_attempt_id = opening_attempt_id
-                await self._rollback_partial_positions(current_qty, ext_position, lig_position, log_as_warning=True)
+                pre_ext = pre_lig = None
+                if self._open_pre_attempt_id == opening_attempt_id:
+                    pre_ext = self._open_pre_ext_pos
+                    pre_lig = self._open_pre_lig_pos
+                await self._rollback_partial_positions(
+                    current_qty,
+                    ext_position,
+                    lig_position,
+                    log_as_warning=True,
+                    pre_ext=pre_ext,
+                    pre_lig=pre_lig,
+                )
 
                 # 回滚后检查实际仓位，决定下一步状态
                 await asyncio.sleep(0.5)  # 等待回平订单生效
@@ -1688,6 +1725,9 @@ class SpreadArbBot:
                     self._opening_wait_start_time = None
                     self._suppress_open_failure_notify = False
                     self._open_rollback_attempt_id = None
+                    self._open_pre_attempt_id = None
+                    self._open_pre_ext_pos = None
+                    self._open_pre_lig_pos = None
                 elif both_match:
                     # 两边都有持仓且相等，进入 HOLDING
                     logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
@@ -1707,6 +1747,9 @@ class SpreadArbBot:
                     self._opening_wait_start_time = None
                     self._suppress_open_failure_notify = False
                     self._open_rollback_attempt_id = None
+                    self._open_pre_attempt_id = None
+                    self._open_pre_ext_pos = None
+                    self._open_pre_lig_pos = None
                 else:
                     # 仓位仍不一致，强制全平
                     logger.error(f"回滚后仓位仍不一致 Ext={ext_position_after} Lig={lig_position_after}，强制全平")
@@ -2115,6 +2158,8 @@ class SpreadArbBot:
         ext_current: Decimal,
         lig_current: Decimal,
         log_as_warning: bool = False,
+        pre_ext: Optional[Decimal] = None,
+        pre_lig: Optional[Decimal] = None,
     ) -> None:
         """
         只回滚多出来的仓位，使两边相等（不平全仓）
@@ -2130,12 +2175,18 @@ class SpreadArbBot:
         ext_min_qty = getattr(self.extended_client, "min_order_size", tolerance)
         lig_min_qty = getattr(self.lighter_client, "min_order_size", tolerance)
 
-        # 策略：取两边较小的仓位作为基准
-        base_qty = min(ext_current, lig_current)
+        # 若提供开仓前基准仓位，仅回滚本次开仓增量
+        if pre_ext is not None and pre_lig is not None:
+            ext_extra = max(Decimal("0"), abs(ext_current) - abs(pre_ext))
+            lig_extra = max(Decimal("0"), abs(lig_current) - abs(pre_lig))
+            base_qty = min(abs(pre_ext), abs(pre_lig))
+        else:
+            # 策略：取两边较小的仓位作为基准
+            base_qty = min(ext_current, lig_current)
 
-        # 计算两边比基准多出的部分
-        ext_extra = max(Decimal("0"), ext_current - base_qty)
-        lig_extra = max(Decimal("0"), lig_current - base_qty)
+            # 计算两边比基准多出的部分
+            ext_extra = max(Decimal("0"), ext_current - base_qty)
+            lig_extra = max(Decimal("0"), lig_current - base_qty)
 
         print(f"🔧 回滚计算:")
         print(f"   Extended当前: {ext_current}")
@@ -5250,6 +5301,9 @@ class SpreadArbBot:
             self._notify_open_failure(reason)
             self.state_manager.set_state(BotState.IDLE, reason)
 
+        self._open_pre_attempt_id = None
+        self._open_pre_ext_pos = None
+        self._open_pre_lig_pos = None
         await self.state_manager.save_state()
 
     async def _handle_idle_spread_transition(self, spread_info, should_open: bool = False, reason: str = "", use_taker: bool = False, **_) -> bool:
@@ -5258,6 +5312,12 @@ class SpreadArbBot:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
         self._opening_wait_attempt_id = self._open_attempt_id
+        try:
+            self._open_pre_ext_pos = await self.extended_client.get_account_positions()
+            self._open_pre_lig_pos = await self.lighter_client.get_account_positions()
+            self._open_pre_attempt_id = self._open_attempt_id
+        except Exception as e:
+            logger.debug(f"获取开仓前仓位失败: {e}")
 
         # 风控验证
         self._log_spread_rule("info", BotState.IDLE, "open_check", "开始风控验证", also_print=True)
@@ -5314,6 +5374,12 @@ class SpreadArbBot:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
         self._opening_wait_attempt_id = self._open_attempt_id
+        try:
+            self._open_pre_ext_pos = await self.extended_client.get_account_positions()
+            self._open_pre_lig_pos = await self.lighter_client.get_account_positions()
+            self._open_pre_attempt_id = self._open_attempt_id
+        except Exception as e:
+            logger.debug(f"获取开仓前仓位失败: {e}")
 
         # 可以继续开仓！切换到开仓状态
         # 风控验证
