@@ -638,7 +638,7 @@ class BotConfig:
             return False
         if self.market_close_spread_b <= 0:
             return False
-        if self.market_close_spread_b <= self.limit_close_spread_a:
+        if self.market_close_spread_b < self.limit_close_spread_a:
             return False
         if self.boll_window_minutes <= 0:
             return False
