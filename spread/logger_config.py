@@ -72,6 +72,8 @@ def setup_logging(
     rotate_when: str = "D",
     backup_count: int = 14,
     max_bytes: Optional[int] = None,
+    console_level: Optional[int] = None,
+    file_level: Optional[int] = None,
 ) -> None:
     """
     配置日志系统
@@ -90,7 +92,7 @@ def setup_logging(
 
     # 创建控制台处理器
     console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(level)
+    console_handler.setLevel(console_level if console_level is not None else level)
 
     # 设置格式化器
     if compact:
@@ -121,7 +123,7 @@ def setup_logging(
                 backupCount=backup_count,
                 encoding='utf-8'
             )
-        file_handler.setLevel(level)
+        file_handler.setLevel(file_level if file_level is not None else level)
         # 文件使用完整格式（含时间戳），或精简格式
         if file_compact:
             file_formatter = CompactFormatter(use_colors=False)

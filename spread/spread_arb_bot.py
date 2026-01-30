@@ -6747,6 +6747,7 @@ async def main():
 
     # 初始化日志（控制台+文件滚动）
     log_level = logging.DEBUG if config.verbose else logging.INFO
+    console_level = logging.DEBUG if config.verbose else logging.ERROR
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     setup_logging(
@@ -6757,6 +6758,8 @@ async def main():
         rotate_when="D",
         backup_count=int(args.log_retention_days),
         max_bytes=int(args.log_max_mb) * 1024 * 1024 if args.log_max_mb else None,
+        console_level=console_level,
+        file_level=log_level,
     )
 
     # ========== 新增: 打印命令行参数解析后的配置用于调试 ==========
