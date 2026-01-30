@@ -6749,6 +6749,9 @@ async def main():
     log_level = logging.DEBUG if config.verbose else logging.INFO
     console_level = logging.DEBUG if config.verbose else logging.ERROR
     log_path = Path(args.log_file)
+    if not log_path.is_absolute():
+        repo_root = Path(__file__).resolve().parent.parent
+        log_path = repo_root / log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
     setup_logging(
         level=log_level,
