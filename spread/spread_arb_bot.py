@@ -196,6 +196,7 @@ class SpreadArbBot:
         self._alignment_check_in_progress: bool = False
         self._open_rollback_attempt_id: Optional[str] = None
         self._last_maker_recovery_check_time: float = 0.0
+        self._maker_hedged_qty_by_order_id: Dict[str, Decimal] = {}
         self._run_ext_volume: Decimal = Decimal("0")  # USDT
         self._run_lig_volume: Decimal = Decimal("0")  # USDT
         self._run_total_volume: Decimal = Decimal("0")  # USDT
@@ -3105,16 +3106,18 @@ class SpreadArbBot:
                 )
                 return
 
-            imbalance = ext_position + lig_position  # lig为负时应接近0
-            if abs(imbalance) < tolerance:
+            ext_abs = abs(ext_position)
+            lig_abs = abs(lig_position)
+            diff = abs(ext_abs - lig_abs)
+            if diff < tolerance:
                 logger.info("成交晚到但仓位已平衡，跳过补对冲")
                 return
-            delta_qty = self._calc_maker_fill_delta(order.filled_quantity)
+            delta_qty = self._calc_maker_fill_delta_for_order(order.order_id, order.filled_quantity)
             if delta_qty <= Decimal("0.0001"):
                 logger.info("成交晚到已对冲，跳过补对冲")
                 return
 
-            hedge_qty = min(abs(imbalance), delta_qty)
+            hedge_qty = min(diff, delta_qty)
             if hedge_qty <= 0:
                 return
 
@@ -3189,7 +3192,7 @@ class SpreadArbBot:
             if status not in ["FILLED", "PARTIALLY_FILLED"] or filled_qty <= 0:
                 return
 
-            delta_qty = self._calc_maker_fill_delta(filled_qty)
+            delta_qty = self._calc_maker_fill_delta_for_order(self._last_maker_order_id, filled_qty)
             if delta_qty <= Decimal("0.0001"):
                 return
 
@@ -3197,8 +3200,10 @@ class SpreadArbBot:
             ext_position = await self.extended_client.get_account_positions()
             lig_position = await self.lighter_client.get_account_positions()
             tolerance = Decimal("0.001")
-            imbalance = ext_position + lig_position
-            if abs(imbalance) < tolerance:
+            ext_abs = abs(ext_position)
+            lig_abs = abs(lig_position)
+            diff = abs(ext_abs - lig_abs)
+            if diff < tolerance:
                 return
 
             avg_price = order_info.get("avg_price") or order_info.get("avg_fill_price") or order_info.get("price")
@@ -3553,12 +3558,34 @@ class SpreadArbBot:
         try:
             if hasattr(self, "_maker_wait_state") and self._maker_wait_state:
                 hedged = self._maker_wait_state.cumulative_filled
+                try:
+                    if self._maker_wait_state.current_order:
+                        order_id = str(self._maker_wait_state.current_order.order_id)
+                        hedged = max(hedged, self._maker_hedged_qty_by_order_id.get(order_id, Decimal("0")))
+                except Exception:
+                    pass
                 if filled_qty <= hedged:
                     return Decimal("0")
                 return filled_qty - hedged
         except Exception:
             pass
         return filled_qty
+
+    def _calc_maker_fill_delta_for_order(self, order_id: str, filled_qty: Decimal) -> Decimal:
+        """按订单维度计算本次需要对冲的新增成交量（避免跨状态重复补对冲）"""
+        if not order_id:
+            return self._calc_maker_fill_delta(filled_qty)
+        hedged = self._maker_hedged_qty_by_order_id.get(str(order_id), Decimal("0"))
+        if filled_qty <= hedged:
+            return Decimal("0")
+        return filled_qty - hedged
+
+    def _record_maker_hedged_qty(self, order_id: str, hedged_qty: Decimal) -> None:
+        """记录订单已对冲数量"""
+        if not order_id or hedged_qty <= 0:
+            return
+        key = str(order_id)
+        self._maker_hedged_qty_by_order_id[key] = self._maker_hedged_qty_by_order_id.get(key, Decimal("0")) + hedged_qty
 
     @asynccontextmanager
     async def _maker_lock(self, label: str):
@@ -4257,6 +4284,11 @@ class SpreadArbBot:
                         self._hedging_state.lighter_order_id or "unknown",
                         ext_filled_qty
                     )
+                    if self._maker_wait_state.current_order:
+                        self._record_maker_hedged_qty(
+                            self._maker_wait_state.current_order.order_id,
+                            ext_filled_qty
+                        )
 
                 # 判断是否还有剩余数量需要继续等待
                 if hasattr(self, '_maker_wait_state') and self._maker_wait_state.current_order:
