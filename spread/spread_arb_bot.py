@@ -224,6 +224,7 @@ class SpreadArbBot:
         self._recent_log_handler: Optional[RecentLogHandler] = None
         self._init_recent_log_handler()
         self._open_attempt_id: Optional[str] = None
+        self._opening_wait_attempt_id: Optional[str] = None
         self._state_enter_ts: float = time.time()
         self._open_flow_durations: Dict[str, float] = {}
         self._close_flow_durations: Dict[str, float] = {}
@@ -518,6 +519,7 @@ class SpreadArbBot:
         mode = self._infer_alignment_mode(prev_state, next_state)
         if mode is None:
             return
+        opening_attempt_id = self._open_attempt_id
         self._alignment_check_in_progress = True
         try:
             ext_position = await self.extended_client.get_account_positions()
@@ -558,6 +560,11 @@ class SpreadArbBot:
             # 开仓阶段：仅在进入OPENING_WAIT时做单边回滚，避免对冲中误判
             if prev_state == BotState.OPENING_WAIT or next_state != BotState.OPENING_WAIT:
                 return
+            if opening_attempt_id is None or self._open_attempt_id != opening_attempt_id:
+                logger.warning(
+                    f"⚠️ 开仓回滚跳过：attempt已过期 | current={self._open_attempt_id} expected={opening_attempt_id}"
+                )
+                return
 
             pending_qty = None
             if hasattr(self, "_pending_open_position") and self._pending_open_position:
@@ -597,7 +604,7 @@ class SpreadArbBot:
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
                     ],
                 )
-                await self.trade_executor.rollback_position("extended", reduce_qty, side)
+                await self.trade_executor.rollback_position("extended", reduce_qty, side, log_as_warning=True)
             else:
                 # Lig 回滚：LONG -> 买入（回补空头），SHORT -> 卖出（平多）
                 side = "buy" if position_state == PositionState.LONG else "sell"
@@ -618,7 +625,7 @@ class SpreadArbBot:
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
                     ],
                 )
-                await self.trade_executor.rollback_position("lighter", reduce_qty, side)
+                await self.trade_executor.rollback_position("lighter", reduce_qty, side, log_as_warning=True)
         except Exception as e:
             logger.warning(f"仓位对齐检查异常: {e}")
         finally:
@@ -1420,11 +1427,17 @@ class SpreadArbBot:
         current_time = time.time()
         if self._opening_wait_start_time is None:
             self._opening_wait_start_time = current_time
+        opening_attempt_id = self._opening_wait_attempt_id or self._open_attempt_id
 
         elapsed = current_time - self._opening_wait_start_time
         timeout = self.config.open_wait_timeout
 
         if elapsed > timeout:
+            if opening_attempt_id is None or self._open_attempt_id != opening_attempt_id:
+                logger.warning(
+                    f"⚠️ 开仓强平跳过：attempt已过期 | current={self._open_attempt_id} expected={opening_attempt_id}"
+                )
+                return
             logger.warning(f"等待超时({elapsed:.1f}s)，强平")
             await self._force_close_positions()
             # 强平后进入冷却期
@@ -1575,6 +1588,11 @@ class SpreadArbBot:
                 # 等待2秒后，如果仓位仍不一致，只平掉本次开仓的数量（不平全仓）
                 logger.warning(f"仓位验证失败 (elapsed={elapsed:.1f}s >= 2.0s): Ext={ext_position} Lig={lig_position} diff={ext_lig_diff}")
                 self._suppress_open_failure_notify = True
+                if opening_attempt_id is None or self._open_attempt_id != opening_attempt_id:
+                    logger.warning(
+                        f"⚠️ 开仓回滚跳过：attempt已过期 | current={self._open_attempt_id} expected={opening_attempt_id}"
+                    )
+                    return
 
                 # 判断哪边多了仓位，只平掉多出来的部分（本次开仓数量）
                 portfolio = self.close_strategy.get_portfolio()
@@ -1595,7 +1613,7 @@ class SpreadArbBot:
                 current_qty = portfolio.total_quantity if portfolio else Decimal("0")
 
                 # 只平掉两边比之前持仓多的部分
-                await self._rollback_partial_positions(current_qty, ext_position, lig_position)
+                await self._rollback_partial_positions(current_qty, ext_position, lig_position, log_as_warning=True)
 
                 # 回滚后检查实际仓位，决定下一步状态
                 await asyncio.sleep(0.5)  # 等待回平订单生效
@@ -2052,7 +2070,13 @@ class SpreadArbBot:
 
         logger.error("强制平仓重试用尽，可能存在残余仓位")
 
-    async def _rollback_partial_positions(self, before_qty: Decimal, ext_current: Decimal, lig_current: Decimal) -> None:
+    async def _rollback_partial_positions(
+        self,
+        before_qty: Decimal,
+        ext_current: Decimal,
+        lig_current: Decimal,
+        log_as_warning: bool = False,
+    ) -> None:
         """
         只回滚多出来的仓位，使两边相等（不平全仓）
 
@@ -2116,7 +2140,7 @@ class SpreadArbBot:
 
                 # 并发执行回滚
                 rollback_results = await asyncio.gather(
-                    *[self.trade_executor.rollback_position(exchange, qty, side)
+                    *[self.trade_executor.rollback_position(exchange, qty, side, log_as_warning=log_as_warning)
                       for exchange, qty, side in close_tasks],
                     return_exceptions=True
                 )
@@ -2124,9 +2148,13 @@ class SpreadArbBot:
                 for i, result in enumerate(rollback_results):
                     exchange = close_tasks[i][0]
                     if isinstance(result, Exception):
-                        logger.error(f"{exchange.capitalize()}回滚异常: {result}")
+                        logger.warning(f"{exchange.capitalize()}回滚异常: {result}") if log_as_warning else logger.error(
+                            f"{exchange.capitalize()}回滚异常: {result}"
+                        )
                     elif not result:
-                        logger.error(f"{exchange.capitalize()}回滚失败")
+                        logger.warning(f"{exchange.capitalize()}回滚失败") if log_as_warning else logger.error(
+                            f"{exchange.capitalize()}回滚失败"
+                        )
 
                 # 等待订单生效
                 await asyncio.sleep(1.0)
@@ -2146,7 +2174,9 @@ class SpreadArbBot:
                         await asyncio.sleep(retry_delay)
 
             except Exception as e:
-                logger.error(f"回滚异常(尝试{attempt+1}/{max_retries}): {e}")
+                logger.warning(f"回滚异常(尝试{attempt+1}/{max_retries}): {e}") if log_as_warning else logger.error(
+                    f"回滚异常(尝试{attempt+1}/{max_retries}): {e}"
+                )
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
 
@@ -5071,6 +5101,7 @@ class SpreadArbBot:
         if not should_open:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
+        self._opening_wait_attempt_id = self._open_attempt_id
 
         # 风控验证
         self._log_spread_rule("info", BotState.IDLE, "open_check", "开始风控验证", also_print=True)
@@ -5126,6 +5157,7 @@ class SpreadArbBot:
         if not should_open:
             return False
         self._open_attempt_id = uuid.uuid4().hex[:8]
+        self._opening_wait_attempt_id = self._open_attempt_id
 
         # 可以继续开仓！切换到开仓状态
         # 风控验证

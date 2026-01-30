@@ -650,7 +650,8 @@ class TradeExecutor:
         self,
         exchange: str,
         quantity: Decimal,
-        side: str
+        side: str,
+        log_as_warning: bool = False
     ) -> bool:
         """
         强平（单边成交时使用）- Taker模式 (016-spread-optimize)
@@ -665,7 +666,21 @@ class TradeExecutor:
         """
         # logger.warning(f"强平[Taker]: {exchange} {side} {quantity}")
 
+        def _log_fail(message: str) -> None:
+            if log_as_warning:
+                logger.warning(message)
+            else:
+                logger.error(message)
+
         try:
+            # 先读取强平前仓位，用于判断是否完成了“部分回滚”
+            pre_position = None
+            try:
+                client = self.extended_client if exchange == "extended" else self.lighter_client
+                pre_position = await client.get_account_positions()
+            except Exception as e:
+                logger.warning(f"{exchange}强平前仓位获取失败: {e}")
+
             order_id = None
             if exchange == "extended":
                 if side == "sell":
@@ -679,7 +694,7 @@ class TradeExecutor:
                     result = await self._place_lighter_order_taker("buy", quantity, None, reduce_only=True)
 
             if isinstance(result, Exception):
-                logger.error(f"强平下单失败: {result}")
+                _log_fail(f"强平下单失败: {result}")
                 return False
 
             order_id = result.get('order_id')
@@ -711,17 +726,26 @@ class TradeExecutor:
             actual_position = await client.get_account_positions()
             tolerance = Decimal("0.001")
 
+            # 如果本次是“部分回滚”，只要仓位减少达到预期即可视为成功
+            if pre_position is not None:
+                pre_abs = abs(pre_position)
+                post_abs = abs(actual_position)
+                expected_max = max(Decimal("0"), pre_abs - quantity) + tolerance
+                if post_abs <= expected_max:
+                    logger.info(f"{exchange}回滚成功（部分回滚确认）: {pre_position} -> {actual_position}")
+                    return True
+
             # 强平成功：仓位接近0或已反向（如果原有多头，强平后应为空头或0）
             if abs(actual_position) < tolerance:
                 logger.info(f"{exchange}强平成功（仓位确认）: {actual_position}")
                 return True
             else:
                 # 仍有仓位，强平失败
-                logger.error(f"{exchange}强平失败（仍有仓位）: {actual_position}")
+                _log_fail(f"{exchange}强平失败（仍有仓位）: {actual_position}")
                 return False
 
         except Exception as e:
-            logger.error(f"强平异常: {e}")
+            _log_fail(f"强平异常: {e}")
             return False
 
     # ========================================================================
