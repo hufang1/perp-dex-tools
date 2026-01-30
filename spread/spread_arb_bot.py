@@ -194,6 +194,7 @@ class SpreadArbBot:
         self._last_maker_context_state: Optional[BotState] = None
         self._last_state_seen: Optional[BotState] = None
         self._alignment_check_in_progress: bool = False
+        self._open_rollback_attempt_id: Optional[str] = None
         self._last_maker_recovery_check_time: float = 0.0
         self._run_ext_volume: Decimal = Decimal("0")  # USDT
         self._run_lig_volume: Decimal = Decimal("0")  # USDT
@@ -586,6 +587,10 @@ class SpreadArbBot:
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
+                if opening_attempt_id is not None:
+                    self._open_rollback_attempt_id = opening_attempt_id
+                recent_logs = self._get_recent_log_tail(20)
+                context_lines = ["终端上下文(最近20行):"] + recent_logs if recent_logs else []
                 self._notify(
                     "⚠️ 开仓仓位不一致",
                     [
@@ -597,6 +602,7 @@ class SpreadArbBot:
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
+                        *context_lines,
                     ],
                 )
                 await self.trade_executor.rollback_position("extended", reduce_qty, side, log_as_warning=True)
@@ -607,6 +613,10 @@ class SpreadArbBot:
                     f"⚠️ 开仓阶段仓位不一致: Ext={ext_position} Lig={lig_position}，"
                     f"仅回滚本次开仓量{reduce_qty}"
                 )
+                if opening_attempt_id is not None:
+                    self._open_rollback_attempt_id = opening_attempt_id
+                recent_logs = self._get_recent_log_tail(20)
+                context_lines = ["终端上下文(最近20行):"] + recent_logs if recent_logs else []
                 self._notify(
                     "⚠️ 开仓仓位不一致",
                     [
@@ -618,6 +628,7 @@ class SpreadArbBot:
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
+                        *context_lines,
                     ],
                 )
                 await self.trade_executor.rollback_position("lighter", reduce_qty, side, log_as_warning=True)
@@ -1477,6 +1488,7 @@ class SpreadArbBot:
                 if both_zero:
                     # 两边都没有开仓
                     logger.warning(f"开仓失败：两边都没有仓位")
+                    self._open_rollback_attempt_id = None
                     if not self._suppress_open_failure_notify:
                         self._notify_open_failure("两边都没有仓位", ext_position, lig_position)
 
@@ -1535,7 +1547,21 @@ class SpreadArbBot:
                     except Exception:
                         pass
 
-                    self._notify_open_success(ext_position, lig_position, ext_avg=ext_avg, lig_avg=lig_avg)
+                    if self._open_rollback_attempt_id == opening_attempt_id:
+                        self._notify(
+                            "♻️ 回滚成功（市价）",
+                            [
+                                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                                f"交易对: {self.config.symbol}",
+                                f"开仓ID: {self._open_attempt_id or '-'}",
+                                f"结果: 回滚成功，已恢复持仓 Ext={ext_position} Lig={lig_position}",
+                                *self._format_exec_metrics(self._last_open_exec, "开仓"),
+                                f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
+                            ],
+                        )
+                        self._open_rollback_attempt_id = None
+                    else:
+                        self._notify_open_success(ext_position, lig_position, ext_avg=ext_avg, lig_avg=lig_avg)
                     self.close_strategy.add_position(self._pending_open_position)
 
                     # 记录本次运行的交易量（USDT名义）
@@ -1568,6 +1594,7 @@ class SpreadArbBot:
                     )
 
                     self._pending_open_position = None
+                self._open_rollback_attempt_id = None
 
                 # 开仓确认成功，清理开仓上下文，避免误触发开仓对齐回滚
                 self._last_maker_order_id = None
@@ -1610,6 +1637,8 @@ class SpreadArbBot:
                 current_qty = portfolio.total_quantity if portfolio else Decimal("0")
 
                 # 只平掉两边比之前持仓多的部分
+                if opening_attempt_id is not None:
+                    self._open_rollback_attempt_id = opening_attempt_id
                 await self._rollback_partial_positions(current_qty, ext_position, lig_position, log_as_warning=True)
 
                 # 回滚后检查实际仓位，决定下一步状态
@@ -1635,7 +1664,7 @@ class SpreadArbBot:
                     logger.info(f"回滚后无仓位 Ext={ext_position_after} Lig={lig_position_after}，进入空闲状态")
                     logger.info(f"回滚完成，进入冷却期 ({self._open_cooldown}秒)")
                     self._notify(
-                        "⚠️ 回滚成功",
+                        "♻️ 回滚成功（市价）",
                         [
                             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                             f"交易对: {self.config.symbol}",
@@ -1648,11 +1677,12 @@ class SpreadArbBot:
                     self.state_manager.set_state(BotState.IDLE, "仓位回滚完成，无持仓")
                     self._opening_wait_start_time = None
                     self._suppress_open_failure_notify = False
+                    self._open_rollback_attempt_id = None
                 elif both_match:
                     # 两边都有持仓且相等，进入 HOLDING
                     logger.info(f"回滚后仍有持仓 Ext={ext_position_after} Lig={lig_position_after}，进入持仓状态")
                     self._notify(
-                        "⚠️ 回滚成功",
+                        "♻️ 回滚成功（市价）",
                         [
                             f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                             f"交易对: {self.config.symbol}",
@@ -1665,6 +1695,7 @@ class SpreadArbBot:
                     self.state_manager.set_state(BotState.HOLDING, f"回滚后恢复持仓状态")
                     self._opening_wait_start_time = None
                     self._suppress_open_failure_notify = False
+                    self._open_rollback_attempt_id = None
                 else:
                     # 仓位仍不一致，强制全平
                     logger.error(f"回滚后仓位仍不一致 Ext={ext_position_after} Lig={lig_position_after}，强制全平")
@@ -4572,7 +4603,7 @@ class SpreadArbBot:
         """
         资金不足时的腾笼换鸟逻辑：
         1) 持仓时间 >= switch_min_hold_minutes
-        2) 当前实时价差 > 持仓价差 + switch_cost_bps
+        2) 当前实时价差 > 持仓价差 + 动态换仓成本
         触发后直接市价平仓释放资金
         """
         portfolio = self.close_strategy.get_portfolio()
@@ -4589,7 +4620,14 @@ class SpreadArbBot:
         if entry_spread <= 0:
             return False
 
-        switch_threshold = entry_spread + self.config.switch_cost_bps
+        ext_open_total = self._run_ext_open_taker_volume + self._run_ext_open_maker_volume
+        if ext_open_total > 0:
+            taker_ratio = self._run_ext_open_taker_volume / ext_open_total
+        else:
+            taker_ratio = Decimal("0")
+        # 动态换仓成本 = (1 + ext_taker / (ext_taker + ext_maker)) * 0.25%
+        switch_cost = (Decimal("1") + taker_ratio) * Decimal("0.0025")
+        switch_threshold = entry_spread + switch_cost
         if spread_info.spread_pct <= switch_threshold:
             return False
 
@@ -4608,7 +4646,7 @@ class SpreadArbBot:
             "switch_close",
             f"腾笼换鸟触发 | 余额不足 | 持仓{hold_minutes:.1f}m | "
             f"当前价差{spread_info.spread_pct:.3%} > "
-            f"持仓价差{entry_spread:.3%}+成本{self.config.switch_cost_bps:.3%}",
+            f"持仓价差{entry_spread:.3%}+成本{switch_cost:.3%}",
             also_print=True,
         )
         self._notify(
@@ -4619,7 +4657,7 @@ class SpreadArbBot:
                 f"持仓时长: {hold_minutes:.1f}m",
                 f"当前价差: {spread_info.spread_pct:.3%}",
                 f"持仓价差: {entry_spread:.3%}",
-                f"换仓成本: {self.config.switch_cost_bps:.3%}",
+                f"换仓成本: {switch_cost:.3%}",
                 f"原因: 余额不足 | {balance_reason}",
             ],
         )
