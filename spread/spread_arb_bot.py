@@ -3793,7 +3793,7 @@ class SpreadArbBot:
                 str(spread_info.lig_ask),
                 str(spread_info.spread_abs),
                 str(spread_info.spread_pct),
-                str(portfolio.get_weighted_avg_spread() if portfolio else 0),
+                str(portfolio.get_total_entry_spread() if portfolio else 0),
                 str(portfolio.total_quantity if portfolio else 0),
                 str(portfolio.get_total_entry_spread() if portfolio else 0)
             )
