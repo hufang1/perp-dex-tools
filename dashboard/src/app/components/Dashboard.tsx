@@ -748,18 +748,3 @@ function LogList({ items, loading }: { items: LogEntry[]; loading: boolean }) {
     </div>
   );
 }
-              {[
-                { key: "ALL", label: "全部" },
-                { key: "ERROR", label: "错误" },
-                { key: "WARNING", label: "告警" },
-                { key: "INFO", label: "信息" },
-                { key: "DEBUG", label: "调试" },
-              ].map((r) => (
-                <button
-                  key={r.key}
-                  className={logLevel === r.key ? "active" : ""}
-                  onClick={() => setLogLevel(r.key)}
-                >
-                  {r.label}
-                </button>
-              ))}
