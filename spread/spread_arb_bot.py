@@ -626,10 +626,12 @@ class SpreadArbBot:
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
+                        "回滚中: 市价",
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
                         *context_lines,
                     ],
                 )
+                self._notify_rollback_in_progress(ext_position, lig_position, reduce_qty)
                 await self.trade_executor.rollback_position("extended", reduce_qty, side, log_as_warning=True)
             else:
                 # Lig 回滚：LONG -> 买入（回补空头），SHORT -> 卖出（平多）
@@ -652,10 +654,12 @@ class SpreadArbBot:
                         f"Ext仓位: {ext_position}",
                         f"Lig仓位: {lig_position}",
                         f"回滚数量: {reduce_qty}",
+                        "回滚中: 市价",
                         "动作: 单边开仓，准备执行本次开仓仓位回滚",
                         *context_lines,
                     ],
                 )
+                self._notify_rollback_in_progress(ext_position, lig_position, reduce_qty)
                 await self.trade_executor.rollback_position("lighter", reduce_qty, side, log_as_warning=True)
         except Exception as e:
             logger.warning(f"仓位对齐检查异常: {e}")
@@ -5088,7 +5092,27 @@ class SpreadArbBot:
             f"方式: {mode}",
             f"数量: {total_quantity}",
         ]
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
         self._notify(f"⏳ 平仓中（{mode}）", lines)
+
+    def _notify_rollback_in_progress(self, ext_position: Decimal, lig_position: Decimal, reduce_qty: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"开仓ID: {self._open_attempt_id or '-'}",
+            f"Ext仓位: {ext_position}",
+            f"Lig仓位: {lig_position}",
+            f"回滚数量: {reduce_qty}",
+            "回滚方式: 市价",
+        ]
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
+        self._notify("⏳ 回滚中", lines)
 
     def _notify_close_escalate(self, spread: Decimal, threshold: Decimal) -> None:
         lines = [
