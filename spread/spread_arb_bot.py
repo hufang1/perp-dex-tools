@@ -1304,6 +1304,7 @@ class SpreadArbBot:
                 f"quantity={total_quantity}"
             )
             print(f"💥 CLOSING -> Maker平仓单已挂出 -> CLOSING_MAKER_WAIT")
+            self._notify_close_in_progress("挂单", total_quantity)
 
             # 进入 CLOSING_MAKER_WAIT 状态（WebSocket 回调会处理：成交 -> LIGHTER_HEDGING，取消 -> HOLDING）
             self.state_manager.set_state(
@@ -1341,6 +1342,7 @@ class SpreadArbBot:
         entry_spread = portfolio.get_total_entry_spread()
 
         try:
+            self._notify_close_in_progress("市价", total_quantity)
             # 创建临时 Position 对象（execute_close_position 需要）
             temp_position = Position(
                 state=PositionState.LONG,
@@ -1400,6 +1402,7 @@ class SpreadArbBot:
     # ========== 保留旧方法以兼容其他调用 ==========
     async def _process_closing_taker_mode(self, total_quantity: Decimal, entry_spread: Decimal) -> None:
         """处理Taker模式平仓（原有逻辑）"""
+        self._notify_close_in_progress("市价", total_quantity)
         # 创建一个临时 Position 对象用于 execute_close_position
         # 因为 execute_close_position 需要 Position 参数
         temp_position = Position(
@@ -1560,6 +1563,7 @@ class SpreadArbBot:
                                 f"交易对: {self.config.symbol}",
                                 f"开仓ID: {self._open_attempt_id or '-'}",
                                 f"结果: 回滚成功，已恢复持仓 Ext={ext_position} Lig={lig_position}",
+                                "回滚方式: 市价",
                                 *self._format_exec_metrics(self._last_open_exec, "开仓"),
                                 f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                             ],
@@ -1675,6 +1679,7 @@ class SpreadArbBot:
                             f"交易对: {self.config.symbol}",
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             "结果: 回滚成功，两边已无仓位",
+                            "回滚方式: 市价",
                             *self._format_exec_metrics(self._last_open_exec, "开仓"),
                             f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
@@ -1693,6 +1698,7 @@ class SpreadArbBot:
                             f"交易对: {self.config.symbol}",
                             f"开仓ID: {self._open_attempt_id or '-'}",
                             f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
+                            "回滚方式: 市价",
                             *self._format_exec_metrics(self._last_open_exec, "开仓"),
                             f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}",
                         ],
@@ -5023,6 +5029,15 @@ class SpreadArbBot:
             lines.append("终端上下文(最近20行):")
             lines.extend(recent_logs)
         self._notify("❌ 平仓失败", lines)
+
+    def _notify_close_in_progress(self, mode: str, total_quantity: Decimal) -> None:
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"方式: {mode}",
+            f"数量: {total_quantity}",
+        ]
+        self._notify(f"⏳ 平仓中（{mode}）", lines)
 
     def _notify_close_escalate(self, spread: Decimal, threshold: Decimal) -> None:
         lines = [
