@@ -109,3 +109,79 @@ input[type="datetime-local"] {
 .muted {
   color: var(--muted);
 }
+
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-list {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: auto;
+  background: #101613;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 110px 70px 140px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 2px 10px;
+  font-size: 12px;
+  border-bottom: 1px dashed rgba(36, 48, 41, 0.6);
+  color: var(--text);
+}
+
+.log-row:last-child {
+  border-bottom: none;
+}
+
+.log-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-level {
+  font-weight: 600;
+}
+
+.log-logger {
+  color: #9fb4a9;
+}
+
+.log-msg {
+  color: #e8efe8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.level-error .log-level {
+  color: var(--danger);
+}
+
+.level-warning .log-level {
+  color: #ffb86b;
+}
+
+.level-info .log-level {
+  color: var(--accent-2);
+}
+
+.level-debug .log-level {
+  color: #9aa7ff;
+}
+
+.log-status {
+  font-size: 12px;
+}

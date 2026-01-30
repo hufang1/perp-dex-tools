@@ -6,6 +6,7 @@
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from typing import Optional
 
 
@@ -66,7 +67,11 @@ class CompactFormatter(logging.Formatter):
 def setup_logging(
     level: int = logging.INFO,
     compact: bool = True,
-    log_file: Optional[str] = None
+    log_file: Optional[str] = None,
+    file_compact: bool = False,
+    rotate_when: str = "D",
+    backup_count: int = 14,
+    max_bytes: Optional[int] = None,
 ) -> None:
     """
     配置日志系统
@@ -100,12 +105,31 @@ def setup_logging(
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
-    # 可选的文件处理器
+    # 可选的文件处理器（支持按时间或大小滚动）
     if log_file:
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        if max_bytes and max_bytes > 0:
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
+        else:
+            file_handler = TimedRotatingFileHandler(
+                log_file,
+                when=rotate_when,
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
         file_handler.setLevel(level)
-        # 文件使用精简格式但不带颜色
-        file_formatter = CompactFormatter(use_colors=False)
+        # 文件使用完整格式（含时间戳），或精简格式
+        if file_compact:
+            file_formatter = CompactFormatter(use_colors=False)
+        else:
+            file_formatter = logging.Formatter(
+                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
 

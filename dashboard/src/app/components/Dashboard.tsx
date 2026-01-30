@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Chart from "./Chart";
-import type { MetricsResponse, SpreadPoint, PositionPoint } from "../lib/types";
+import type { MetricsResponse, SpreadPoint, PositionPoint, LogEntry } from "../lib/types";
 
 const ranges = [
   { key: "5m", label: "5分钟" },
@@ -35,6 +35,20 @@ export default function Dashboard() {
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [connected, setConnected] = useState(false);
   const [zoom, setZoom] = useState<{ start?: number; end?: number }>({});
+  const [logRange, setLogRange] = useState("5m");
+  const [logLevel, setLogLevel] = useState("ALL");
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logCursor, setLogCursor] = useState<string | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logAuto, setLogAuto] = useState(true);
+
+  const logRangeToMs = (key: string) => {
+    if (key === "5m") return 5 * 60 * 1000;
+    if (key === "10m") return 10 * 60 * 1000;
+    if (key === "15m") return 15 * 60 * 1000;
+    if (key === "60m") return 60 * 60 * 1000;
+    return 10 * 60 * 1000;
+  };
   const rangeToMs = (key: string) => {
     if (key === "5m") return 5 * 60 * 1000;
     if (key === "15m") return 15 * 60 * 1000;
@@ -96,6 +110,59 @@ export default function Dashboard() {
   useEffect(() => {
     setZoom({});
   }, [range, symbol]);
+
+  const fetchLogWindow = () => {
+    const to = new Date();
+    const from = new Date(to.getTime() - logRangeToMs(logRange));
+    const params = new URLSearchParams({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      limit: "400",
+    });
+    if (logLevel !== "ALL") {
+      params.set("levels", logLevel);
+    }
+    setLogLoading(true);
+    fetch(`/api/logs?${params.toString()}`)
+      .then((res) => res.json())
+      .then((json: { items: LogEntry[]; nextCursor?: string | null }) => {
+        setLogs(json.items ?? []);
+        setLogCursor(json.nextCursor ?? null);
+      })
+      .catch(() => undefined)
+      .finally(() => setLogLoading(false));
+  };
+
+  const fetchLogHistory = () => {
+    if (!logCursor) return;
+    const params = new URLSearchParams({
+      before: logCursor,
+      limit: "400",
+    });
+    if (logLevel !== "ALL") {
+      params.set("levels", logLevel);
+    }
+    setLogLoading(true);
+    fetch(`/api/logs?${params.toString()}`)
+      .then((res) => res.json())
+      .then((json: { items: LogEntry[]; nextCursor?: string | null }) => {
+        const items = json.items ?? [];
+        setLogs((prev) => [...prev, ...items]);
+        setLogCursor(json.nextCursor ?? null);
+      })
+      .catch(() => undefined)
+      .finally(() => setLogLoading(false));
+  };
+
+  useEffect(() => {
+    fetchLogWindow();
+  }, [logRange, logLevel]);
+
+  useEffect(() => {
+    if (!logAuto) return;
+    const timer = setInterval(fetchLogWindow, 3000);
+    return () => clearInterval(timer);
+  }, [logRange, logAuto, logLevel]);
 
   const spreadSeries = useMemo(() => data?.spreads ?? [], [data]);
   const positionSeries = useMemo(() => data?.positions ?? [], [data]);
@@ -601,6 +668,98 @@ export default function Dashboard() {
           <div className="value">{symbol}</div>
         </div>
       </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h3>实时日志</h3>
+              <p className="muted">默认展示最近时间窗，点击查看历史加载更早记录</p>
+            </div>
+            <div className="controls">
+              {[
+                { key: "5m", label: "5分钟" },
+                { key: "10m", label: "10分钟" },
+                { key: "15m", label: "15分钟" },
+                { key: "60m", label: "1小时" },
+              ].map((r) => (
+                <button
+                  key={r.key}
+                  className={logRange === r.key ? "active" : ""}
+                  onClick={() => setLogRange(r.key)}
+                >
+                  {r.label}
+                </button>
+              ))}
+              <button onClick={() => setLogAuto((prev) => !prev)} className={logAuto ? "active" : ""}>
+                {logAuto ? "自动刷新" : "已暂停"}
+              </button>
+              <button onClick={fetchLogHistory} disabled={!logCursor || logLoading}>
+                查看历史
+              </button>
+            </div>
+          </div>
+          <LogList items={logs} loading={logLoading} />
+        </div>
+      </div>
     </main>
   );
 }
+
+function LogList({ items, loading }: { items: LogEntry[]; loading: boolean }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const rowHeight = 22;
+  const height = 320;
+  const total = items.length;
+
+  const onScroll = () => {
+    if (!containerRef.current) return;
+    setScrollTop(containerRef.current.scrollTop);
+  };
+
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - 4);
+  const visibleCount = Math.ceil(height / rowHeight) + 8;
+  const end = Math.min(total, start + visibleCount);
+  const offsetTop = start * rowHeight;
+  const offsetBottom = (total - end) * rowHeight;
+
+  return (
+    <div className="log-panel">
+      <div
+        className="log-list"
+        ref={containerRef}
+        style={{ height }}
+        onScroll={onScroll}
+      >
+        <div style={{ paddingTop: offsetTop, paddingBottom: offsetBottom }}>
+          {items.slice(start, end).map((item, idx) => (
+            <div key={`${item.ts}-${idx}`} className={`log-row level-${item.level.toLowerCase()}`}>
+              <span className="log-time">{formatTimeLabel(item.ts)}</span>
+              <span className="log-level">{item.level}</span>
+              <span className="log-logger">{item.logger}</span>
+              <span className="log-msg">{item.message}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {loading && <div className="log-status muted">加载中...</div>}
+      {!loading && total === 0 && <div className="log-status muted">暂无日志</div>}
+    </div>
+  );
+}
+              {[
+                { key: "ALL", label: "全部" },
+                { key: "ERROR", label: "错误" },
+                { key: "WARNING", label: "告警" },
+                { key: "INFO", label: "信息" },
+                { key: "DEBUG", label: "调试" },
+              ].map((r) => (
+                <button
+                  key={r.key}
+                  className={logLevel === r.key ? "active" : ""}
+                  onClick={() => setLogLevel(r.key)}
+                >
+                  {r.label}
+                </button>
+              ))}

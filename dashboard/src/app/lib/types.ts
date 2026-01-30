@@ -51,3 +51,11 @@ export type MetricsResponse = {
     position?: PositionPoint;
   };
 };
+
+export type LogEntry = {
+  ts: string;
+  level: string;
+  logger: string;
+  message: string;
+  raw: string;
+};

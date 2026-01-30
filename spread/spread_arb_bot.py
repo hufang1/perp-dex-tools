@@ -55,12 +55,7 @@ from maker_order_monitor import MakerOrderMonitor
 from models import MakerOrder
 from position_balance_monitor import PositionBalanceMonitor
 
-# 设置日志（输出 INFO 及以上级别）
-logging.basicConfig(
-    level=logging.ERROR,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+from logger_config import setup_logging
 
 
 class _DropNoisyLogs(logging.Filter):
@@ -6355,7 +6350,7 @@ class SpreadArbBot:
 # 命令行接口
 # ============================================================================
 
-def parse_arguments() -> BotConfig:
+def parse_arguments() -> tuple[BotConfig, argparse.Namespace]:
     """解析命令行参数"""
     from dotenv import load_dotenv
     load_dotenv()
@@ -6640,6 +6635,27 @@ def parse_arguments() -> BotConfig:
         help="详细日志模式"
     )
 
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=env_default("LOG_FILE", str, "logs/spread_arb.log"),
+        help="日志文件路径 (默认: logs/spread_arb.log)"
+    )
+
+    parser.add_argument(
+        "--log-retention-days",
+        type=int,
+        default=env_default("LOG_RETENTION_DAYS", int, 14),
+        help="日志保留天数 (默认: 14)"
+    )
+
+    parser.add_argument(
+        "--log-max-mb",
+        type=int,
+        default=env_default("LOG_MAX_MB", int, 0),
+        help="日志滚动大小MB (默认: 0 使用按天滚动)"
+    )
+
     args = parser.parse_args()
 
     # ========== 修改 (003-spreading-improvements): 只传递非None的参数，保留dataclass默认值 ==========
@@ -6721,13 +6737,27 @@ def parse_arguments() -> BotConfig:
     if 'maker_close_fail_threshold' not in config_kwargs:
         config_kwargs['maker_close_fail_threshold'] = env_default("MAKER_CLOSE_FAIL_THRESHOLD", int, None) or 3
 
-    return BotConfig(**config_kwargs)
+    return BotConfig(**config_kwargs), args
 
 
 async def main():
     """主函数"""
     # 解析配置
-    config = parse_arguments()
+    config, args = parse_arguments()
+
+    # 初始化日志（控制台+文件滚动）
+    log_level = logging.DEBUG if config.verbose else logging.INFO
+    log_path = Path(args.log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    setup_logging(
+        level=log_level,
+        compact=True,
+        log_file=str(log_path),
+        file_compact=False,
+        rotate_when="D",
+        backup_count=int(args.log_retention_days),
+        max_bytes=int(args.log_max_mb) * 1024 * 1024 if args.log_max_mb else None,
+    )
 
     # ========== 新增: 打印命令行参数解析后的配置用于调试 ==========
     print(f"🔧 [命令行参数解析] 阶梯开仓参数:")
