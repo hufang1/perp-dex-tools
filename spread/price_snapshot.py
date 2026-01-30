@@ -6,7 +6,7 @@ synchronized price data from two exchanges (Extended and Lighter).
 
 The price snapshot ensures that:
 1. Both exchanges' prices are fetched within 10ms of each other
-2. Taker order prices include 0.05% slippage protection (reduced from 0.2%)
+2. Taker order prices include slippage protection (configurable)
 3. Price consistency is validated (ext_buy < lig_sell for arbitrage)
 """
 
@@ -52,6 +52,7 @@ class PriceSnapshot:
     lig_ask: Decimal
     lig_timestamp: float
     time_delta: float
+    slippage_buffer: Decimal = Decimal("0.0001")
 
     def is_valid(self) -> bool:
         """Validate price snapshot
@@ -73,21 +74,20 @@ class PriceSnapshot:
         )
 
     def calculate_taker_prices(self) -> Tuple[Decimal, Decimal]:
-        """Calculate taker order prices with 0.05% slippage protection
+        """Calculate taker order prices with slippage protection
 
         Slippage protection ensures IOC orders execute immediately:
-        - Extended buy price = ext_ask * 1.0005 (cross ask with 0.05% buffer)
-        - Lighter sell price = lig_bid * 0.9995 (cross bid with 0.05% buffer)
-
-        Note: Reduced from 0.2% to 0.05% to preserve small spread profits
+        - Extended buy price = ext_ask * (1 + slippage_buffer)
+        - Lighter sell price = lig_bid * (1 - slippage_buffer)
 
         Returns:
             Tuple[Decimal, Decimal]: (ext_price, lig_price)
                 - ext_price: Price to use for Extended taker buy order
                 - lig_price: Price to use for Lighter taker sell order
         """
-        ext_price = self.ext_ask * Decimal('1.002')
-        lig_price = self.lig_bid * Decimal('0.998')
+        slip = self.slippage_buffer if self.slippage_buffer >= 0 else Decimal("0")
+        ext_price = self.ext_ask * (Decimal("1") + slip)
+        lig_price = self.lig_bid * (Decimal("1") - slip)
         return ext_price, lig_price
 
     def validate_price_consistency(self) -> bool:
@@ -95,7 +95,7 @@ class PriceSnapshot:
 
         For a profitable arbitrage:
         - Extended buy cost must be lower than Lighter sell revenue
-        - After slippage: ext_ask * 1.0005 < lig_bid * 0.9995
+        - After slippage: ext_ask * (1+slip) < lig_bid * (1-slip)
 
         Returns:
             bool: True if prices are consistent (arbitrage profitable), False otherwise

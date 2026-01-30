@@ -10,7 +10,7 @@
 
 import asyncio
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 import logging
@@ -39,6 +39,7 @@ class ExecutionResult:
         lighter_order_id: Optional[str] = None,
         extended_price: Optional[Decimal] = None,
         lighter_price: Optional[Decimal] = None,
+        order_quantity: Optional[Decimal] = None,
         error_message: Optional[str] = None,
         execution_time: float = 0.0,
         extended_filled: bool = False,
@@ -58,6 +59,7 @@ class ExecutionResult:
         self.lighter_order_id = lighter_order_id
         self.extended_price = extended_price
         self.lighter_price = lighter_price
+        self.order_quantity = order_quantity
         self.error_message = error_message
         self.execution_time = execution_time
         self.extended_filled = extended_filled
@@ -99,6 +101,7 @@ class TradeExecutor:
         self.lighter_client = lighter_client
         self.extended_client = extended_client
         self.risk_manager = risk_manager
+        self.config = getattr(risk_manager, "config", None)
         self.timeout = timeout
 
         # logger.info(f"交易执行器初始化: 超时={timeout}秒")
@@ -140,23 +143,92 @@ class TradeExecutor:
                     pass
         return None
 
+    def _get_taker_slippage(self) -> Decimal:
+        """统一的滑点参数（用于市价下单与预估）。"""
+        if self.config is None:
+            return Decimal("0")
+        slip = getattr(self.config, "slippage_buffer", Decimal("0"))
+        return slip if slip >= 0 else Decimal("0")
+
+    def _get_balance_safety_buffer(self) -> Decimal:
+        """余额安全缓冲（用于开仓数量缩量）。"""
+        if self.config is None:
+            return Decimal("0")
+        buffer = getattr(self.config, "balance_safety_buffer", Decimal("0"))
+        return buffer if buffer >= 0 else Decimal("0")
+
+    async def _get_extended_available_balance(self) -> Optional[Decimal]:
+        """获取Extended可用余额（尽力而为，失败返回None）。"""
+        try:
+            account = self.extended_client.perpetual_trading_client.account
+            if hasattr(account, "get_balance") and callable(getattr(account, "get_balance")):
+                result = await account.get_balance()
+                if result and hasattr(result, "data") and result.data:
+                    balance_model = result.data
+                    if hasattr(balance_model, "available_for_trade"):
+                        return Decimal(str(balance_model.available_for_trade))
+                    if hasattr(balance_model, "balance"):
+                        return Decimal(str(balance_model.balance))
+        except Exception as e:
+            logger.warning(f"获取Extended可用余额失败: {e}")
+        return None
+
+    async def _adjust_open_quantity_for_balance(
+        self,
+        quantity: Decimal,
+        price: Decimal
+    ) -> Tuple[Decimal, Optional[str]]:
+        """根据可用余额与缓冲动态缩量，避免余额不足拒单。"""
+        available = await self._get_extended_available_balance()
+        if available is None:
+            return quantity, "未能获取可用余额"
+        if available <= 0 or price <= 0:
+            return Decimal("0"), "可用余额不足"
+
+        leverage = Decimal("1")
+        if self.config is not None:
+            leverage = getattr(self.config, "leverage", Decimal("1"))
+            if leverage <= 0:
+                leverage = Decimal("1")
+
+        safety_buffer = self._get_balance_safety_buffer()
+        rounded_price = self.extended_client.round_to_tick(price)
+
+        max_notional = available * leverage
+        effective_price = rounded_price * (Decimal("1") + safety_buffer)
+        if effective_price <= 0:
+            return Decimal("0"), "价格无效"
+
+        max_qty = max_notional / effective_price
+        min_step = getattr(self.extended_client, "min_order_size", Decimal("0"))
+        if min_step and min_step > 0:
+            max_qty = (max_qty / min_step).to_integral_value(rounding=ROUND_DOWN) * min_step
+
+        if max_qty <= 0:
+            return Decimal("0"), "可用余额不足以开仓"
+
+        if max_qty < quantity:
+            return max_qty, f"余额不足(可用={available}, 杠杆={leverage}x, 缓冲={safety_buffer:.2%})"
+
+        return quantity, None
+
     async def execute_open_position(
         self,
         quantity: Decimal,
         spread
     ) -> ExecutionResult:
         """
-        执行开仓（001-fix-spread-price优化：统一价格获取+滑点保护）
+        执行开仓（统一价格获取+滑点保护）
 
         开仓方向（Taker模式，即时成交）：
-        - Extended: 买入（使用 ask 价格 + 0.2%滑点保护）
-        - Lighter: 卖出（使用 bid 价格 + 0.2%滑点保护）
+        - Extended: 买入（使用 ask 价格 + 滑点保护）
+        - Lighter: 卖出（使用 bid 价格 + 滑点保护）
 
         价格同步机制：
         1. 在execute_open_position层面统一并发获取两个交易所BBO价格
         2. 记录时间戳并计算time_delta（目标<10ms）
         3. 创建PriceSnapshot并验证有效性
-        4. 计算带0.2%滑点保护的taker价格
+        4. 计算带滑点保护的taker价格
         5. 验证价格一致性（ext买入 < lig卖出）
 
         Args:
@@ -196,7 +268,8 @@ class TradeExecutor:
                 lig_bid=lig_bid,
                 lig_ask=lig_ask,
                 lig_timestamp=lig_fetch_time,
-                time_delta=time_delta
+                time_delta=time_delta,
+                slippage_buffer=self._get_taker_slippage()
             )
 
             # Step 3: 验证价格快照
@@ -208,12 +281,13 @@ class TradeExecutor:
                 return ExecutionResult(
                     success=False,
                     error_message=f"价格快照无效: time_delta={time_delta*1000:.1f}ms",
+                    order_quantity=quantity,
                     execution_time=time.time() - start_time,
                     extended_attempts=0,
                     lighter_attempts=0,
                 )
 
-            # Step 4: 计算taker价格（0.2%滑点）
+            # Step 4: 计算taker价格（使用统一滑点参数）
             ext_price, lig_price = price_snapshot.calculate_taker_prices()
 
             # Step 5: 验证价格一致性
@@ -239,7 +313,28 @@ class TradeExecutor:
                 f"spread={spread_pct:.2f}%"
             )
 
-            # Step 7: 并发发送订单（使用计算好的价格）
+            # Step 7: 根据余额与价格动态调整数量（防止余额不足）
+            adjusted_quantity, adjust_reason = await self._adjust_open_quantity_for_balance(
+                quantity,
+                ext_price
+            )
+            if adjusted_quantity <= 0:
+                return ExecutionResult(
+                    success=False,
+                    error_message=adjust_reason or "余额不足，跳过开仓",
+                    order_quantity=quantity,
+                    execution_time=time.time() - start_time,
+                    extended_attempts=0,
+                    lighter_attempts=0,
+                )
+            if adjusted_quantity < quantity:
+                logger.warning(
+                    f"开仓数量缩量: 原始={quantity} -> 实际={adjusted_quantity} "
+                    f"(原因: {adjust_reason})"
+                )
+                quantity = adjusted_quantity
+
+            # Step 8: 并发发送订单（使用计算好的价格）
             async def _timed(coro):
                 start = time.time()
                 res = await coro
@@ -265,6 +360,7 @@ class TradeExecutor:
                 ext_attempts = self._extract_attempts(extended_result) or 1
                 return ExecutionResult(
                     error_message=f"Extended 订单失败: {extended_result}",
+                    order_quantity=quantity,
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
@@ -280,6 +376,7 @@ class TradeExecutor:
                 lig_attempts = self._extract_attempts(lighter_result) or 1
                 return ExecutionResult(
                     error_message=f"Lighter 订单失败: {lighter_result}",
+                    order_quantity=quantity,
                     execution_time=time.time() - start_time,
                     extended_order_time=ext_time,
                     lighter_order_time=lig_time,
@@ -315,6 +412,7 @@ class TradeExecutor:
                     lighter_order_id=lighter_result["order_id"],
                     extended_price=extended_result.get("price"),
                     lighter_price=lighter_result.get("price"),
+                    order_quantity=quantity,
                     execution_time=execution_time,
                     extended_filled=True,
                     lighter_filled=True,
@@ -333,6 +431,7 @@ class TradeExecutor:
                     extended_price=extended_result.get("price"),
                     lighter_price=lighter_result.get("price"),
                     error_message="订单状态查询超时",
+                    order_quantity=quantity,
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
                     lighter_filled=execution_status["lighter_filled"],
@@ -354,6 +453,7 @@ class TradeExecutor:
                     extended_price=extended_result.get("price"),
                     lighter_price=lighter_result.get("price"),
                     error_message="单边成交",
+                    order_quantity=quantity,
                     execution_time=execution_time,
                     extended_filled=execution_status["extended_filled"],
                     lighter_filled=execution_status["lighter_filled"],
@@ -369,6 +469,7 @@ class TradeExecutor:
             ext_code, ext_http = self._extract_error_info(e)
             return ExecutionResult(
                 error_message=str(e),
+                order_quantity=quantity,
                 execution_time=time.time() - start_time,
                 orders_parallel=True,
                 extended_attempts=self._extract_attempts(e) or 1,
@@ -846,13 +947,11 @@ class TradeExecutor:
         reduce_only: bool = False
     ) -> Dict[str, Any]:
         """
-        下 Extended Taker 订单 (001-fix-spread-price优化：加入0.05%滑点保护)
+        下 Extended Taker 订单（使用统一滑点参数）
 
         Taker模式：使用对手价确保即时成交
-        - 买入：使用ask价格 + 0.05%滑点保护 (ask * 1.0005)
-        - 卖出：使用bid价格 - 0.05%滑点保护 (bid * 0.9995)
-
-        注意：滑点从0.2%降低到0.05%，避免吃掉小价差的利润空间
+        - 买入：使用ask价格 + 滑点保护
+        - 卖出：使用bid价格 - 滑点保护
 
         Args:
             side: "buy" 或 "sell"
@@ -865,15 +964,16 @@ class TradeExecutor:
         try:
             contract_id = self.extended_client.config.contract_id
 
-            # Taker模式：获取对手价并加入0.2%滑点保护确保即时成交
+            # Taker模式：获取对手价并加入滑点保护确保即时成交
             if price is None:
                 best_bid, best_ask = await self.extended_client.fetch_bbo_prices(contract_id)
+                slip = self._get_taker_slippage()
                 if side == "buy":
-                    # 买入使用ask价格 + 0.05%滑点保护
-                    price = best_ask * Decimal('1.0002')
+                    # 买入使用ask价格 + 滑点保护
+                    price = best_ask * (Decimal("1") + slip)
                 else:
-                    # 卖出使用bid价格 - 0.05%滑点保护
-                    price = best_bid * Decimal('0.9998')
+                    # 卖出使用bid价格 - 滑点保护
+                    price = best_bid * (Decimal("1") - slip)
 
             # 调用 Extended 客户端的 taker 订单方法
             # 使用 place_open_order 但不使用 post_only，且价格跨越价差
@@ -906,11 +1006,11 @@ class TradeExecutor:
         reduce_only: bool = False
     ) -> Dict[str, Any]:
         """
-        下 Lighter Taker 订单 (016-spread-optimize)
+        下 Lighter Taker 订单（使用统一滑点参数）
 
         Taker模式：跨越价差确保即时成交
-        - 买入：ask * 1.002（高于ask 0.2%）
-        - 卖出：bid * 0.998（低于bid 0.2%）
+        - 买入：ask + 滑点
+        - 卖出：bid - 滑点
 
         Args:
             side: "buy" 或 "sell"
@@ -926,13 +1026,14 @@ class TradeExecutor:
             # Taker模式：计算跨越价差的价格
             if price is None:
                 best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(contract_id)
+                slip = self._get_taker_slippage()
 
                 if side == "buy":
-                    # 买入用ask * 1.002，确保跨越价差
-                    price = best_ask * Decimal('1.002')
+                    # 买入用ask + 滑点，确保跨越价差
+                    price = best_ask * (Decimal("1") + slip)
                 else:
-                    # 卖出用bid * 0.998，确保跨越价差
-                    price = best_bid * Decimal('0.998')
+                    # 卖出用bid - 滑点，确保跨越价差
+                    price = best_bid * (Decimal("1") - slip)
 
             # 调用 Lighter 客户端下taker订单（使用IOC立即成交或取消）
             result = await self.lighter_client.place_limit_order(

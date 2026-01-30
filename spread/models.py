@@ -269,10 +269,11 @@ class BotConfig:
     min_spread_threshold: Decimal = Decimal("0.0007")       # 最小价差阈值 0.2%
 
     # 风控参数
-    slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护 0.05%
+    slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护（用于市价/阈值计算）
     min_profit: Decimal = Decimal("0")                      # 最小利润 0%
     max_spread: Decimal = Decimal("0.05")                  # 极端价差阈值 5%
     single_side_timeout: float = 3.0                       # 单边超时 3 秒
+    balance_safety_buffer: Decimal = Decimal("0.01")       # 余额安全缓冲（1%）
 
     # 交易所配置
     lighter_account_index: int = 0
@@ -579,6 +580,8 @@ class BotConfig:
         if self.min_spread_threshold <= 0:
             return False
         if self.slippage_buffer < 0:
+            return False
+        if self.balance_safety_buffer < 0:
             return False
         if self.min_profit < 0:  # 允许 0 利润
             return False

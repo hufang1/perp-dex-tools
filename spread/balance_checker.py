@@ -217,22 +217,27 @@ class BalanceAvailabilityChecker:
             if leverage <= 0:
                 leverage = Decimal("1")
 
+            safety_buffer = getattr(self.config, "balance_safety_buffer", Decimal("0"))
+            if safety_buffer < 0:
+                safety_buffer = Decimal("0")
+
+            required_notional = order_notional_usd * (Decimal("1") + safety_buffer)
             ext_capacity = ext_available * leverage
             lig_capacity = lig_available * leverage
-            required_margin = order_notional_usd / leverage
+            required_margin = required_notional / leverage
 
             logger.info(
                 f"仓位检测 | 名义={order_notional_usd:.2f} | "
-                f"杠杆={leverage}x | Ext可用={ext_available:.2f} "
+                f"缓冲={safety_buffer:.2%} | 杠杆={leverage}x | Ext可用={ext_available:.2f} "
                 f"Lig可用={lig_available:.2f} | "
                 f"Ext名义={ext_capacity:.2f} Lig名义={lig_capacity:.2f}"
             )
 
-            if ext_capacity < order_notional_usd:
-                shortage = order_notional_usd - ext_capacity
+            if ext_capacity < required_notional:
+                shortage = required_notional - ext_capacity
                 max_position = ext_capacity / ext_price if ext_price > 0 else Decimal("0")
                 logger.warning(
-                    f"Extended仓位不足: 可用{ext_available:.2f} * {leverage}x < {order_notional_usd:.2f} USDT"
+                    f"Extended仓位不足: 可用{ext_available:.2f} * {leverage}x < {required_notional:.2f} USDT"
                 )
                 return BalanceAvailabilityResult(
                     is_sufficient=False,
@@ -246,11 +251,11 @@ class BalanceAvailabilityChecker:
                     max_position=max_position
                 )
 
-            if lig_capacity < order_notional_usd:
-                shortage = order_notional_usd - lig_capacity
+            if lig_capacity < required_notional:
+                shortage = required_notional - lig_capacity
                 max_position = lig_capacity / lig_price if lig_price > 0 else Decimal("0")
                 logger.warning(
-                    f"Lighter仓位不足: 可用{lig_available:.2f} * {leverage}x < {order_notional_usd:.2f} USDT"
+                    f"Lighter仓位不足: 可用{lig_available:.2f} * {leverage}x < {required_notional:.2f} USDT"
                 )
                 return BalanceAvailabilityResult(
                     is_sufficient=False,

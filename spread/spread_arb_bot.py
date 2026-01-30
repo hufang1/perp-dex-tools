@@ -945,6 +945,8 @@ class SpreadArbBot:
         else:
             logger.info(f"订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
 
+        actual_qty = result.order_quantity or self.config.target_quantity
+
         # 创建持仓记录（先创建，后续在OPENING_WAIT中验证）
         position = Position(
             state=PositionState.LONG,
@@ -952,8 +954,8 @@ class SpreadArbBot:
             lighter_entry_price=result.lighter_price or spread_info.lig_bid,
             entry_spread=spread_info.spread_pct,
             entry_time=datetime.now(),
-            extended_quantity=self.config.target_quantity,
-            lighter_quantity=-self.config.target_quantity,
+            extended_quantity=actual_qty,
+            lighter_quantity=-actual_qty,
             extended_order_id=result.extended_order_id,
             lighter_order_id=result.lighter_order_id,
         )
@@ -973,7 +975,7 @@ class SpreadArbBot:
             ext_price=result.extended_price or spread_info.ext_ask,
             lig_price=result.lighter_price or spread_info.lig_bid,
             open_spread=spread_info.spread_pct,
-            quantity=self.config.target_quantity,
+            quantity=actual_qty,
             ext_order_id=result.extended_order_id,
             lig_order_id=result.lighter_order_id,
             is_active=True,
@@ -4917,7 +4919,9 @@ class SpreadArbBot:
 
     def _get_open_order_notional(self, spread_info) -> Decimal:
         """获取开仓名义金额（USDT）"""
-        return self.config.target_quantity * spread_info.ext_ask
+        slip = self.config.slippage_buffer if self.config.slippage_buffer >= 0 else Decimal("0")
+        ext_price = spread_info.ext_ask * (Decimal("1") + slip)
+        return self.config.target_quantity * ext_price
 
     def _record_run_volume(self, ext_notional: Decimal, lig_notional: Decimal) -> None:
         if ext_notional is None or lig_notional is None:
@@ -6402,7 +6406,14 @@ def parse_arguments() -> BotConfig:
         "--slippage-buffer",
         type=Decimal,
         default=Decimal(str(env_default("SLIPPAGE_BUFFER", Decimal, Decimal("0.0001")))),
-        help="滑点保护 (默认: 0.0005 = 0.01%%)"
+        help="滑点保护 (默认: 0.0001 = 0.01%%)"
+    )
+
+    parser.add_argument(
+        "--balance-safety-buffer",
+        type=Decimal,
+        default=Decimal(str(env_default("BALANCE_SAFETY_BUFFER", Decimal, Decimal("0.01")))),
+        help="余额安全缓冲 (默认: 0.01 = 1%%)"
     )
 
     parser.add_argument(
@@ -6640,6 +6651,7 @@ def parse_arguments() -> BotConfig:
         'min_profit': args.min_profit,
         'max_spread': args.max_spread,
         'balance_check_buffer': args.balance_check_buffer,
+        'balance_safety_buffer': args.balance_safety_buffer,
         'single_side_timeout': args.single_side_timeout,
         'open_wait_timeout': args.open_wait_timeout,
         'dry_run': args.dry_run,
