@@ -140,6 +140,7 @@ class SpreadArbBot:
 
         # 开仓等待确认
         self._opening_wait_start_time: Optional[float] = None
+        self._opening_wait_timeout_warn_ts: Optional[float] = None
         # 待确认的仓位（仓位确认成功后才添加到智能平仓系统）
         self._pending_open_position = None
         # 开仓失败冷却期（秒）
@@ -1495,22 +1496,22 @@ class SpreadArbBot:
                     f"⚠️ 开仓强平跳过：attempt已过期 | current={self._open_attempt_id} expected={opening_attempt_id}"
                 )
                 return
-            logger.warning(f"等待超时({elapsed:.1f}s)，强平")
-            await self._force_close_positions()
-            # 强平后进入冷却期
-            self._last_open_fail_time = time.time()
-            logger.info(f"强平完成，进入冷却期 ({self._open_cooldown}秒)")
-            # 检查是否有API错误记录，如果有则进入风控模式而不是IDLE
-            if self._api_error_count > 0:
-                print(f"🛡️ 等待超时且API异常，进入风控暂停模式")
-                reason = "等待超时且API异常，已强平"
-                self.state_manager.set_state(BotState.PAUSED, reason)
-                self._notify_paused(reason)
-            else:
-                self.state_manager.set_state(BotState.IDLE, f"等待超时({elapsed:.1f}s)，已强平")
-            self._opening_wait_start_time = None
-            await self.state_manager.save_state()
-            return
+            # 超时不强平，持续等待直到仓位有反应
+            if self._opening_wait_timeout_warn_ts is None or (current_time - self._opening_wait_timeout_warn_ts) >= 30.0:
+                logger.warning(f"等待超时({elapsed:.1f}s)，继续等待仓位确认")
+                lines = [
+                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"交易对: {self.config.symbol}",
+                    f"开仓ID: {self._open_attempt_id or '-'}",
+                    f"超时: {elapsed:.1f}s",
+                    "动作: 继续等待仓位确认",
+                ]
+                recent_logs = self._get_recent_log_tail(20)
+                if recent_logs:
+                    lines.append("终端上下文(最近20行):")
+                    lines.extend(recent_logs)
+                self._notify("⏳ 开仓等待超时", lines)
+                self._opening_wait_timeout_warn_ts = current_time
 
         try:
             ext_position = await self.extended_client.get_account_positions()
@@ -1560,6 +1561,7 @@ class SpreadArbBot:
                     logger.info(f"进入冷却期 ({self._open_cooldown}秒)")
                     self.state_manager.set_state(BotState.IDLE, f"开仓失败：两边都没有仓位")
                     self._opening_wait_start_time = None
+                    self._opening_wait_timeout_warn_ts = None
                     self._suppress_open_failure_notify = False
 
                     # 清除待确认的仓位
@@ -1577,6 +1579,7 @@ class SpreadArbBot:
                 logger.info(f"仓位确认成功 Ext={ext_position} Lig={lig_position} {elapsed:.1f}s")
                 self.state_manager.set_state(BotState.HOLDING, f"仓位确认成功 Ext={ext_position} Lig={lig_position}")
                 self._opening_wait_start_time = None
+                self._opening_wait_timeout_warn_ts = None
 
                 # 仓位确认成功后，添加到智能平仓系统
                 if hasattr(self, '_pending_open_position') and self._pending_open_position:
@@ -1757,6 +1760,7 @@ class SpreadArbBot:
                     )
                     self.state_manager.set_state(BotState.IDLE, "仓位回滚完成，无持仓")
                     self._opening_wait_start_time = None
+                    self._opening_wait_timeout_warn_ts = None
                     self._suppress_open_failure_notify = False
                     self._open_rollback_attempt_id = None
                     self._open_pre_attempt_id = None
@@ -1785,6 +1789,7 @@ class SpreadArbBot:
                     )
                     self.state_manager.set_state(BotState.HOLDING, f"回滚后恢复持仓状态")
                     self._opening_wait_start_time = None
+                    self._opening_wait_timeout_warn_ts = None
                     self._suppress_open_failure_notify = False
                     self._open_rollback_attempt_id = None
                     self._open_pre_attempt_id = None
@@ -1819,6 +1824,7 @@ class SpreadArbBot:
 
                     self._opening_wait_start_time = None
                     self._suppress_open_failure_notify = False
+                    self._opening_wait_timeout_warn_ts = None
 
                 await self.state_manager.save_state()
             else:
