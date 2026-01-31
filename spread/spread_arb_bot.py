@@ -238,6 +238,7 @@ class SpreadArbBot:
         self._open_rollback_reason_by_attempt: Dict[str, str] = {}
         self._open_rollback_error_by_attempt: Dict[str, Dict[str, str]] = {}
         self._open_rollback_phase_counts_by_attempt: Dict[str, Dict[str, int]] = {}
+        self._open_rollback_counts_global: Dict[str, int] = {"extended": 0, "lighter": 0}
         self._state_enter_ts: float = time.time()
         self._open_flow_durations: Dict[str, float] = {}
         self._close_flow_durations: Dict[str, float] = {}
@@ -1648,6 +1649,7 @@ class SpreadArbBot:
                                 f"结果: 回滚成功，已恢复持仓 Ext={ext_position} Lig={lig_position}",
                                 "回滚方式: 市价",
                                 f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                                f"回滚累计: Ext={self._open_rollback_counts_global.get('extended', 0)} Lig={self._open_rollback_counts_global.get('lighter', 0)}",
                                 f"回滚阶段: 触发={self._open_rollback_phase_counts.get('immediate', 0)} 确认={self._open_rollback_phase_counts.get('confirm', 0)}",
                                 f"回滚原因: {self._open_rollback_reason or 'unknown'}",
                                 f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
@@ -1795,6 +1797,7 @@ class SpreadArbBot:
                             "结果: 回滚成功，两边已无仓位",
                             "回滚方式: 市价",
                             f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                            f"回滚累计: Ext={self._open_rollback_counts_global.get('extended', 0)} Lig={self._open_rollback_counts_global.get('lighter', 0)}",
                             f"回滚阶段: 触发={self._open_rollback_phase_counts.get('immediate', 0)} 确认={self._open_rollback_phase_counts.get('confirm', 0)}",
                             f"回滚原因: {self._open_rollback_reason or 'unknown'}",
                             f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
@@ -1823,6 +1826,7 @@ class SpreadArbBot:
                             f"结果: 回滚成功，已恢复持仓 Ext={ext_position_after} Lig={lig_position_after}",
                             "回滚方式: 市价",
                             f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+                            f"回滚累计: Ext={self._open_rollback_counts_global.get('extended', 0)} Lig={self._open_rollback_counts_global.get('lighter', 0)}",
                             f"回滚阶段: 触发={self._open_rollback_phase_counts.get('immediate', 0)} 确认={self._open_rollback_phase_counts.get('confirm', 0)}",
                             f"回滚原因: {self._open_rollback_reason or 'unknown'}",
                             f"回滚错误: {', '.join([f'{k}={v}' for k, v in self._open_rollback_error_by_exchange.items()]) or '-'}",
@@ -5234,6 +5238,7 @@ class SpreadArbBot:
             return
         counts = self._open_rollback_counts_by_attempt[attempt_id]
         counts[exchange] = counts.get(exchange, 0) + 1
+        self._open_rollback_counts_global[exchange] = self._open_rollback_counts_global.get(exchange, 0) + 1
         self._sync_open_rollback_snapshot(attempt_id)
 
     def _inc_open_rollback_phase(self, attempt_id: Optional[str], phase: str) -> None:
@@ -5312,6 +5317,7 @@ class SpreadArbBot:
             f"回滚数量: {reduce_qty}",
             "回滚方式: 市价",
             f"回滚次数: Ext={self._open_rollback_counts.get('extended', 0)} Lig={self._open_rollback_counts.get('lighter', 0)}",
+            f"回滚累计: Ext={self._open_rollback_counts_global.get('extended', 0)} Lig={self._open_rollback_counts_global.get('lighter', 0)}",
         ]
         phase_immediate = self._open_rollback_phase_counts.get("immediate", 0)
         phase_confirm = self._open_rollback_phase_counts.get("confirm", 0)
