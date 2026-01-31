@@ -895,6 +895,16 @@ class SpreadArbBot:
     async def _process_opening_taker_state(self) -> None:
         """处理 OPENING_TAKER 状态：强制市价开仓"""
         logger.info("执行市价开仓...")
+        self._notify(
+            "🟡 准备市价开仓",
+            [
+                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"交易对: {self.config.symbol}",
+                f"开仓ID: {self._open_attempt_id or '-'}",
+                "终端上下文(最近20行):",
+                *self._get_recent_log_tail(20),
+            ],
+        )
         import time
         self._last_open_time = time.time()
         # 清理 Maker 上下文，避免误触发补对冲
@@ -4281,6 +4291,16 @@ class SpreadArbBot:
             return
 
         try:
+            self._notify(
+                "🟡 准备挂单开仓（Lighter对冲阶段）",
+                [
+                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    f"交易对: {self.config.symbol}",
+                    f"开仓ID: {self._open_attempt_id or '-'}",
+                    "终端上下文(最近20行):",
+                    *self._get_recent_log_tail(20),
+                ],
+            )
             ext_filled_qty = self._hedging_state.ext_filled_quantity
             ext_filled_price = self._hedging_state.ext_filled_price
 
