@@ -509,7 +509,7 @@ class BotConfig:
     boll_k: Decimal = field(default_factory=lambda: Decimal("2"))
     """布林带标准差倍数"""
 
-    open_taker_sigma: Decimal = field(default_factory=lambda: Decimal("2.5"))
+    open_taker_sigma: Decimal = field(default_factory=lambda: Decimal("3"))
     """市价开仓触发Sigma倍数（突破该值触发市价开仓）"""
 
     open_maker_sigma: Decimal = field(default_factory=lambda: Decimal("1.75"))
