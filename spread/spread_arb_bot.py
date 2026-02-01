@@ -221,6 +221,8 @@ class SpreadArbBot:
         self._last_boll_log_time: float = 0.0
         self._bandwidth_blocked: bool = False
         self._open_maker_confirm_start: Optional[float] = None
+        self._open_taker_confirm_count: int = 0
+        self._open_maker_confirm_count: int = 0
         self._suppress_open_failure_notify: bool = False
         self._recent_log_lines: deque = deque(maxlen=200)
         self._recent_log_handler: Optional[RecentLogHandler] = None
@@ -1001,11 +1003,25 @@ class SpreadArbBot:
 
     async def _process_opening_taker_mode(self, spread_info) -> None:
         """处理Taker模式开仓（原有逻辑）"""
-        # 执行开仓
-        result = await self.trade_executor.execute_open_position(
-            self.config.target_quantity,
-            spread_info
-        )
+        # 动态滑点：基础滑点 + 波动系数 * std，上限为 taker_slippage_max
+        slip = self.config.slippage_buffer
+        bands = self._get_bollinger_bands()
+        if bands:
+            _mid, _upper, _lower, std = bands
+            slip = slip + (std * self.config.taker_slippage_vol_k)
+        if slip < self.config.slippage_buffer:
+            slip = self.config.slippage_buffer
+        if slip > self.config.taker_slippage_max:
+            slip = self.config.taker_slippage_max
+        self.trade_executor.set_taker_slippage_override(slip)
+        try:
+            # 执行开仓
+            result = await self.trade_executor.execute_open_position(
+                self.config.target_quantity,
+                spread_info
+            )
+        finally:
+            self.trade_executor.set_taker_slippage_override(None)
         self._last_open_exec = {
             "mode": "市价",
             "ext_time": result.extended_order_time,
@@ -4841,6 +4857,12 @@ class SpreadArbBot:
         if current_spread >= taker_threshold:
             # 市价开仓不需要确认窗
             self._open_maker_confirm_start = None
+            self._open_maker_confirm_count = 0
+            if self.config.open_taker_confirm_ticks > 0:
+                self._open_taker_confirm_count += 1
+                if self._open_taker_confirm_count < self.config.open_taker_confirm_ticks:
+                    return False, f"市价确认中({self._open_taker_confirm_count}/{self.config.open_taker_confirm_ticks})", True
+            self._open_taker_confirm_count = 0
             reason = (
                 f"开仓: 价差{current_spread:.3%} >= 市价阈值{taker_threshold:.3%}"
                 f"（中轴{mean:.3%}, {self.config.open_taker_sigma}σ）"
@@ -4848,6 +4870,11 @@ class SpreadArbBot:
             self._notify_open_trigger(spread_info, mean, taker_threshold, reason)
             return True, reason, True
         if current_spread >= maker_threshold:
+            self._open_taker_confirm_count = 0
+            if self.config.open_maker_confirm_ticks > 0:
+                self._open_maker_confirm_count += 1
+                if self._open_maker_confirm_count < self.config.open_maker_confirm_ticks:
+                    return False, f"挂单确认中({self._open_maker_confirm_count}/{self.config.open_maker_confirm_ticks})", False
             confirm_secs = self.config.open_maker_confirm_seconds
             now = time.time()
             if confirm_secs > 0:
@@ -4857,6 +4884,7 @@ class SpreadArbBot:
                 if now - self._open_maker_confirm_start < confirm_secs:
                     return False, f"挂单确认中({confirm_secs:.1f}s)", False
             self._open_maker_confirm_start = None
+            self._open_maker_confirm_count = 0
             reason = (
                 f"开仓: 价差{current_spread:.3%} >= 挂单阈值{maker_threshold:.3%}"
                 f"（中轴{mean:.3%}, {self.config.open_maker_sigma}σ）"
@@ -4865,6 +4893,8 @@ class SpreadArbBot:
             return True, reason, False
         # 未达挂单阈值，重置确认窗口
         self._open_maker_confirm_start = None
+        self._open_taker_confirm_count = 0
+        self._open_maker_confirm_count = 0
         reason = (
             f"价差{current_spread:.3%}未达挂单阈值{maker_threshold:.3%}"
             f"（中轴{mean:.3%}）"
@@ -6888,6 +6918,18 @@ def parse_arguments() -> tuple[BotConfig, argparse.Namespace]:
         default=Decimal(str(env_default("SLIPPAGE_BUFFER", Decimal, Decimal("0.0001")))),
         help="滑点保护 (默认: 0.0001 = 0.01%%)"
     )
+    parser.add_argument(
+        "--taker-slippage-max",
+        type=Decimal,
+        default=Decimal(str(env_default("TAKER_SLIPPAGE_MAX", Decimal, Decimal("0.0010")))),
+        help="市价开仓动态滑点上限 (默认: 0.0010 = 0.10%%)"
+    )
+    parser.add_argument(
+        "--taker-slippage-vol-k",
+        type=Decimal,
+        default=Decimal(str(env_default("TAKER_SLIPPAGE_VOL_K", Decimal, Decimal("1.5")))),
+        help="动态滑点系数 (默认: 1.5)"
+    )
 
     parser.add_argument(
         "--balance-safety-buffer",
@@ -6948,6 +6990,28 @@ def parse_arguments() -> tuple[BotConfig, argparse.Namespace]:
         default=env_default("OPEN_WAIT_TIMEOUT", float, 10.0),
         dest="open_wait_timeout",
         help="开仓等待确认超时时间（秒） (默认: 10.0)"
+    )
+    parser.add_argument(
+        "--open-taker-confirm-ticks",
+        type=int,
+        default=env_default("OPEN_TAKER_CONFIRM_TICKS", int, 2),
+        dest="open_taker_confirm_ticks",
+        help="市价开仓稳定窗口（连续N次满足）(默认: 2)"
+    )
+    parser.add_argument(
+        "--open-maker-confirm-ticks",
+        type=int,
+        default=env_default("OPEN_MAKER_CONFIRM_TICKS", int, 2),
+        dest="open_maker_confirm_ticks",
+        help="挂单开仓稳定窗口（连续N次满足）(默认: 2)"
+    )
+    parser.add_argument(
+        "--execution-profile",
+        type=str,
+        default=env_default("EXECUTION_PROFILE", str, "balanced"),
+        choices=["conservative", "balanced", "aggressive"],
+        dest="execution_profile",
+        help="执行档位 (conservative|balanced|aggressive) 默认: balanced"
     )
 
     parser.add_argument(
@@ -7149,15 +7213,50 @@ def parse_arguments() -> tuple[BotConfig, argparse.Namespace]:
         'target_quantity': args.target_quantity,
         'min_spread_threshold': args.min_spread_threshold,
         'slippage_buffer': args.slippage_buffer,
+        'taker_slippage_max': args.taker_slippage_max,
+        'taker_slippage_vol_k': args.taker_slippage_vol_k,
         'min_profit': args.min_profit,
         'max_spread': args.max_spread,
         'balance_check_buffer': args.balance_check_buffer,
         'balance_safety_buffer': args.balance_safety_buffer,
         'single_side_timeout': args.single_side_timeout,
         'open_wait_timeout': args.open_wait_timeout,
+        'open_taker_confirm_ticks': args.open_taker_confirm_ticks,
+        'open_maker_confirm_ticks': args.open_maker_confirm_ticks,
         'dry_run': args.dry_run,
         'verbose': args.verbose,
+        'execution_profile': args.execution_profile,
     }
+
+    # 执行档位默认参数（如未显式覆盖）
+    if args.execution_profile:
+        profile = args.execution_profile
+        if profile == "conservative":
+            defaults = {
+                "open_taker_confirm_ticks": 4,
+                "open_maker_confirm_ticks": 3,
+                "taker_slippage_max": Decimal("0.0015"),
+                "taker_slippage_vol_k": Decimal("2.0"),
+            }
+        elif profile == "aggressive":
+            defaults = {
+                "open_taker_confirm_ticks": 2,
+                "open_maker_confirm_ticks": 1,
+                "taker_slippage_max": Decimal("0.0008"),
+                "taker_slippage_vol_k": Decimal("1.0"),
+            }
+        else:
+            defaults = {
+                "open_taker_confirm_ticks": 3,
+                "open_maker_confirm_ticks": 2,
+                "taker_slippage_max": Decimal("0.0010"),
+                "taker_slippage_vol_k": Decimal("1.5"),
+            }
+        for key, value in defaults.items():
+            if key in config_kwargs and config_kwargs[key] is not None:
+                # 用户显式传参时不覆盖
+                continue
+            config_kwargs[key] = value
 
     # 只传递非None的参数，保留dataclass默认值
     if args.spread_step is not None:

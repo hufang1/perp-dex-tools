@@ -270,10 +270,15 @@ class BotConfig:
 
     # 风控参数
     slippage_buffer: Decimal = Decimal("0.0001")           # 滑点保护（用于市价/阈值计算）
+    taker_slippage_max: Decimal = Decimal("0.0010")        # 市价开仓动态滑点上限（如 0.10%）
+    taker_slippage_vol_k: Decimal = Decimal("1.5")         # 动态滑点系数（乘以波动std）
     min_profit: Decimal = Decimal("0")                      # 最小利润 0%
     max_spread: Decimal = Decimal("0.05")                  # 极端价差阈值 5%
     single_side_timeout: float = 3.0                       # 单边超时 3 秒
     balance_safety_buffer: Decimal = Decimal("0.01")       # 余额安全缓冲（1%）
+    open_taker_confirm_ticks: int = 2                      # 市价开仓稳定窗口（连续N次满足）
+    open_maker_confirm_ticks: int = 2                      # 挂单开仓稳定窗口（连续N次满足）
+    execution_profile: str = "balanced"                   # 执行档位: conservative/balanced/aggressive
 
     # 交易所配置
     lighter_account_index: int = 0
@@ -581,6 +586,10 @@ class BotConfig:
             return False
         if self.slippage_buffer < 0:
             return False
+        if self.taker_slippage_max < self.slippage_buffer:
+            return False
+        if self.taker_slippage_vol_k < 0:
+            return False
         if self.balance_safety_buffer < 0:
             return False
         if self.min_profit < 0:  # 允许 0 利润
@@ -588,6 +597,10 @@ class BotConfig:
         if self.max_spread <= 0 or self.max_spread > 1:
             return False
         if self.single_side_timeout <= 0:
+            return False
+        if self.open_taker_confirm_ticks < 0:
+            return False
+        if self.open_maker_confirm_ticks < 0:
             return False
 
         # 检查利润阈值（如果设置了利润）必须大于滑点缓冲 + 手续费

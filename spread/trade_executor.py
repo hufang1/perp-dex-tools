@@ -147,8 +147,14 @@ class TradeExecutor:
         """统一的滑点参数（用于市价下单与预估）。"""
         if self.config is None:
             return Decimal("0")
+        if hasattr(self, "_taker_slip_override") and self._taker_slip_override is not None:
+            return self._taker_slip_override
         slip = getattr(self.config, "slippage_buffer", Decimal("0"))
         return slip if slip >= 0 else Decimal("0")
+
+    def set_taker_slippage_override(self, slip: Optional[Decimal]) -> None:
+        """设置市价下单的临时滑点覆盖值（None为清除）。"""
+        self._taker_slip_override = slip
 
     def _get_balance_safety_buffer(self) -> Decimal:
         """余额安全缓冲（用于开仓数量缩量）。"""
