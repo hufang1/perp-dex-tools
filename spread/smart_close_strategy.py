@@ -76,6 +76,8 @@ class SmartCloseStrategy:
                 is_triggered=False,
                 entry_spread=Decimal("0"),
                 current_spread=Decimal("0"),
+                current_spread_taker=Decimal("0"),
+                current_spread_maker=Decimal("0"),
                 profit_target=self.config.min_profit,
                 fee_rate=self.config.total_fee_rate,
                 expected_profit=Decimal("0"),
@@ -89,13 +91,23 @@ class SmartCloseStrategy:
                 is_triggered=False,
                 entry_spread=Decimal("0"),
                 current_spread=spread_info.spread_pct,
+                current_spread_taker=spread_info.spread_pct,
+                current_spread_maker=Decimal("0"),
                 profit_target=self.config.min_profit,
                 fee_rate=self.config.total_fee_rate,
                 expected_profit=Decimal("0"),
                 trigger_time=datetime.now().timestamp(),
             )
 
-        current_spread = spread_info.spread_pct
+        if spread_info.ext_bid > 0:
+            current_spread_taker = (spread_info.lig_ask - spread_info.ext_bid) / spread_info.ext_bid
+        else:
+            current_spread_taker = Decimal("0")
+        if spread_info.ext_ask > 0:
+            current_spread_maker = (spread_info.lig_ask - spread_info.ext_ask) / spread_info.ext_ask
+        else:
+            current_spread_maker = Decimal("0")
+        current_spread = current_spread_taker
         profit_target = self.config.min_profit
         fee_rate = self.config.total_fee_rate
 
@@ -115,6 +127,8 @@ class SmartCloseStrategy:
             is_triggered=is_triggered,
             entry_spread=entry_spread,
             current_spread=current_spread,
+            current_spread_taker=current_spread_taker,
+            current_spread_maker=current_spread_maker,
             profit_target=profit_target,
             fee_rate=fee_rate,
             expected_profit=expected_profit,
@@ -259,18 +273,28 @@ class SmartCloseStrategy:
 
         # 获取总开仓仓位的价差
         total_spread = await self.get_total_position_spread()
+        if spread_info.ext_bid > 0:
+            current_spread_taker = (spread_info.lig_ask - spread_info.ext_bid) / spread_info.ext_bid
+        else:
+            current_spread_taker = Decimal("0")
+        if spread_info.ext_ask > 0:
+            current_spread_maker = (spread_info.lig_ask - spread_info.ext_ask) / spread_info.ext_ask
+        else:
+            current_spread_maker = Decimal("0")
         if total_spread == 0:
             return CloseModeDecision(
                 should_close=False,
                 use_market=False,
                 total_position_spread=Decimal("0"),
-                current_spread=spread_info.spread_pct,
+                current_spread=current_spread_taker,
                 market_threshold=Decimal("0"),
                 limit_threshold=Decimal("0"),
+                expected_profit_limit=Decimal("0"),
+                expected_profit_market=Decimal("0"),
             )
 
-        current_spread = spread_info.spread_pct
-        profit_spread = total_spread - current_spread
+        profit_spread_market = total_spread - current_spread_taker
+        profit_spread_limit = total_spread - current_spread_maker
 
         # 计算利润阈值（003-spreading-improvements: 使用新的配置参数）
         # 市价平仓阈值：利润 >= 市价阈值B
@@ -279,35 +303,29 @@ class SmartCloseStrategy:
         limit_threshold = self.config.limit_close_spread_a
 
         # 判断平仓模式
-        if profit_spread >= market_threshold:
+        if profit_spread_market >= market_threshold:
             # 市价平仓：利润大，立即兑现
-            reason = (
-                f"市价平仓 | 利润大 | "
-                f"利润{profit_spread:.3%} >= 市价阈值{market_threshold:.3%}"
-            )
             return CloseModeDecision(
                 should_close=True,
                 use_market=True,
                 total_position_spread=total_spread,
-                current_spread=current_spread,
+                current_spread=current_spread_taker,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
-                expected_profit_market=profit_spread,
+                expected_profit_market=profit_spread_market,
+                expected_profit_limit=profit_spread_limit,
             )
-        elif profit_spread >= limit_threshold:
+        elif profit_spread_limit >= limit_threshold:
             # 限价平仓：利润小，使用限价单降低成本
-            reason = (
-                f"限价平仓 | 利润小 | "
-                f"利润{profit_spread:.3%} >= 限价阈值{limit_threshold:.3%}"
-            )
             return CloseModeDecision(
                 should_close=True,
                 use_market=False,
                 total_position_spread=total_spread,
-                current_spread=current_spread,
+                current_spread=current_spread_maker,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
-                expected_profit_limit=profit_spread,
+                expected_profit_limit=profit_spread_limit,
+                expected_profit_market=profit_spread_market,
             )
         else:
             # 不满足平仓条件
@@ -315,11 +333,11 @@ class SmartCloseStrategy:
                 should_close=False,
                 use_market=False,
                 total_position_spread=total_spread,
-                current_spread=current_spread,
+                current_spread=current_spread_taker,
                 market_threshold=market_threshold,
                 limit_threshold=limit_threshold,
-                expected_profit_limit=profit_spread,
-                expected_profit_market=profit_spread,
+                expected_profit_limit=profit_spread_limit,
+                expected_profit_market=profit_spread_market,
             )
 
     async def get_total_position_spread(self) -> Decimal:

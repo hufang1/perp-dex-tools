@@ -942,6 +942,8 @@ class CloseTrigger:
     # 价差信息
     entry_spread: Decimal                # 开仓价差（加权平均）
     current_spread: Decimal              # 当前市场价差
+    current_spread_taker: Decimal = field(default_factory=lambda: Decimal("0"))  # 市价口径
+    current_spread_maker: Decimal = field(default_factory=lambda: Decimal("0"))  # 挂单口径
     profit_target: Decimal               # 盈利目标
     fee_rate: Decimal                    # 手续费率
 
@@ -954,10 +956,13 @@ class CloseTrigger:
 
     def format_log(self) -> str:
         """格式化为单行日志"""
+        spread_text = f"{self.current_spread:.3%}"
+        if self.current_spread_taker > 0 or self.current_spread_maker > 0:
+            spread_text = f"{self.current_spread_taker:.3%}(t)/{self.current_spread_maker:.3%}(m)"
         if self.is_triggered:
             return (
                 f"平仓触发: 开仓{self.entry_spread:.3%} >= "
-                f"当前{self.current_spread:.3%} + "
+                f"当前{spread_text} + "
                 f"盈利{self.profit_target:.3%} + "
                 f"手续费{self.fee_rate:.3%} | "
                 f"利润={self.actual_profit:.2f}"
@@ -965,7 +970,7 @@ class CloseTrigger:
         else:
             return (
                 f"持仓监控: 开仓{self.entry_spread:.3%} vs "
-                f"当前{self.current_spread:.3%} | "
+                f"当前{spread_text} | "
                 f"利润={self.expected_profit:.3%}"
             )
 

@@ -1053,13 +1053,20 @@ class SpreadArbBot:
             logger.info(f"订单已发送: Ext={result.extended_order_id}, Lig={result.lighter_order_id}")
 
         actual_qty = result.order_quantity or self.config.target_quantity
+        entry_ext_price = result.extended_price or spread_info.ext_ask
+        entry_lig_price = result.lighter_price or spread_info.lig_bid
+        entry_spread = (
+            (entry_lig_price - entry_ext_price) / entry_ext_price
+            if entry_ext_price > 0
+            else spread_info.spread_pct
+        )
 
         # 创建持仓记录（先创建，后续在OPENING_WAIT中验证）
         position = Position(
             state=PositionState.LONG,
-            extended_entry_price=result.extended_price or spread_info.ext_ask,
-            lighter_entry_price=result.lighter_price or spread_info.lig_bid,
-            entry_spread=spread_info.spread_pct,
+            extended_entry_price=entry_ext_price,
+            lighter_entry_price=entry_lig_price,
+            entry_spread=entry_spread,
             entry_time=datetime.now(),
             extended_quantity=actual_qty,
             lighter_quantity=-actual_qty,
@@ -1079,9 +1086,9 @@ class SpreadArbBot:
         self._pending_open_position = OpenPosition(
             position_id=str(uuid.uuid4()),
             open_time=datetime.now().timestamp(),
-            ext_price=result.extended_price or spread_info.ext_ask,
-            lig_price=result.lighter_price or spread_info.lig_bid,
-            open_spread=spread_info.spread_pct,
+            ext_price=entry_ext_price,
+            lig_price=entry_lig_price,
+            open_spread=entry_spread,
             quantity=actual_qty,
             ext_order_id=result.extended_order_id,
             lig_order_id=result.lighter_order_id,
@@ -1198,7 +1205,8 @@ class SpreadArbBot:
         current_time = time.time()
         if current_time - self._last_holding_log_time >= self._holding_log_interval:
             current_spread = spread_info.spread_pct
-            close_spread = close_spread_info.spread_pct if close_spread_info else Decimal("0")
+            close_spread_taker = close_spread_info.spread_pct if close_spread_info else Decimal("0")
+            close_spread_maker = self._calc_close_spread_maker(spread_info)
             thresholds = await self._get_open_sigma_thresholds()
             open_taker = self.close_strategy.portfolio.has_open_taker()
             open_mode_label = "taker" if open_taker else "maker"
@@ -1214,7 +1222,8 @@ class SpreadArbBot:
             # 计算平仓触发阈值（平仓价差口径）
             entry_spread = self.close_strategy.get_weighted_avg_spread()
             if entry_spread > 0:
-                profit_spread = entry_spread - close_spread
+                profit_spread_taker = entry_spread - close_spread_taker
+                profit_spread_maker = entry_spread - close_spread_maker
                 portfolio = self.close_strategy.get_portfolio()
                 taker_qty = sum(p.quantity for p in portfolio.get_active_positions() if getattr(p, "open_is_taker", False)) if portfolio else Decimal("0")
                 total_qty = portfolio.total_quantity if portfolio else Decimal("0")
@@ -1243,7 +1252,8 @@ class SpreadArbBot:
                 else:
                     close_formula = "NA"
             else:
-                profit_spread = Decimal("0")
+                profit_spread_taker = Decimal("0")
+                profit_spread_maker = Decimal("0")
                 close_formula = ""
 
             # ========== 新增 (003-spreading-improvements): 判断结果（双模式平仓） ==========
@@ -1260,8 +1270,16 @@ class SpreadArbBot:
                 result = "不开仓"
 
             position_spread_text = f"{entry_spread:.3%}" if entry_spread > 0 else "-"
-            close_spread_text = f"{close_spread:.3%}" if entry_spread > 0 else "-"
-            profit_text = f"{profit_spread:.3%}" if entry_spread > 0 else "-"
+            close_spread_text = (
+                f"{close_spread_taker:.3%}(t)/{close_spread_maker:.3%}(m)"
+                if entry_spread > 0
+                else "-"
+            )
+            profit_text = (
+                f"{profit_spread_taker:.3%}(t)/{profit_spread_maker:.3%}(m)"
+                if entry_spread > 0
+                else "-"
+            )
             bandwidth_text = ""
             bands = self._get_bollinger_bands()
             if bands:
@@ -1269,10 +1287,14 @@ class SpreadArbBot:
                 if mid > 0:
                     bandwidth_text = f" bw={(upper - lower) / mid:.3%}"
             print(
-                f"📊 持仓 s={current_spread:.3%}{bandwidth_text} "
-                f"open={open_formula}({open_mode_label}) "
-                f"entry={position_spread_text} close={close_spread_text} pnl={profit_text} "
-                f"rule:{close_formula} -> {result}"
+                f"📊 持仓 s={current_spread:.3%}{bandwidth_text},"
+                f"entry={position_spread_text} pnl={profit_text} "
+                f"close={close_spread_text} | <=taker{market_threshold:.3%}/maker{limit_threshold:.3%}"
+            )
+            print(f"open={open_formula}({open_mode_label})")
+            print(
+                f"rule:{close_formula} "
+                f"-> {result}"
             )
             self._last_holding_log_time = current_time
 
@@ -4028,8 +4050,24 @@ class SpreadArbBot:
         # 在后台线程中执行CSV写入，避免阻塞主循环
         asyncio.create_task(self._log_spread_to_csv_async(spread_info))
 
+    def _calc_close_spread_taker(self, spread_info: RealTimeSpreadInfo) -> Decimal:
+        """市价平仓口径：Ext卖出(Bid) + Lighter买入(Ask)"""
+        if not spread_info:
+            return Decimal("0")
+        if spread_info.ext_bid <= 0:
+            return Decimal("0")
+        return (spread_info.lig_ask - spread_info.ext_bid) / spread_info.ext_bid
+
+    def _calc_close_spread_maker(self, spread_info: RealTimeSpreadInfo) -> Decimal:
+        """挂单平仓口径：Ext卖出(Ask) + Lighter买入(Ask)"""
+        if not spread_info:
+            return Decimal("0")
+        if spread_info.ext_ask <= 0:
+            return Decimal("0")
+        return (spread_info.lig_ask - spread_info.ext_ask) / spread_info.ext_ask
+
     def _build_close_spread_info(self, spread_info: RealTimeSpreadInfo) -> Optional[RealTimeSpreadInfo]:
-        """构造平仓口径价差（Ext卖出 + Lighter买入）"""
+        """构造平仓口径价差（市价口径）"""
         if not spread_info:
             return None
         ext_bid = spread_info.ext_bid
@@ -4037,7 +4075,7 @@ class SpreadArbBot:
         lig_bid = spread_info.lig_bid
         lig_ask = spread_info.lig_ask
         spread_abs = lig_ask - ext_bid
-        spread_pct = spread_abs / ext_bid if ext_bid > 0 else Decimal("0")
+        spread_pct = self._calc_close_spread_taker(spread_info)
         return RealTimeSpreadInfo(
             ext_bid=ext_bid,
             ext_ask=ext_ask,
@@ -4670,12 +4708,19 @@ class SpreadArbBot:
                         # ========== 修复：Maker 模式下创建 _pending_open_position ==========
                         spread_info = self.spread_monitor.get_current_spread()
                         if spread_info and spread_info.is_valid():
+                            maker_ext_price = ext_filled_price
+                            maker_lig_price = result.lighter_price or Decimal('0')
+                            maker_spread = (
+                                (maker_lig_price - maker_ext_price) / maker_ext_price
+                                if maker_ext_price > 0
+                                else spread_info.spread_pct
+                            )
                             self._pending_open_position = OpenPosition(
                                 position_id=str(uuid.uuid4()),
                                 open_time=datetime.now().timestamp(),
-                                ext_price=ext_filled_price,
-                                lig_price=result.lighter_price or Decimal('0'),
-                                open_spread=spread_info.spread_pct,
+                                ext_price=maker_ext_price,
+                                lig_price=maker_lig_price,
+                                open_spread=maker_spread,
                                 quantity=ext_filled_qty,
                                 ext_order_id="maker_open",
                                 lig_order_id=result.lighter_order_id,
@@ -5005,7 +5050,10 @@ class SpreadArbBot:
         total_spread = await self.close_strategy.get_total_position_spread()
         if total_spread <= 0 or not portfolio:
             return decision
-        profit_spread = total_spread - close_spread_info.spread_pct
+        close_spread_taker = close_spread_info.spread_pct
+        close_spread_maker = self._calc_close_spread_maker(spread_info)
+        profit_spread_taker = total_spread - close_spread_taker
+        profit_spread_maker = total_spread - close_spread_maker
         active_positions = portfolio.get_active_positions()
         taker_qty = sum(p.quantity for p in active_positions if getattr(p, "open_is_taker", False))
         total_qty = portfolio.total_quantity
@@ -5033,8 +5081,10 @@ class SpreadArbBot:
         decision.update(
             {
                 "total_spread": total_spread,
-                "profit_spread": profit_spread,
-                "close_spread": close_spread_info.spread_pct,
+                "profit_spread": profit_spread_taker,
+                "close_spread": close_spread_taker,
+                "close_spread_taker": close_spread_taker,
+                "close_spread_maker": close_spread_maker,
                 "open_spread": spread_info.spread_pct,
                 "midline": mean,
                 "lower": lower,
@@ -5046,15 +5096,19 @@ class SpreadArbBot:
                 "taker_ratio": taker_ratio,
             }
         )
-        if close_spread_info.spread_pct <= market_threshold:
+        if close_spread_taker <= market_threshold:
             decision["should_close"] = True
             decision["use_market"] = True
             decision["close_reason"] = "market_profit"
+            decision["close_spread"] = close_spread_taker
+            decision["profit_spread"] = profit_spread_taker
             return decision
-        if close_spread_info.spread_pct <= limit_threshold:
+        if close_spread_maker <= limit_threshold:
             decision["should_close"] = True
             decision["use_market"] = False
             decision["close_reason"] = "limit_min"
+            decision["close_spread"] = close_spread_maker
+            decision["profit_spread"] = profit_spread_maker
             return decision
         return decision
 
