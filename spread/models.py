@@ -1416,6 +1416,8 @@ class CloseModeDecision:
 
     total_position_spread: Decimal = field(default_factory=lambda: Decimal("0"))
     current_spread: Decimal = field(default_factory=lambda: Decimal("0"))
+    current_spread_taker: Decimal = field(default_factory=lambda: Decimal("0"))
+    current_spread_maker: Decimal = field(default_factory=lambda: Decimal("0"))
     market_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
     limit_threshold: Decimal = field(default_factory=lambda: Decimal("0"))
 
@@ -1448,17 +1450,20 @@ class CloseModeDecision:
 
     def format_log(self) -> str:
         """格式化为日志字符串"""
+        spread_text = f"{self.current_spread:.3%}"
+        if self.current_spread_taker > 0 or self.current_spread_maker > 0:
+            spread_text = f"{self.current_spread_taker:.3%}(t)/{self.current_spread_maker:.3%}(m)"
         if not self.should_close:
             return (
                 f"持仓监控 | 总开仓={self.total_position_spread:.3%} | "
-                f"利润={self.expected_profit_limit:.3%} | "
+                f"当前={spread_text} | 利润={self.expected_profit_limit:.3%} | "
                 f"限价阈值={self.limit_threshold:.3%} | "
                 f"市价阈值={self.market_threshold:.3%}"
             )
         else:
             return (
                 f"平仓触发 | {self.close_mode_name} | {self.reason} | "
-                f"总开仓={self.total_position_spread:.3%}"
+                f"总开仓={self.total_position_spread:.3%} | 当前={spread_text}"
             )
 
 

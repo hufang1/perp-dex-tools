@@ -250,6 +250,7 @@ class SpreadArbBot:
         self._last_close_flow_durations: Dict[str, float] = {}
         self._last_open_exec: Dict[str, object] = {}
         self._last_close_exec: Dict[str, object] = {}
+        self._last_inventory_ratio: Optional[Decimal] = None
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -900,16 +901,29 @@ class SpreadArbBot:
     async def _process_opening_taker_state(self) -> None:
         """处理 OPENING_TAKER 状态：强制市价开仓"""
         logger.info("执行市价开仓...")
-        self._notify(
-            "🟡 准备市价开仓",
-            [
-                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                f"交易对: {self.config.symbol}",
-                f"开仓ID: {self._open_attempt_id or '-'}",
-                "终端上下文(最近20行):",
-                *self._get_recent_log_tail(20),
-            ],
+        spread_info = self.spread_monitor.get_current_spread()
+        lines = [
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"交易对: {self.config.symbol}",
+            f"开仓ID: {self._open_attempt_id or '-'}",
+        ]
+        expected_ext = spread_info.ext_ask if spread_info else None
+        expected_lig = spread_info.lig_bid if spread_info else None
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            None,
+            None,
+            entry_spread=self.close_strategy.get_weighted_avg_spread(),
+            skew=self._last_inventory_ratio,
         )
+        recent_logs = self._get_recent_log_tail(20)
+        if recent_logs:
+            lines.append("终端上下文(最近20行):")
+            lines.extend(recent_logs)
+        self._notify("🟡 准备市价开仓", lines)
         import time
         self._last_open_time = time.time()
         # 清理 Maker 上下文，避免误触发补对冲
@@ -917,7 +931,6 @@ class SpreadArbBot:
         self._last_maker_is_opening = None
         self._last_maker_context_id = None
         self._last_maker_context_state = None
-        spread_info = self.spread_monitor.get_current_spread()
         if spread_info is None or not spread_info.is_valid():
             logger.warning("无法获取价差信息，取消市价开仓")
             await self._enter_idle_or_holding_after_open_failure("无法获取价差信息")
@@ -1035,6 +1048,8 @@ class SpreadArbBot:
             "lig_error_code": result.lighter_error_code,
             "ext_http_status": result.extended_http_status,
             "lig_http_status": result.lighter_http_status,
+            "ext_price": result.extended_price,
+            "lig_price": result.lighter_price,
         }
         if result.extended_price or result.lighter_price:
             logger.info(
@@ -1384,6 +1399,8 @@ class SpreadArbBot:
                 "lig_error_code": None,
                 "ext_http_status": result.extended_http_status,
                 "lig_http_status": None,
+                "ext_price": result.extended_price,
+                "lig_price": None,
             }
 
             # 成功挂单则清零失败计数
@@ -1490,6 +1507,8 @@ class SpreadArbBot:
                 "lig_error_code": result.lighter_error_code,
                 "ext_http_status": result.extended_http_status,
                 "lig_http_status": result.lighter_http_status,
+                "ext_price": result.extended_price,
+                "lig_price": result.lighter_price,
             }
 
             if result.success:
@@ -1540,6 +1559,11 @@ class SpreadArbBot:
             temp_position,
             total_quantity
         )
+
+        if not self._last_close_exec:
+            self._last_close_exec = {"mode": "市价"}
+        self._last_close_exec["ext_price"] = result.extended_price
+        self._last_close_exec["lig_price"] = result.lighter_price
 
         # 不管订单状态如何，都进入 CLOSING_WAIT 状态检查实际仓位
         if result.success or result.extended_order_id or result.lighter_order_id:
@@ -4351,16 +4375,29 @@ class SpreadArbBot:
             return
 
         try:
-            self._notify(
-                "🟡 准备挂单开仓（Lighter对冲阶段）",
-                [
-                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    f"交易对: {self.config.symbol}",
-                    f"开仓ID: {self._open_attempt_id or '-'}",
-                    "终端上下文(最近20行):",
-                    *self._get_recent_log_tail(20),
-                ],
+            spread_info = self.spread_monitor.get_current_spread()
+            lines = [
+                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"交易对: {self.config.symbol}",
+                f"开仓ID: {self._open_attempt_id or '-'}",
+            ]
+            expected_ext = spread_info.ext_ask if spread_info else None
+            expected_lig = spread_info.lig_bid if spread_info else None
+            self._append_trade_context(
+                lines,
+                spread_info,
+                expected_ext,
+                expected_lig,
+                None,
+                None,
+                entry_spread=self.close_strategy.get_weighted_avg_spread(),
+                skew=self._last_inventory_ratio,
             )
+            recent_logs = self._get_recent_log_tail(20)
+            if recent_logs:
+                lines.append("终端上下文(最近20行):")
+                lines.extend(recent_logs)
+            self._notify("🟡 准备挂单开仓（Lighter对冲阶段）", lines)
             ext_filled_qty = self._hedging_state.ext_filled_quantity
             ext_filled_price = self._hedging_state.ext_filled_price
 
@@ -4844,7 +4881,9 @@ class SpreadArbBot:
             ratio = used / total
             if ratio < 0:
                 return Decimal("0")
-            return ratio if ratio <= 1 else Decimal("1")
+            ratio = ratio if ratio <= 1 else Decimal("1")
+            self._last_inventory_ratio = ratio
+            return ratio
         except Exception:
             return Decimal("0")
 
@@ -5098,6 +5137,7 @@ class SpreadArbBot:
                 "limit_cost": limit_cost,
                 "market_cost": market_cost,
                 "taker_ratio": taker_ratio,
+                "inventory_ratio": inventory_ratio,
             }
         )
         if close_spread_taker <= market_threshold:
@@ -5120,6 +5160,50 @@ class SpreadArbBot:
         if self._notifier:
             self._notifier.enqueue(title, lines)
 
+    def _format_market_snapshot(self, spread_info: Optional[RealTimeSpreadInfo]) -> List[str]:
+        if not spread_info:
+            return []
+        return [
+            f"盘口: Ext[{spread_info.ext_bid:.2f}/{spread_info.ext_ask:.2f}] "
+            f"Lig[{spread_info.lig_bid:.2f}/{spread_info.lig_ask:.2f}]",
+        ]
+
+    def _format_expected_actual(self, expected: Optional[Decimal], actual: Optional[Decimal]) -> str:
+        if expected is None or expected <= 0:
+            return "-"
+        if actual is None or actual <= 0:
+            return f"预期{expected:.2f}"
+        slip = (actual - expected) / expected
+        return f"预期{expected:.2f} 实际{actual:.2f} 滑点{slip:.3%}"
+
+    def _append_trade_context(
+        self,
+        lines: List[str],
+        spread_info: Optional[RealTimeSpreadInfo],
+        expected_ext: Optional[Decimal],
+        expected_lig: Optional[Decimal],
+        actual_ext: Optional[Decimal],
+        actual_lig: Optional[Decimal],
+        entry_spread: Optional[Decimal] = None,
+        close_spread_taker: Optional[Decimal] = None,
+        close_spread_maker: Optional[Decimal] = None,
+        skew: Optional[Decimal] = None,
+        cost: Optional[Decimal] = None,
+    ) -> None:
+        lines.extend(self._format_market_snapshot(spread_info))
+        lines.append(f"Ext成交: {self._format_expected_actual(expected_ext, actual_ext)}")
+        lines.append(f"Lig成交: {self._format_expected_actual(expected_lig, actual_lig)}")
+        if entry_spread is not None and entry_spread > 0:
+            lines.append(f"平均开仓价差: {entry_spread:.3%}")
+        if close_spread_taker is not None or close_spread_maker is not None:
+            t = close_spread_taker if close_spread_taker is not None else Decimal("0")
+            m = close_spread_maker if close_spread_maker is not None else Decimal("0")
+            lines.append(f"平仓价差: {t:.3%}(t) / {m:.3%}(m)")
+        if skew is not None:
+            lines.append(f"skew: {skew:.3%}")
+        if cost is not None:
+            lines.append(f"cost: {cost:.3%}")
+
     def _set_close_context(self, decision: Dict[str, object], close_spread_info: Optional[RealTimeSpreadInfo]) -> None:
         if not close_spread_info:
             return
@@ -5128,6 +5212,13 @@ class SpreadArbBot:
             "mode": "市价" if use_market else "挂单",
             "close_spread": decision.get("close_spread", Decimal("0")),
             "profit_spread": decision.get("profit_spread", Decimal("0")),
+            "close_spread_taker": decision.get("close_spread_taker"),
+            "close_spread_maker": decision.get("close_spread_maker"),
+            "market_threshold": decision.get("market_threshold"),
+            "limit_threshold": decision.get("limit_threshold"),
+            "market_cost": decision.get("market_cost"),
+            "limit_cost": decision.get("limit_cost"),
+            "inventory_ratio": decision.get("inventory_ratio"),
             "ext_bid": close_spread_info.ext_bid,
             "lig_ask": close_spread_info.lig_ask,
             "entry_spread": self.close_strategy.get_weighted_avg_spread(),
@@ -5164,6 +5255,19 @@ class SpreadArbBot:
             f"Ext仓位: {ext_pos}",
             f"Lig仓位: {lig_pos}",
         ]
+        spread_info = self.spread_monitor.get_current_spread()
+        expected_ext = spread_info.ext_ask if spread_info else None
+        expected_lig = spread_info.lig_bid if spread_info else None
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            ext_price,
+            lig_price,
+            entry_spread=avg_entry_spread,
+            skew=self._last_inventory_ratio,
+        )
         lines.extend(self._format_exec_metrics(self._last_open_exec, "开仓"))
         lines.append(f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}")
         self._notify(f"✅ 开仓成功（{mode}）", lines)
@@ -5174,6 +5278,21 @@ class SpreadArbBot:
             f"交易对: {self.config.symbol}",
             f"原因: {reason}",
         ]
+        spread_info = self.spread_monitor.get_current_spread()
+        expected_ext = spread_info.ext_ask if spread_info else None
+        expected_lig = spread_info.lig_bid if spread_info else None
+        actual_ext = self._last_open_exec.get("ext_price") if self._last_open_exec else None
+        actual_lig = self._last_open_exec.get("lig_price") if self._last_open_exec else None
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            actual_ext,
+            actual_lig,
+            entry_spread=self.close_strategy.get_weighted_avg_spread(),
+            skew=self._last_inventory_ratio,
+        )
         lines.extend(self._format_exec_metrics(self._last_open_exec, "开仓"))
         lines.append(f"状态耗时: {self._format_flow_durations(self._get_open_flow_snapshot())}")
         if ext_pos is not None and lig_pos is not None:
@@ -5245,6 +5364,8 @@ class SpreadArbBot:
         ctx = self._last_close_context or {}
         mode = ctx.get("mode", "未知")
         close_spread = ctx.get("close_spread", Decimal("0"))
+        close_spread_taker = ctx.get("close_spread_taker")
+        close_spread_maker = ctx.get("close_spread_maker")
         ext_bid = ctx.get("ext_bid", Decimal("0"))
         lig_ask = ctx.get("lig_ask", Decimal("0"))
         entry_spread = ctx.get("entry_spread", self.close_strategy.get_weighted_avg_spread())
@@ -5296,6 +5417,29 @@ class SpreadArbBot:
             f"Lig实际收益: {lig_delta:.2f}",
             f"收益(资金变化): {funds_delta:.2f}",
         ]
+        spread_info = self.spread_monitor.get_current_spread()
+        if mode == "挂单":
+            expected_ext = spread_info.ext_ask if spread_info else None
+        else:
+            expected_ext = spread_info.ext_bid if spread_info else None
+        expected_lig = spread_info.lig_ask if spread_info else None
+        actual_ext = self._last_close_exec.get("ext_price") if self._last_close_exec else None
+        actual_lig = self._last_close_exec.get("lig_price") if self._last_close_exec else None
+        cost = ctx.get("market_cost") if mode == "市价" else ctx.get("limit_cost")
+        skew = ctx.get("inventory_ratio", self._last_inventory_ratio)
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            actual_ext,
+            actual_lig,
+            entry_spread=entry_spread,
+            close_spread_taker=close_spread_taker,
+            close_spread_maker=close_spread_maker,
+            skew=skew,
+            cost=cost,
+        )
         lines.extend(self._format_exec_metrics(self._last_close_exec, "平仓"))
         lines.append(f"状态耗时: {self._format_flow_durations(self._get_close_flow_snapshot())}")
         recent_logs = self._get_recent_log_tail(20)
@@ -5311,6 +5455,33 @@ class SpreadArbBot:
             f"交易对: {self.config.symbol}",
             f"原因: {reason}",
         ]
+        spread_info = self.spread_monitor.get_current_spread()
+        mode = None
+        if self._last_close_exec:
+            mode = self._last_close_exec.get("mode")
+        if mode == "挂单":
+            expected_ext = spread_info.ext_ask if spread_info else None
+        else:
+            expected_ext = spread_info.ext_bid if spread_info else None
+        expected_lig = spread_info.lig_ask if spread_info else None
+        actual_ext = self._last_close_exec.get("ext_price") if self._last_close_exec else None
+        actual_lig = self._last_close_exec.get("lig_price") if self._last_close_exec else None
+        ctx = self._last_close_context or {}
+        cost = ctx.get("market_cost") if mode == "市价" else ctx.get("limit_cost")
+        skew = ctx.get("inventory_ratio", self._last_inventory_ratio)
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            actual_ext,
+            actual_lig,
+            entry_spread=self.close_strategy.get_weighted_avg_spread(),
+            close_spread_taker=ctx.get("close_spread_taker"),
+            close_spread_maker=ctx.get("close_spread_maker"),
+            skew=skew,
+            cost=cost,
+        )
         recent_logs = self._get_recent_log_tail(20)
         if recent_logs:
             lines.append("终端上下文(最近20行):")
@@ -5324,6 +5495,30 @@ class SpreadArbBot:
             f"方式: {mode}",
             f"数量: {total_quantity}",
         ]
+        spread_info = self.spread_monitor.get_current_spread()
+        if mode == "挂单":
+            expected_ext = spread_info.ext_ask if spread_info else None
+        else:
+            expected_ext = spread_info.ext_bid if spread_info else None
+        expected_lig = spread_info.lig_ask if spread_info else None
+        actual_ext = self._last_close_exec.get("ext_price") if self._last_close_exec else None
+        actual_lig = self._last_close_exec.get("lig_price") if self._last_close_exec else None
+        ctx = self._last_close_context or {}
+        cost = ctx.get("market_cost") if mode == "市价" else ctx.get("limit_cost")
+        skew = ctx.get("inventory_ratio", self._last_inventory_ratio)
+        self._append_trade_context(
+            lines,
+            spread_info,
+            expected_ext,
+            expected_lig,
+            actual_ext,
+            actual_lig,
+            entry_spread=self.close_strategy.get_weighted_avg_spread(),
+            close_spread_taker=ctx.get("close_spread_taker"),
+            close_spread_maker=ctx.get("close_spread_maker"),
+            skew=skew,
+            cost=cost,
+        )
         recent_logs = self._get_recent_log_tail(20)
         if recent_logs:
             lines.append("终端上下文(最近20行):")
