@@ -4909,7 +4909,8 @@ class SpreadArbBot:
                 self._open_taker_confirm_count += 1
                 if self._open_taker_confirm_count < self.config.open_taker_confirm_ticks:
                     reason = f"市价确认中({self._open_taker_confirm_count}/{self.config.open_taker_confirm_ticks})"
-                    self._notify_open_confirming("市价", reason)
+                    # 暂时关闭“开仓确认中”推送
+                    # self._notify_open_confirming("市价", reason)
                     return False, reason, True
             self._open_taker_confirm_count = 0
             reason = (
@@ -4924,7 +4925,8 @@ class SpreadArbBot:
                 self._open_maker_confirm_count += 1
                 if self._open_maker_confirm_count < self.config.open_maker_confirm_ticks:
                     reason = f"挂单确认中({self._open_maker_confirm_count}/{self.config.open_maker_confirm_ticks})"
-                    self._notify_open_confirming("挂单", reason)
+                    # 暂时关闭“开仓确认中”推送
+                    # self._notify_open_confirming("挂单", reason)
                     return False, reason, False
             confirm_secs = self.config.open_maker_confirm_seconds
             now = time.time()
@@ -4932,11 +4934,13 @@ class SpreadArbBot:
                 if self._open_maker_confirm_start is None:
                     self._open_maker_confirm_start = now
                     reason = f"挂单确认中({confirm_secs:.1f}s)"
-                    self._notify_open_confirming("挂单", reason)
+                    # 暂时关闭“开仓确认中”推送
+                    # self._notify_open_confirming("挂单", reason)
                     return False, reason, False
                 if now - self._open_maker_confirm_start < confirm_secs:
                     reason = f"挂单确认中({confirm_secs:.1f}s)"
-                    self._notify_open_confirming("挂单", reason)
+                    # 暂时关闭“开仓确认中”推送
+                    # self._notify_open_confirming("挂单", reason)
                     return False, reason, False
             self._open_maker_confirm_start = None
             self._open_maker_confirm_count = 0
