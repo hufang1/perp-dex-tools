@@ -944,11 +944,10 @@ class CloseTrigger:
     current_spread: Decimal              # 当前市场价差
     profit_target: Decimal               # 盈利目标
     fee_rate: Decimal                    # 手续费率
-    current_spread_taker: Decimal = field(default_factory=lambda: Decimal("0"))  # 市价口径
-    current_spread_maker: Decimal = field(default_factory=lambda: Decimal("0"))  # 挂单口径
-
     # 计算结果
     expected_profit: Decimal             # 预期利润
+    current_spread_taker: Decimal = field(default_factory=lambda: Decimal("0"))  # 市价口径
+    current_spread_maker: Decimal = field(default_factory=lambda: Decimal("0"))  # 挂单口径
     actual_profit: Decimal = field(default_factory=lambda: Decimal("0"))
 
     # 时间
