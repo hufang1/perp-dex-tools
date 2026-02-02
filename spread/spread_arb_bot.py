@@ -37,6 +37,7 @@ from models import (
     OpenPosition,
     Portfolio,
     RealTimeSpreadInfo,
+    PositionBalanceSnapshot,
 )
 from feishu_notifier import FeishuNotifier
 from dashboard_ingestor import DashboardIngestor
@@ -251,6 +252,8 @@ class SpreadArbBot:
         self._last_open_exec: Dict[str, object] = {}
         self._last_close_exec: Dict[str, object] = {}
         self._last_inventory_ratio: Optional[Decimal] = None
+        self._last_balance_snapshot: Optional[PositionBalanceSnapshot] = None
+        self._last_close_order_ts: Optional[float] = None
 
         logger.debug("套利机器人初始化完成")
         logger.debug(f"配置: 交易对={config.symbol}, "
@@ -1142,6 +1145,9 @@ class SpreadArbBot:
         # 使用 Portfolio 检查持仓（替代旧的 Position 对象）
         total_quantity = self.close_strategy.get_total_quantity()
 
+        if await self._maybe_detect_liquidation():
+            return
+
         if total_quantity <= 0:
             # 可能是本地Portfolio丢失，但交易所仍有仓位
             try:
@@ -1351,6 +1357,7 @@ class SpreadArbBot:
         挂单后直接进入 CLOSING_MAKER_WAIT 状态等待成交
         """
         logger.info("执行限价平仓，挂Ext Maker平仓单...")
+        self._last_close_order_ts = time.time()
 
         # 获取 Portfolio 持仓信息
         portfolio = self.close_strategy.get_portfolio()
@@ -1464,6 +1471,7 @@ class SpreadArbBot:
         3. 完成后切换到 CLOSING_WAIT 状态验证仓位
         """
         logger.info("进入CLOSING_TAKER状态，执行并发市价平仓...")
+        self._last_close_order_ts = time.time()
 
         # 获取 Portfolio 持仓信息
         portfolio = self.close_strategy.get_portfolio()
@@ -1539,6 +1547,7 @@ class SpreadArbBot:
     # ========== 保留旧方法以兼容其他调用 ==========
     async def _process_closing_taker_mode(self, total_quantity: Decimal, entry_spread: Decimal) -> None:
         """处理Taker模式平仓（原有逻辑）"""
+        self._last_close_order_ts = time.time()
         self._notify_close_in_progress("市价", total_quantity)
         # 创建一个临时 Position 对象用于 execute_close_position
         # 因为 execute_close_position 需要 Position 参数
@@ -4903,6 +4912,87 @@ class SpreadArbBot:
         taker_threshold = mean + (taker_sigma * std)
         return mean, maker_threshold, taker_threshold, std
 
+    async def _maybe_detect_liquidation(self) -> bool:
+        """检测疑似清算并立即强制平仓另一边"""
+        try:
+            state = self.state_manager.get_state()
+            if state != BotState.HOLDING:
+                return False
+            now = time.time()
+            if self._last_close_order_ts and now - self._last_close_order_ts < 5.0:
+                return False
+
+            snapshot = await self.position_balance_monitor.get_position_balance()
+            if not snapshot or not snapshot.extended or not snapshot.lighter:
+                return False
+
+            prev = self._last_balance_snapshot
+            self._last_balance_snapshot = snapshot
+            if not prev or not prev.extended or not prev.lighter:
+                return False
+
+            min_qty = Decimal("0.001")
+            balance_eps = Decimal("0.01")
+            ext_prev = prev.extended.current_position
+            lig_prev = prev.lighter.current_position
+            ext_cur = snapshot.extended.current_position
+            lig_cur = snapshot.lighter.current_position
+            ext_bal_cur = snapshot.extended.total_balance
+            lig_bal_cur = snapshot.lighter.total_balance
+
+            side = None
+            if ext_prev > min_qty and ext_cur <= min_qty and lig_cur > min_qty and ext_bal_cur <= balance_eps:
+                side = "extended"
+            elif lig_prev > min_qty and lig_cur <= min_qty and ext_cur > min_qty and lig_bal_cur <= balance_eps:
+                side = "lighter"
+            else:
+                return False
+
+            confirm = await self.position_balance_monitor.get_position_balance(force_refresh=True)
+            if not confirm or not confirm.extended or not confirm.lighter:
+                return False
+
+            ext_cur2 = confirm.extended.current_position
+            lig_cur2 = confirm.lighter.current_position
+            ext_bal2 = confirm.extended.total_balance
+            lig_bal2 = confirm.lighter.total_balance
+            if side == "extended":
+                if not (ext_cur2 <= min_qty and lig_cur2 > min_qty and ext_bal2 <= balance_eps):
+                    return False
+            else:
+                if not (lig_cur2 <= min_qty and ext_cur2 > min_qty and lig_bal2 <= balance_eps):
+                    return False
+
+            lines = [
+                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"交易对: {self.config.symbol}",
+                f"疑似清算: {side}",
+                f"前仓位: Ext={ext_prev} Lig={lig_prev}",
+                f"现仓位: Ext={ext_cur2} Lig={lig_cur2}",
+                "动作: 立即强制平仓另一边",
+            ]
+            recent_logs = self._get_recent_log_tail(20)
+            if recent_logs:
+                lines.append("终端上下文(最近20行):")
+                lines.extend(recent_logs)
+            self._notify("⚠️ 疑似清算", lines)
+
+            await self._force_close_positions()
+
+            final_snapshot = await self.position_balance_monitor.get_position_balance(force_refresh=True)
+            if final_snapshot and final_snapshot.extended and final_snapshot.lighter:
+                ext_final = final_snapshot.extended.current_position
+                lig_final = final_snapshot.lighter.current_position
+                if abs(ext_final) <= min_qty and abs(lig_final) <= min_qty:
+                    self.state_manager.set_state(BotState.IDLE, "清算后已无仓位")
+                else:
+                    self.state_manager.set_state(BotState.HOLDING, "清算后仍有仓位，继续监控")
+                await self.state_manager.save_state()
+            return True
+        except Exception as e:
+            logger.warning(f"清算检测异常: {e}")
+            return False
+
     async def _check_bandwidth_gate(self) -> bool:
         """
         布林带带宽过滤：带宽过窄则暂停开仓
@@ -6954,6 +7044,7 @@ class SpreadArbBot:
             total_quantity: 平仓数量
         """
         logger.info(f"执行市价平仓: 数量={total_quantity}")
+        self._last_close_order_ts = time.time()
 
         try:
             # 清理 Maker 上下文，避免误触发补对冲
@@ -7043,6 +7134,7 @@ class SpreadArbBot:
             total_quantity: 平仓数量
         """
         logger.info(f"执行限价平仓: 数量={total_quantity}")
+        self._last_close_order_ts = time.time()
 
         try:
             from uuid import uuid4
